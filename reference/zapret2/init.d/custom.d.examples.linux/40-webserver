@@ -1,0 +1,39 @@
+# this custom script runs nfqws2 in server mode for typical webserver
+
+WEBSERVER_DEFAULT_STRATEGY="
+--server
+--payload=http_reply,tls_server_hello --lua-desync=fake:blob=0x00000000000000000000000000000000:badsum:repeats=2 --lua-desync=multisplit
+--payload=empty --lua-desync=synack_split"
+
+# can override in config :
+NFQWS_OPT_DESYNC_WEBSERVER="${NFQWS_OPT_DESYNC_WEBSERVER:-$WEBSERVER_DEFAULT_STRATEGY}"
+WEBSERVER_PORTS="${WEBSERVER_PORTS:-80,443}"
+WEBSERVER_PKT_OUT="${WEBSERVER_PKT_OUT:-15}"
+
+alloc_dnum DNUM_WEBSERVER
+alloc_qnum QNUM_WEBSERVER
+
+zapret_custom_daemons()
+{
+	# $1 - 1 - add, 0 - stop
+
+	local opt="--qnum=$QNUM_WEBSERVER $NFQWS_OPT_DESYNC_WEBSERVER"
+	do_nfqws $1 $DNUM_WEBSERVER "$opt"
+}
+zapret_custom_firewall()
+{
+	# $1 - 1 - run, 0 - stop
+
+	local PORTS=$(replace_char - : $WEBSERVER_PORTS)
+	local first_packets=$(ipt_first_packets $WEBSERVER_PKT_OUT)
+	local f="-p tcp -m multiport --sports $PORTS $first_packets"
+	fw_nfqws_post $1 "$f" "$f" $QNUM_WEBSERVER
+}
+zapret_custom_firewall_nft()
+{
+	# stop logic is not required
+
+	local first_packets=$(nft_first_packets $WEBSERVER_PKT_OUT)
+	local f="tcp sport {$WEBSERVER_PORTS} $first_packets"
+	nft_fw_nfqws_post "$f" "$f" $QNUM_WEBSERVER
+}

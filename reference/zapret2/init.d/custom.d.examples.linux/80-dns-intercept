@@ -1,0 +1,62 @@
+# this custom script feeds dns response data to main nfqws2 instance
+# DISABLE_IPV{4,6} filters are not used intentionally. despite of not having wan ipv6 it's possible to query LAN DNS server over local ipv6
+
+zapret_custom_firewall()
+{
+	# $1 - 1 - run, 0 - stop
+	local filt="-p udp --sport 53"
+	local jump="-j NFQUEUE --queue-num $QNUM --queue-bypass"
+	local rule chain lan lanifs
+
+	get_lanif lanifs
+
+	# router
+	for lan in $lanifs; do
+		rule="-o $lan $filt $jump"
+		ipt_print_op $1 "$rule" "nfqws FORWARD (qnum $QNUM)"
+		ipt_add_del $1 FORWARD -t mangle $rule
+		ipt_print_op $1 "$rule" "nfqws FORWARD (qnum $QNUM)" 6
+		ipt6_add_del $1 FORWARD -t mangle $rule
+	done
+	# dns client server
+	for chain in INPUT OUTPUT ; do
+		rule="$filt $jump"
+		ipt_print_op $1 "$rule" "nfqws $chain (qnum $QNUM)"
+		ipt_add_del $1 $chain -t mangle $rule
+		ipt_print_op $1 "$rule" "nfqws $chain (qnum $QNUM)" 6
+		ipt6_add_del $1 $chain -t mangle $rule
+	done
+}
+
+zapret_custom_firewall_nft()
+{
+	# stop logic is not required
+
+	local rule="udp sport 53 queue num $QNUM bypass"
+
+	# router
+	nft_print_op "oifname @lanif $rule" "nfqws forward (qnum $QNUM)" "4+6"
+	nft_add_chain forward_dns_feed "type filter hook forward priority mangle;"
+	nft_flush_chain forward_dns_feed
+	nft_add_rule forward_dns_feed oifname @lanif $rule
+
+	# dns client
+	nft_print_op "$rule" "nfqws input (qnum $QNUM)" "4+6"
+	nft_add_chain input_dns_feed "type filter hook input priority mangle;"
+	nft_flush_chain input_dns_feed
+	nft_add_rule input_dns_feed $rule
+
+	# dns server
+	nft_print_op "$rule" "nfqws output (qnum $QNUM)" "4+6"
+	nft_add_chain output_dns_feed "type filter hook output priority mangle;"
+	nft_flush_chain output_dns_feed
+	nft_add_rule output_dns_feed $rule
+}
+
+zapret_custom_firewall_nft_flush()
+{
+	local chain
+	for chain in forward_dns_feed input_dns_feed output_dns_feed; do
+		nft_del_chain $chain 2>/dev/null
+	done
+}

@@ -1,0 +1,211 @@
+# init script functions library for desktop linux systems
+
+ZAPRET_BASE=${ZAPRET_BASE:-/opt/zapret2}
+ZAPRET_RW=${ZAPRET_RW:-"$ZAPRET_BASE"}
+ZAPRET_CONFIG=${ZAPRET_CONFIG:-"$ZAPRET_RW/config"}
+. "$ZAPRET_CONFIG"
+. "$ZAPRET_BASE/common/base.sh"
+. "$ZAPRET_BASE/common/fwtype.sh"
+. "$ZAPRET_BASE/common/linux_iphelper.sh"
+. "$ZAPRET_BASE/common/ipt.sh"
+. "$ZAPRET_BASE/common/nft.sh"
+. "$ZAPRET_BASE/common/linux_fw.sh"
+. "$ZAPRET_BASE/common/linux_daemons.sh"
+. "$ZAPRET_BASE/common/list.sh"
+. "$ZAPRET_BASE/common/custom.sh"
+CUSTOM_DIR="$ZAPRET_RW/init.d/sysv"
+
+
+user_exists()
+{
+	id -u $1 >/dev/null 2>/dev/null
+}
+useradd_compat()
+{
+	# $1 - username
+	# skip for readonly systems
+	[ -w "/etc" ] && {
+		if exists useradd ; then
+			useradd --no-create-home --system --shell /bin/false $1
+		elif is_linked_to_busybox adduser ; then
+			# some systems may miss nogroup group in /etc/group
+			# adduser fails if it's absent and no group is specified
+			addgroup nogroup 2>/dev/null
+			# busybox has special adduser syntax
+			adduser -S -H -D $1
+		elif exists adduser; then
+			adduser --no-create-home --system --disabled-login $1
+		fi
+	}
+	user_exists $1
+}
+prepare_user()
+{
+	user_exists $WS_USER || {
+		# fallback to daemon if we cant add WS_USER
+		useradd_compat $WS_USER || {
+			for user in daemon nobody; do
+				user_exists $user && {
+					WS_USER=$user
+					return 0
+				}
+			done
+			return 1
+		}
+	}
+}
+
+# this complex user selection allows to survive in any locked/readonly/minimalistic environment
+[ -n "$WS_USER" ] || WS_USER=tpws
+if prepare_user; then
+ USEROPT="--user=$WS_USER"
+else
+ WS_USER=1
+ USEROPT="--uid $WS_USER:$WS_USER"
+fi
+
+PIDDIR=/var/run
+IPSET_CR="$ZAPRET_BASE/ipset/create_ipset.sh"
+
+DESYNC_MARK=${DESYNC_MARK:-0x40000000}
+DESYNC_MARK_POSTNAT=${DESYNC_MARK_POSTNAT:-0x20000000}
+
+QNUM=${QNUM:-300}
+NFQWS2="${NFQWS2:-$ZAPRET_BASE/nfq2/nfqws2}"
+LUAOPT="--lua-init=@$ZAPRET_BASE/lua/zapret-lib.lua --lua-init=@$ZAPRET_BASE/lua/zapret-antidpi.lua --lua-init=@$ZAPRET_BASE/lua/zapret-auto.lua"
+NFQWS2_OPT_BASE="$USEROPT --fwmark=$DESYNC_MARK $LUAOPT"
+
+get_wanif46()
+{
+	# $1 - 4/6
+	# $2 - var to receive interface list
+	case $1 in
+		6)
+			eval $2="\${IFACE_WAN6:-$IFACE_WAN}"
+			;;
+		4)
+			eval $2="\$IFACE_WAN"
+			;;
+		*)
+			eval $2=
+	esac
+}
+get_lanif()
+{
+	# $1 - var to receive interface list
+	eval $1="\$IFACE_LAN"
+}
+
+fw_nfqws_post4()
+{
+	_fw_nfqws_post4  $1 "$2" $3 "$IFACE_WAN"
+}
+fw_nfqws_post6()
+{
+	_fw_nfqws_post6  $1 "$2" $3 "${IFACE_WAN6:-$IFACE_WAN}"
+}
+fw_nfqws_pre4()
+{
+	_fw_nfqws_pre4  $1 "$2" $3 "$IFACE_WAN"
+}
+fw_nfqws_pre6()
+{
+	_fw_nfqws_pre6  $1 "$2" $3 "${IFACE_WAN6:-$IFACE_WAN}"
+}
+nft_fw_nfqws_post4()
+{
+	_nft_fw_nfqws_post4 "$1" $2 "$IFACE_WAN"
+}
+nft_fw_nfqws_post6()
+{
+	_nft_fw_nfqws_post6 "$1" $2 "${IFACE_WAN6:-$IFACE_WAN}"
+}
+nft_fw_nfqws_pre4()
+{
+	_nft_fw_nfqws_pre4 "$1" $2 "$IFACE_WAN"
+}
+nft_fw_nfqws_pre6()
+{
+	_nft_fw_nfqws_pre6 "$1" $2 "${IFACE_WAN6:-$IFACE_WAN}"
+}
+
+nft_wanif_filter_present()
+{
+	[ -n "$IFACE_WAN" ]
+}
+nft_wanif6_filter_present()
+{
+	[ -n "${IFACE_WAN6:-$IFACE_WAN}" ]
+}
+nft_fill_ifsets_overload()
+{
+	nft_fill_ifsets "$IFACE_LAN" "$IFACE_WAN" "${IFACE_WAN6:-$IFACE_WAN}"
+}
+
+
+run_daemon()
+{
+	# $1 - daemon number : 1,2,3,...
+	# $2 - daemon
+	# $3 - daemon args
+	# use $PIDDIR/$DAEMONBASE$1.pid as pidfile
+
+	local DAEMONBASE="$(basename "$2")"
+	local PID= PIDFILE=$PIDDIR/${DAEMONBASE}_$1.pid
+	echo "Starting daemon $1: $2 $3"
+
+	[ -f "$PIDFILE" ] && {
+		read PID <"$PIDFILE"
+		[ -d "/proc/$PID" ] || PID=
+	}
+
+	if [ -n "$PID" ]; then
+		echo already running
+	else
+		"$2" $3 >/dev/null &
+		PID=$!
+		if [ -n "$PID" ]; then
+			echo $PID >$PIDFILE
+		else
+			echo could not start daemon $1 : $2 $3
+			false
+		fi
+	fi
+}
+stop_daemon()
+{
+	# $1 - daemon number : 1,2,3,...
+	# $2 - daemon
+	# use $PIDDIR/$DAEMONBASE$1.pid as pidfile
+	local DAEMONBASE="$(basename "$2")"
+	local PID PIDFILE=$PIDDIR/${DAEMONBASE}_$1.pid
+	echo "Stopping daemon $1: $2"
+	if [ -f "$PIDFILE" ]; then
+		read PID <"$PIDFILE"
+		kill $PID
+		rm -f "$PIDFILE"
+	else
+		echo no pidfile : $PIDFILE
+	fi
+}
+do_daemon()
+{
+	# $1 - 1 - run, 0 - stop
+	on_off_function run_daemon stop_daemon "$@"
+}
+
+do_nfqws()
+{
+	# $1 : 1 - run, 0 - stop
+	# $2 : daemon number
+	# $3 : daemon args
+
+	do_daemon $1 $2 "$NFQWS2" "$NFQWS2_OPT_BASE $3"
+}
+
+
+create_ipset()
+{
+	echo "Creating ip list table (firewall type $FWTYPE)"
+	"$IPSET_CR" "$@"
+}

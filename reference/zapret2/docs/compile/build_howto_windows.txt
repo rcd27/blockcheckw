@@ -1,0 +1,36 @@
+Windows x64
+
+1) Download latest cygwin for windows 7
+
+curl -O https://www.cygwin.com/setup-x86_64.exe
+setup-x86_64.exe --allow-unsupported-windows --no-verify --site http://ctm.crouchingtigerhiddenfruitbat.org/pub/cygwin/circa/64bit/2024/01/30/231215
+
+2) During setup install packages : make gcc-core zlib-devel
+
+3) Run Cygwin.bat
+
+4) install and compile luajit from here : https://github.com/openresty/luajit2
+
+download latest release, unpack, cd to it's directory
+
+make BUILDMODE=static CFLAGS="-Os -DLUAJIT_DISABLE_FFI -ffat-lto-objects -flto=auto -ffunction-sections -fdata-sections -fvisibility=hidden"
+make install
+
+5) cd to %ZAPRET_BASE%/nfq2
+
+cd C:/Users/user/Downloads/zapret2/nfq2
+
+6) Compile nfqws2
+
+make cygwin64
+
+use winws2.exe
+
+7) Take windivert.dll and windivert64.sys here : https://reqrypt.org/download
+Choose version 2.2.2 for Windows 10 and 2.2.0 for Windows 7.
+
+8) Copy cygwin1.dll, winws2.exe, windivert.dll and windivert64.sys to one folder.
+
+9) Run winws2.exe from cmd.exe running as administrator.
+winws2 will not run from cygwin shell with cygwin1.dll copy in it's folder.
+winws2 will not run without cygwin1.dll outside of cygwin shell.

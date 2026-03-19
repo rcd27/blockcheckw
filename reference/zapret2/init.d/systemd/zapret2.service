@@ -1,0 +1,16 @@
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+Restart=no
+TimeoutSec=30sec
+IgnoreSIGPIPE=no
+GuessMainPID=no
+RemainAfterExit=no
+ExecStart=/opt/zapret2/init.d/sysv/zapret2 start
+ExecStop=/opt/zapret2/init.d/sysv/zapret2 stop
+
+[Install]
+WantedBy=multi-user.target

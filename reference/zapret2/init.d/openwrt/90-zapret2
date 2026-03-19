@@ -1,0 +1,33 @@
+#!/bin/sh
+
+ZAPRET=/etc/init.d/zapret2
+
+[ -n "$INTERFACE" ] && [ "$ACTION" = ifup -o "$ACTION" = ifdown ] && [ -x "$ZAPRET" ] && "$ZAPRET" enabled && {
+	SCRIPT=$(readlink "$ZAPRET")
+	if [ -n "$SCRIPT" ]; then
+		EXEDIR=$(dirname "$SCRIPT")
+		ZAPRET_BASE=$(readlink -f "$EXEDIR/../..")
+	else
+		ZAPRET_BASE=/opt/zapret2
+	fi
+	ZAPRET_RW=${ZAPRET_RW:-"$ZAPRET_BASE"}
+	ZAPRET_CONFIG=${ZAPRET_CONFIG:-"$ZAPRET_RW/config"}
+	CUSTOM_DIR="$ZAPRET_RW/init.d/openwrt"
+	. "$ZAPRET_CONFIG"
+	. "$ZAPRET_BASE/common/base.sh"
+	. "$ZAPRET_BASE/common/fwtype.sh"
+
+	linux_fwtype
+	case "$FWTYPE" in
+		nftables)
+			logger -t zapret reloading nftables ifsets due to $ACTION of $INTERFACE
+			"$ZAPRET" reload_ifsets
+			;;
+		iptables)
+			openwrt_fw3 || {
+				logger -t zapret reloading iptables due to $ACTION of $INTERFACE
+				"$ZAPRET" restart_fw
+			}
+			;;
+	esac
+}

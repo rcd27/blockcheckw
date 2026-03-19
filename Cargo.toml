@@ -1,0 +1,29 @@
+[package]
+name = "blockcheckw"
+version = "0.1.9"
+edition = "2021"
+description = "blockcheck.sh wrapper for better scanning speed"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "process", "time", "signal", "macros"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indicatif = "0.17"
+console = "0.15"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+
+[dev-dependencies]
+libc = "0.2"
+
+[[test]]
+name = "parallel_benchmark"
+path = "tests/parallel_benchmark.rs"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"

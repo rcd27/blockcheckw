@@ -1,0 +1,107 @@
+How to compile native programs for use in openwrt
+-------------------------------------------------
+
+1) Install required packages to the host system :
+
+debian,ubuntu : apt install build-essential patch libncurses-dev python3-distutils unzip gawk wget git
+fedora: dnf install make patch gcc g++ ncurses-devel git perl
+
+Other packages may be required on your distribution. Look for the errors.
+
+2) Download latest SDK for your target platform from https://downloads.openwrt.org
+
+examples :
+
+curl -o - https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz | tar -Jxv
+cd openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64
+
+curl -o - https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst | tar --zstd -xv
+cd openwrt-sdk-x86-64_gcc-13.3.0_musl.Linux-x86_64
+
+3) Install required libs
+
+./scripts/feeds update base packages
+./scripts/feeds install libnetfilter-queue zlib libcap luajit
+
+4) If you need static build edit `feeds/packages/lang/luajit/Makefile`
+
+change BUILDMODE from "dynamic" to "mixed"
+
+add '$(CP) $(PKG_INSTALL_DIR)/usr/lib/*a $(1)/usr/lib/'
+after '$(CP) $(PKG_INSTALL_DIR)/usr/lib/*so* $(1)/usr/lib/'
+
+should look like :
+
+define Build/Compile
+        $(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR) \
+                HOST_CC="$(HOSTCC) $(HOST_CFLAGS) $(HOST_BITS)" \
+                CROSS="$(TARGET_CROSS)" \
+                DPREFIX=$(PKG_INSTALL_DIR)/usr \
+                PREFIX=/usr \
+                TARGET_SYS=Linux \
+                TARGET_CFLAGS="$(TARGET_CFLAGS)" \
+                BUILDMODE=mixed
+        rm -rf $(PKG_INSTALL_DIR)
+        mkdir -p $(PKG_INSTALL_DIR)
+        $(MAKE) -C $(PKG_BUILD_DIR) \
+                DPREFIX=$(PKG_INSTALL_DIR)/usr \
+                PREFIX=/usr \
+                TARGET_SYS=Linux \
+                install
+endef
+
+define Build/InstallDev
+	$(INSTALL_DIR) $(1)/usr/include/luajit-2.1
+	$(CP) $(PKG_INSTALL_DIR)/usr/include/luajit-2.1/*.{h,hpp} $(1)/usr/include/luajit-2.1
+	$(INSTALL_DIR) $(1)/usr/lib
+	$(CP) $(PKG_INSTALL_DIR)/usr/lib/*so* $(1)/usr/lib/
+	$(CP) $(PKG_INSTALL_DIR)/usr/lib/*a $(1)/usr/lib/
+	$(INSTALL_DIR) $(1)/usr/lib/pkgconfig
+	$(CP) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/luajit.pc $(1)/usr/lib/pkgconfig/
+	$(CP) $(PKG_INSTALL_DIR)/usr/bin/luajit-$(PKG_VERSION) $(PKG_INSTALL_DIR)/usr/bin/$(PKG_NAME)
+endef
+
+5) Prepare openwrt package definitions
+
+cp -R /opt/zapret2/docs/compile/openwrt/. .
+cp -R /opt/zapret2/nfq2 package/zapret/nfqws2
+cp -R /opt/zapret2/mdig package/zapret/mdig
+cp -R /opt/zapret2/ip2net package/zapret/ip2net
+
+6) Prepare .config
+
+make defconfig
+
+If you only need bins without packages comment 'CONFIG_AUTOREMOVE=y' line in .config
+Change 'y' to 'n' in Config.in 
+
+should look like :
+
+config AUTOREMOVE
+	bool "Automatic removal of build directories"
+	default n
+
+and in Config-build.in 
+should look like :
+
+config AUTOREMOVE
+	bool
+	default n
+
+7) Compile
+
+dynamic build : make package/{nfqws2,mdig,ip2net}/compile
+static build :  make CFLAGS=-static LDFLAGS=-lgcc_eh package/{nfqws2,mdig,ip2net}/compile
+
+8) Get result
+
+executables only : build_dir/target/<progname>
+ipk or apk packages : bin/packages/*/base
+
+9) Installing to openwrt to use with zapret
+
+zapret with or without binaries should be already installed in /opt/zapret2.
+Install ipk's or apk's with all compiled progs using opkg or apk.
+Bins are placed to /opt/zapret2/binaries/my.
+Or copy binaries there manually and set chmod 755 to them.
+Run install_bin.sh or install_easy.sh. They will use bins in 'my' folder.

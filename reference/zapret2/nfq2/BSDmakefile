@@ -1,0 +1,48 @@
+CC ?= cc
+PKG_CONFIG ?= pkg-config
+OPTIMIZE ?= -Oz
+MINSIZE ?= -flto=auto -ffunction-sections -fdata-sections
+STRIPP = -s
+CFLAGS_PIC = -fPIC
+CFLAGS += -std=gnu99  $(OPTIMIZE) $(MINSIZE) $(CFLAGS_PIC) -Wno-address-of-packed-member
+LDFLAGS_PIE = -pie
+LDFLAGS += -flto=auto -Wl,--gc-sections $(LDFLAGS_PIE)
+LIBS = -lz -lm
+SRC_FILES = *.c crypto/*.c
+
+LUA_JIT ?= 1
+
+.if "${LUA_JIT}" == "1"
+
+LUAJIT_VER?=2.1
+LUA_VER?=5.1
+LUA_PKG:=luajit
+
+.else
+
+LUA_VER ?= 5.5
+LUA_VER_UNDOTTED!= echo $(LUA_VER) | sed 's/\.//g'
+
+OSNAME!=uname
+.if ${OSNAME} == "OpenBSD"
+ LUA_PKG ?= lua$(LUA_VER_UNDOTTED)
+.elif ${OSNAME} == "FreeBSD"
+ LUA_PKG ?= lua-$(LUA_VER)
+.endif
+
+.endif
+
+LUA_LIB!= $(PKG_CONFIG) --libs $(LUA_PKG)
+LUA_CFLAGS!= $(PKG_CONFIG) --cflags $(LUA_PKG)
+
+.if "${LUA_JIT}" == "1"
+LUA_CFLAGS+=-DLUAJIT
+.endif
+
+all: dvtws2
+
+dvtws2: $(SRC_FILES)
+	$(CC) $(STRIPP) $(CFLAGS) $(LUA_CFLAGS) -o dvtws2 $(SRC_FILES) $(LIBS) $(LUA_LIB) $(LDFLAGS)
+
+clean:
+	rm -f dvtws2

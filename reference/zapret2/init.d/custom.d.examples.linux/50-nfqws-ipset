@@ -1,0 +1,144 @@
+# this custom script demonstrates how to launch extra nfqws instance limited by ipset
+
+# can override in config :
+NFQWS2_MY1_OPT="${NFQWS2_MY1_OPT:---filter-udp=* --payload=known,unknown --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2:payload=all --new --filter-tcp=* --payload=known,unknown --lua-desync=multisplit}"
+NFQWS2_MY1_SUBNETS4="${NFQWS2_MY1_SUBNETS4:-173.194.0.0/16 108.177.0.0/17 74.125.0.0/16 64.233.160.0/19 172.217.0.0/16}"
+NFQWS2_MY1_SUBNETS6="${NFQWS2_MY1_SUBNETS6:-2a00:1450::/29}"
+NFQWS2_MY1_PORTS_TCP=${NFQWS2_MY1_PORTS_TCP:-$NFQWS2_PORTS_TCP}
+NFQWS2_MY1_PORTS_UDP=${NFQWS2_MY1_PORTS_UDP:-$NFQWS2_PORTS_UDP}
+NFQWS2_MY1_TCP_PKT_OUT=${NFQWS2_MY1_TCP_PKT_OUT:-$NFQWS2_TCP_PKT_OUT}
+NFQWS2_MY1_UDP_PKT_OUT=${NFQWS2_MY1_UDP_PKT_OUT:-$NFQWS2_UDP_PKT_OUT}
+NFQWS2_MY1_TCP_PKT_IN=${NFQWS2_MY1_TCP_PKT_IN:-$NFQWS2_TCP_PKT_IN}
+NFQWS2_MY1_UDP_PKT_IN=${NFQWS2_MY1_UDP_PKT_IN:-$NFQWS2_UDP_PKT_IN}
+
+NFQWS2_MY1_IPSET_SIZE=${NFQWS2_MY1_IPSET_SIZE:-4096}
+NFQWS2_MY1_IPSET_OPT="${NFQWS2_MY1_IPSET_OPT:-hash:net hashsize 8192 maxelem $NFQWS2_MY1_IPSET_SIZE}"
+
+alloc_dnum DNUM_NFQWS2_MY1
+alloc_qnum QNUM_NFQWS2_MY1
+NFQWS2_MY1_NAME4=my1nfqws4
+NFQWS2_MY1_NAME6=my1nfqws6
+
+zapret_custom_daemons()
+{
+	# $1 - 1 - run, 0 - stop
+
+	local opt="--qnum=$QNUM_NFQWS2_MY1 $NFQWS2_MY1_OPT"
+	do_nfqws $1 $DNUM_NFQWS2_MY1 "$opt"
+}
+
+zapret_custom_firewall()
+{
+	# $1 - 1 - run, 0 - stop
+
+	local f4 f6 subnet
+	local NFQWS2_MY1_PORTS_TCP=$(replace_char - : $NFQWS2_MY1_PORTS_TCP)
+	local NFQWS2_MY1_PORTS_UDP=$(replace_char - : $NFQWS2_MY1_PORTS_UDP)
+
+	[ "$1" = 1 -a "$DISABLE_IPV4" != 1 ] && {
+		ipset create $NFQWS2_MY1_NAME4 $NFQWS2_MY1_IPSET_OPT family inet 2>/dev/null
+		ipset flush $NFQWS2_MY1_NAME4
+		for subnet in $NFQWS2_MY1_SUBNETS4; do
+			echo add $NFQWS2_MY1_NAME4 $subnet
+		done | ipset -! restore
+	}
+	[ "$1" = 1 -a "$DISABLE_IPV6" != 1 ] && {
+		ipset create $NFQWS2_MY1_NAME6 $NFQWS2_MY1_IPSET_OPT family inet6 2>/dev/null
+		ipset flush $NFQWS2_MY1_NAME6
+		for subnet in $NFQWS2_MY1_SUBNETS6; do
+			echo add $NFQWS2_MY1_NAME6 $subnet
+		done | ipset -! restore
+	}
+
+	[ -n "$NFQWS2_MY1_PORTS_TCP" ] && {
+		[ -n "$NFQWS2_MY1_TCP_PKT_OUT" -a "$NFQWS2_MY1_TCP_PKT_OUT" != 0 ] && {
+			f4="-p tcp -m multiport --dports $NFQWS2_MY1_PORTS_TCP $ipt_connbytes 1:$NFQWS2_MY1_TCP_PKT_OUT -m set --match-set"
+			f6="$f4 $NFQWS2_MY1_NAME6 dst"
+			f4="$f4 $NFQWS2_MY1_NAME4 dst"
+			fw_nfqws_post $1 "$f4" "$f6" $QNUM_NFQWS2_MY1
+		}
+		[ -n "$NFQWS2_MY1_TCP_PKT_IN" -a "$NFQWS2_MY1_TCP_PKT_IN" != 0 ] && {
+			f4="-p tcp -m multiport --sports $NFQWS2_MY1_PORTS_TCP $ipt_connbytes 1:$NFQWS2_MY1_TCP_PKT_IN -m set --match-set"
+			f6="$f4 $NFQWS2_MY1_NAME6 src"
+			f4="$f4 $NFQWS2_MY1_NAME4 src"
+			fw_nfqws_pre $1 "$f4" "$f6" $QNUM_NFQWS2_MY1
+		}
+	}
+	[ -n "$NFQWS2_MY1_PORTS_UDP" ] && {
+		[ -n "$NFQWS2_MY1_UDP_PKT_OUT" -a "$NFQWS2_MY1_UDP_PKT_OUT" != 0 ] && {
+			f4="-p udp -m multiport --dports $NFQWS2_MY1_PORTS_UDP $ipt_connbytes 1:$NFQWS2_MY1_UDP_PKT_OUT -m set --match-set"
+			f6="$f4 $NFQWS2_MY1_NAME6 dst"
+			f4="$f4 $NFQWS2_MY1_NAME4 dst"
+			fw_nfqws_post $1 "$f4" "$f6" $QNUM_NFQWS2_MY1
+		}
+		[ -n "$NFQWS2_MY1_UDP_PKT_IN" -a "$NFQWS2_MY1_UDP_PKT_IN" != 0 ] && {
+			f4="-p udp -m multiport --sports $NFQWS2_MY1_PORTS_UDP $ipt_connbytes 1:$NFQWS2_MY1_UDP_PKT_IN -m set --match-set"
+			f6="$f4 $NFQWS2_MY1_NAME6 src"
+			f4="$f4 $NFQWS2_MY1_NAME4 src"
+			fw_nfqws_pre $1 "$f4" "$f6" $QNUM_NFQWS2_MY1
+		}
+	}
+
+	[ "$1" = 1 ] || {
+		ipset destroy $NFQWS2_MY1_NAME4 2>/dev/null
+		ipset destroy $NFQWS2_MY1_NAME6 2>/dev/null
+	}
+}
+
+zapret_custom_firewall_nft()
+{
+	local f4 f6 subnets
+	local first_packets_only="$nft_connbytes 1-$NFQWS2_MY1_PKT_OUT"
+
+	[ "$DISABLE_IPV4" != 1 ] && {
+		make_comma_list subnets $NFQWS2_MY1_SUBNETS4
+		nft_create_set $NFQWS2_MY1_NAME4 "type ipv4_addr; size $NFQWS2_MY1_IPSET_SIZE; auto-merge; flags interval;"
+		nft_flush_set $NFQWS2_MY1_NAME4
+		nft_add_set_element $NFQWS2_MY1_NAME4 "$subnets"
+	}
+	[ "$DISABLE_IPV6" != 1 ] && {
+		make_comma_list subnets $NFQWS2_MY1_SUBNETS6
+		nft_create_set $NFQWS2_MY1_NAME6 "type ipv6_addr; size $NFQWS2_MY1_IPSET_SIZE; auto-merge; flags interval;"
+		nft_flush_set $NFQWS2_MY1_NAME6
+		nft_add_set_element $NFQWS2_MY1_NAME6 "$subnets"
+	}
+
+	[ -n "$NFQWS2_MY1_PORTS_TCP" ] && {
+		[ -n "$NFQWS2_MY1_TCP_PKT_OUT" -a "$NFQWS2_MY1_TCP_PKT_OUT" != 0 ] && {
+			f4="tcp dport {$NFQWS2_MY1_PORTS_TCP} $(nft_first_packets $NFQWS2_MY1_TCP_PKT_OUT)"
+			f6="$f4 ip6 daddr @$NFQWS2_MY1_NAME6"
+			f4="$f4 ip daddr @$NFQWS2_MY1_NAME4"
+			nft_fw_nfqws_post $1 "$f4" "$f6" $QNUM_NFQWS2_MY1
+		}
+		[ -n "$NFQWS2_MY1_TCP_PKT_IN" -a "$NFQWS2_MY1_TCP_PKT_IN" != 0 ] && {
+			f4="tcp sport {$NFQWS2_MY1_PORTS_TCP} $(nft_first_packets $NFQWS2_MY1_TCP_PKT_IN)"
+			f6="$f4 ip6 saddr @$NFQWS2_MY1_NAME6"
+			f4="$f4 ip saddr @$NFQWS2_MY1_NAME4"
+			nft_fw_nfqws_pre $1 "$f4" "$f6" $QNUM_NFQWS2_MY1
+		}
+	}
+	[ -n "$NFQWS2_MY1_PORTS_UDP" ] && {
+		[ -n "$NFQWS2_MY1_UDP_PKT_OUT" -a "$NFQWS2_MY1_UDP_PKT_OUT" != 0 ] && {
+			f4="udp dport {$NFQWS2_MY1_PORTS_UDP} $(nft_first_packets $NFQWS2_MY1_UDP_PKT_OUT)"
+			f6="$f4 ip6 daddr @$NFQWS2_MY1_NAME6"
+			f4="$f4 ip daddr @$NFQWS2_MY1_NAME4"
+			nft_fw_nfqws_post $1 "$f4" "$f6" $QNUM_NFQWS2_MY1
+		}
+		[ -n "$NFQWS2_MY1_UDP_PKT_IN" -a "$NFQWS2_MY1_UDP_PKT_IN" != 0 ] && {
+			f4="udp sport {$NFQWS2_MY1_PORTS_UDP} $(nft_first_packets $NFQWS2_MY1_UDP_PKT_IN)"
+			f6="$f4 ip6 saddr @$NFQWS2_MY1_NAME6"
+			f4="$f4 ip saddr @$NFQWS2_MY1_NAME4"
+			nft_fw_nfqws_pre $1 "$f4" "$f6" $QNUM_NFQWS2_MY1
+		}
+	}
+}
+
+
+zapret_custom_firewall_nft_flush()
+{
+	# this function is called after all nft fw rules are deleted
+	# however sets are not deleted. it's desired to clear sets here.
+
+	nft_del_set $NFQWS2_MY1_NAME4 2>/dev/null
+	nft_del_set $NFQWS2_MY1_NAME6 2>/dev/null
+}

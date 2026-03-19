@@ -31,13 +31,18 @@ const TLS_SPLITS: &[&str] = &[
     "1,midsld", "1,midsld,1220",
     "1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1",
 ];
+const TLS_SPLITS_FAKED: &[&str] = &[
+    "2", "1", "sniext+1", "sniext+4", "host+1", "midsld",
+    "1,midsld",
+    "1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1",
+];
 const SPLIT_METHODS: &[&str] = &["multisplit", "multidisorder"];
 
 const OOB_URPS: &[&str] = &["b", "0", "2", "midsld"];
 
 const FAKE_BLOBS_HTTP: &[&str] = &["fake_default_http", "0x00000000"];
-// Note: TLS fake blobs are hardcoded inside fake_https_vary() / fake_multi_tls_vary()
-// to match the Kotlin pktws_fake_https_vary pattern (5 sub-strategies).
+// Note: TLS fake blobs are hardcoded inside fake_https_vary()
+// (2 sub-strategies: base fake + 0x00000000 null-blob).
 
 const SEQOVL_SPLITS_HTTP: &[&str] = &["method+2", "method+2,midsld"];
 const SEQOVL_DISORDER_HTTP: &[(&str, &str)] = &[
@@ -458,7 +463,7 @@ fn fake_http() -> Vec<Strategy> {
     out
 }
 
-/// Helper: fake HTTPS vary (5 sub-strategies from pktws_fake_https_vary)
+/// Helper: fake HTTPS vary (2 sub-strategies per fooling)
 fn fake_https_vary(fooling: &str, payload: &str, fake: &str) -> Vec<Strategy> {
     let mut out = Vec::new();
 
@@ -469,19 +474,6 @@ fn fake_https_vary(fooling: &str, payload: &str, fake: &str) -> Vec<Strategy> {
     out.push(vec![
         payload.into(),
         format!("--lua-desync=fake:blob=0x00000000:{fooling}:repeats=1"),
-    ]);
-    out.push(vec![
-        payload.into(),
-        format!("--lua-desync=fake:blob=0x00000000:{fooling}:repeats=1"),
-        format!("--lua-desync=fake:blob={fake}:{fooling}:tls_mod=rnd,dupsid:repeats=1"),
-    ]);
-    out.push(vec![
-        payload.into(),
-        format!("--lua-desync=multisplit:blob={fake}:{fooling}:pos=2:nodrop:repeats=1"),
-    ]);
-    out.push(vec![
-        payload.into(),
-        format!("--lua-desync=fake:blob={fake}:{fooling}:tls_mod=rnd,dupsid,padencap:repeats=1"),
     ]);
 
     // SYN with MD5
@@ -494,22 +486,6 @@ fn fake_https_vary(fooling: &str, payload: &str, fake: &str) -> Vec<Strategy> {
         out.push(vec![
             payload.into(),
             format!("--lua-desync=fake:blob=0x00000000:{fooling}:repeats=1"),
-            "--payload=empty".into(), "--out-range=<s1".into(), "--lua-desync=send:tcp_md5".into(),
-        ]);
-        out.push(vec![
-            payload.into(),
-            format!("--lua-desync=fake:blob=0x00000000:{fooling}:repeats=1"),
-            format!("--lua-desync=fake:blob={fake}:{fooling}:tls_mod=rnd,dupsid:repeats=1"),
-            "--payload=empty".into(), "--out-range=<s1".into(), "--lua-desync=send:tcp_md5".into(),
-        ]);
-        out.push(vec![
-            payload.into(),
-            format!("--lua-desync=multisplit:blob={fake}:{fooling}:pos=2:nodrop:repeats=1"),
-            "--payload=empty".into(), "--out-range=<s1".into(), "--lua-desync=send:tcp_md5".into(),
-        ]);
-        out.push(vec![
-            payload.into(),
-            format!("--lua-desync=fake:blob={fake}:{fooling}:tls_mod=rnd,dupsid,padencap:repeats=1"),
             "--payload=empty".into(), "--out-range=<s1".into(), "--lua-desync=send:tcp_md5".into(),
         ]);
     }
@@ -638,7 +614,7 @@ fn faked_http() -> Vec<Strategy> {
     out
 }
 
-/// 30-faked.sh (TLS)
+/// 30-faked.sh (TLS) — uses TLS_SPLITS_FAKED (8 positions)
 fn faked_tls() -> Vec<Strategy> {
     let payload = "--payload=tls_client_hello";
     let splitfs = &["fakedsplit", "fakeddisorder"];
@@ -646,7 +622,7 @@ fn faked_tls() -> Vec<Strategy> {
 
     for &splitf in splitfs {
         for ttl in TTL_MIN..=TTL_MAX {
-            for &split in TLS_SPLITS {
+            for &split in TLS_SPLITS_FAKED {
                 out.push(vec![
                     payload.into(),
                     format!("--lua-desync={splitf}:pos={split}:ip_ttl={ttl}:repeats=1"),
@@ -661,7 +637,7 @@ fn faked_tls() -> Vec<Strategy> {
             }
         }
         for &fooling in FOOLINGS_TCP {
-            for &split in TLS_SPLITS {
+            for &split in TLS_SPLITS_FAKED {
                 out.push(vec![
                     payload.into(),
                     format!("--lua-desync={splitf}:pos={split}:{fooling}"),
@@ -678,7 +654,7 @@ fn faked_tls() -> Vec<Strategy> {
             }
         }
         for ttl in AUTOTTL_MIN..=AUTOTTL_MAX {
-            for &split in TLS_SPLITS {
+            for &split in TLS_SPLITS_FAKED {
                 out.push(vec![
                     payload.into(),
                     format!("--lua-desync={splitf}:pos={split}:ip_autottl=-{ttl},3-20:repeats=1"),
@@ -697,7 +673,7 @@ fn faked_tls() -> Vec<Strategy> {
     out
 }
 
-/// 30-faked.sh (TLS1.2 = TLS + wssize variants)
+/// 30-faked.sh (TLS1.2 = TLS + wssize variants) — uses TLS_SPLITS_FAKED
 fn faked_tls12() -> Vec<Strategy> {
     let mut out = faked_tls();
     let payload = "--payload=tls_client_hello";
@@ -705,7 +681,7 @@ fn faked_tls12() -> Vec<Strategy> {
 
     for &splitf in splitfs {
         for ttl in TTL_MIN..=TTL_MAX {
-            for &split in TLS_SPLITS {
+            for &split in TLS_SPLITS_FAKED {
                 out.push(vec![
                     "--lua-desync=wssize:wsize=1:scale=6".into(),
                     payload.into(),
@@ -722,7 +698,7 @@ fn faked_tls12() -> Vec<Strategy> {
             }
         }
         for &fooling in FOOLINGS_TCP {
-            for &split in TLS_SPLITS {
+            for &split in TLS_SPLITS_FAKED {
                 out.push(vec![
                     "--lua-desync=wssize:wsize=1:scale=6".into(),
                     payload.into(),
@@ -741,7 +717,7 @@ fn faked_tls12() -> Vec<Strategy> {
             }
         }
         for ttl in AUTOTTL_MIN..=AUTOTTL_MAX {
-            for &split in TLS_SPLITS {
+            for &split in TLS_SPLITS_FAKED {
                 out.push(vec![
                     "--lua-desync=wssize:wsize=1:scale=6".into(),
                     payload.into(),
@@ -955,78 +931,9 @@ fn fake_multi_http() -> Vec<Strategy> {
     out
 }
 
-/// Helper: fake + multi TLS vary (5 sub-strategies per combination)
-fn fake_multi_tls_vary(fooling: &str, splitf: &str, split: &str, fake: &str) -> Vec<Strategy> {
-    let payload = "--payload=tls_client_hello";
-    let mut out = Vec::new();
-
-    out.push(vec![
-        payload.into(),
-        format!("--lua-desync=fake:blob={fake}:{fooling}:repeats=1"),
-        format!("--lua-desync={splitf}:pos={split}"),
-    ]);
-    out.push(vec![
-        payload.into(),
-        format!("--lua-desync=fake:blob=0x00000000:{fooling}:repeats=1"),
-        format!("--lua-desync={splitf}:pos={split}"),
-    ]);
-    out.push(vec![
-        payload.into(),
-        format!("--lua-desync=fake:blob=0x00000000:{fooling}:repeats=1"),
-        format!("--lua-desync=fake:blob={fake}:{fooling}:tls_mod=rnd,dupsid:repeats=1"),
-        format!("--lua-desync={splitf}:pos={split}"),
-    ]);
-    out.push(vec![
-        payload.into(),
-        format!("--lua-desync=multisplit:blob={fake}:{fooling}:pos=2:nodrop:repeats=1"),
-        format!("--lua-desync={splitf}:pos={split}"),
-    ]);
-    out.push(vec![
-        payload.into(),
-        format!("--lua-desync=fake:blob={fake}:{fooling}:tls_mod=rnd,dupsid,padencap:repeats=1"),
-        format!("--lua-desync={splitf}:pos={split}"),
-    ]);
-
-    // SYN MD5
-    if fooling.contains("tcp_md5") {
-        out.push(vec![
-            payload.into(),
-            format!("--lua-desync=fake:blob={fake}:{fooling}:repeats=1"),
-            format!("--lua-desync={splitf}:pos={split}"),
-            "--payload=empty".into(), "--out-range=<s1".into(), "--lua-desync=send:tcp_md5".into(),
-        ]);
-        out.push(vec![
-            payload.into(),
-            format!("--lua-desync=fake:blob=0x00000000:{fooling}:repeats=1"),
-            format!("--lua-desync={splitf}:pos={split}"),
-            "--payload=empty".into(), "--out-range=<s1".into(), "--lua-desync=send:tcp_md5".into(),
-        ]);
-        out.push(vec![
-            payload.into(),
-            format!("--lua-desync=fake:blob=0x00000000:{fooling}:repeats=1"),
-            format!("--lua-desync=fake:blob={fake}:{fooling}:tls_mod=rnd,dupsid:repeats=1"),
-            format!("--lua-desync={splitf}:pos={split}"),
-            "--payload=empty".into(), "--out-range=<s1".into(), "--lua-desync=send:tcp_md5".into(),
-        ]);
-        out.push(vec![
-            payload.into(),
-            format!("--lua-desync=multisplit:blob={fake}:{fooling}:pos=2:nodrop:repeats=1"),
-            format!("--lua-desync={splitf}:pos={split}"),
-            "--payload=empty".into(), "--out-range=<s1".into(), "--lua-desync=send:tcp_md5".into(),
-        ]);
-        out.push(vec![
-            payload.into(),
-            format!("--lua-desync=fake:blob={fake}:{fooling}:tls_mod=rnd,dupsid,padencap:repeats=1"),
-            format!("--lua-desync={splitf}:pos={split}"),
-            "--payload=empty".into(), "--out-range=<s1".into(), "--lua-desync=send:tcp_md5".into(),
-        ]);
-    }
-
-    out
-}
-
-/// 50-fake-multi.sh (TLS)
+/// 50-fake-multi.sh (TLS) — 1 strategy per combination (like fake_multi_http)
 fn fake_multi_tls() -> Vec<Strategy> {
+    let payload = "--payload=tls_client_hello";
     let fake = "fake_default_tls";
     let mut out = Vec::new();
 
@@ -1034,42 +941,57 @@ fn fake_multi_tls() -> Vec<Strategy> {
         // TTL
         for ttl in TTL_MIN..=TTL_MAX {
             for &split in TLS_SPLITS {
-                let fooling = format!("ip_ttl={ttl}");
-                let vary = fake_multi_tls_vary(&fooling, splitf, split, fake);
-                out.extend(vary.clone());
-                // pktmod limiter
-                for s in &vary {
-                    let mut extended = s.clone();
-                    extended.extend([
-                        "--payload=empty".into(),
-                        "--out-range=s1<d1".into(),
-                        "--lua-desync=pktmod:ip_ttl=1".into(),
-                    ]);
-                    out.push(extended);
-                }
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:ip_ttl={ttl}:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}"),
+                ]);
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:ip_ttl={ttl}:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}"),
+                    "--payload=empty".into(),
+                    "--out-range=s1<d1".into(),
+                    "--lua-desync=pktmod:ip_ttl=1".into(),
+                ]);
             }
         }
         // foolings
         for &fooling in FOOLINGS_TCP {
             for &split in TLS_SPLITS {
-                out.extend(fake_multi_tls_vary(fooling, splitf, split, fake));
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:{fooling}:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}"),
+                ]);
+                if fooling.contains("tcp_md5") {
+                    out.push(vec![
+                        payload.into(),
+                        format!("--lua-desync=fake:blob={fake}:{fooling}:repeats=1"),
+                        format!("--lua-desync={splitf}:pos={split}"),
+                        "--payload=empty".into(),
+                        "--out-range=<s1".into(),
+                        "--lua-desync=send:tcp_md5".into(),
+                    ]);
+                }
             }
         }
         // autottl
         for ttl in AUTOTTL_MIN..=AUTOTTL_MAX {
             for &split in TLS_SPLITS {
-                let fooling = format!("ip_autottl=-{ttl},3-20");
-                let vary = fake_multi_tls_vary(&fooling, splitf, split, fake);
-                out.extend(vary.clone());
-                for s in &vary {
-                    let mut extended = s.clone();
-                    extended.extend([
-                        "--payload=empty".into(),
-                        "--out-range=s1<d1".into(),
-                        "--lua-desync=pktmod:ip_ttl=1".into(),
-                    ]);
-                    out.push(extended);
-                }
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:ip_autottl=-{ttl},3-20:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}"),
+                ]);
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:ip_autottl=-{ttl},3-20:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}"),
+                    "--payload=empty".into(),
+                    "--out-range=s1<d1".into(),
+                    "--lua-desync=pktmod:ip_ttl=1".into(),
+                ]);
             }
         }
     }
@@ -1077,25 +999,9 @@ fn fake_multi_tls() -> Vec<Strategy> {
     out
 }
 
-/// 50-fake-multi.sh (TLS1.2 = TLS + wssize variants)
+/// 50-fake-multi.sh (TLS1.2 = TLS without wssize doubling for triple combinations)
 fn fake_multi_tls12() -> Vec<Strategy> {
-    let base = fake_multi_tls();
-    let mut out = base.clone();
-    for s in &base {
-        let mut wssize = vec!["--lua-desync=wssize:wsize=1:scale=6".to_string()];
-        wssize.extend(s.clone());
-        out.push(wssize);
-    }
-    out
-}
-
-/// Helper: replace last split arg with extra params (for fake-faked TLS)
-fn replace_last_split_arg(args: &[String], splitf: &str, split: &str, extra: &str) -> Strategy {
-    let target = format!("--lua-desync={splitf}:pos={split}");
-    let replacement = format!("--lua-desync={splitf}:pos={split}:{extra}");
-    args.iter()
-        .map(|a| if *a == target { replacement.clone() } else { a.clone() })
-        .collect()
+    fake_multi_tls()
 }
 
 /// 55-fake-faked.sh — fake + fakedsplit/fakeddisorder combinations (HTTP)
@@ -1172,8 +1078,9 @@ fn fake_faked_http() -> Vec<Strategy> {
     out
 }
 
-/// 55-fake-faked.sh (TLS)
+/// 55-fake-faked.sh (TLS) — 1 strategy per combination (like fake_faked_http), uses TLS_SPLITS_FAKED
 fn fake_faked_tls() -> Vec<Strategy> {
+    let payload = "--payload=tls_client_hello";
     let fake = "fake_default_tls";
     let splitfs = &["fakedsplit", "fakeddisorder"];
     let mut out = Vec::new();
@@ -1181,47 +1088,58 @@ fn fake_faked_tls() -> Vec<Strategy> {
     for &splitf in splitfs {
         // TTL
         for ttl in TTL_MIN..=TTL_MAX {
-            for &split in TLS_SPLITS {
-                let fooling = format!("ip_ttl={ttl}");
-                for s in fake_multi_tls_vary(&fooling, splitf, split, fake) {
-                    out.push(replace_last_split_arg(&s, splitf, split, &format!("ip_ttl={ttl}:repeats=1")));
-                }
-                // pktmod
-                for s in fake_multi_tls_vary(&fooling, splitf, split, fake) {
-                    let mut replaced = replace_last_split_arg(&s, splitf, split, &format!("ip_ttl={ttl}:repeats=1"));
-                    replaced.extend([
-                        "--payload=empty".into(),
-                        "--out-range=s1<d1".into(),
-                        "--lua-desync=pktmod:ip_ttl=1".into(),
-                    ]);
-                    out.push(replaced);
-                }
+            for &split in TLS_SPLITS_FAKED {
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:ip_ttl={ttl}:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}:ip_ttl={ttl}:repeats=1"),
+                ]);
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:ip_ttl={ttl}:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}:ip_ttl={ttl}:repeats=1"),
+                    "--payload=empty".into(),
+                    "--out-range=s1<d1".into(),
+                    "--lua-desync=pktmod:ip_ttl=1".into(),
+                ]);
             }
         }
         // foolings
         for &fooling in FOOLINGS_TCP {
-            for &split in TLS_SPLITS {
-                for s in fake_multi_tls_vary(fooling, splitf, split, fake) {
-                    out.push(replace_last_split_arg(&s, splitf, split, &format!("{fooling}:repeats=1")));
+            for &split in TLS_SPLITS_FAKED {
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:{fooling}:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}:{fooling}:repeats=1"),
+                ]);
+                if fooling.contains("tcp_md5") {
+                    out.push(vec![
+                        payload.into(),
+                        format!("--lua-desync=fake:blob={fake}:{fooling}:repeats=1"),
+                        format!("--lua-desync={splitf}:pos={split}:{fooling}:repeats=1"),
+                        "--payload=empty".into(),
+                        "--out-range=<s1".into(),
+                        "--lua-desync=send:tcp_md5".into(),
+                    ]);
                 }
             }
         }
         // autottl
         for ttl in AUTOTTL_MIN..=AUTOTTL_MAX {
-            for &split in TLS_SPLITS {
-                let fooling = format!("ip_autottl=-{ttl},3-20");
-                for s in fake_multi_tls_vary(&fooling, splitf, split, fake) {
-                    out.push(replace_last_split_arg(&s, splitf, split, &format!("ip_autottl=-{ttl},3-20:repeats=1")));
-                }
-                for s in fake_multi_tls_vary(&fooling, splitf, split, fake) {
-                    let mut replaced = replace_last_split_arg(&s, splitf, split, &format!("ip_autottl=-{ttl},3-20:repeats=1"));
-                    replaced.extend([
-                        "--payload=empty".into(),
-                        "--out-range=s1<d1".into(),
-                        "--lua-desync=pktmod:ip_ttl=1".into(),
-                    ]);
-                    out.push(replaced);
-                }
+            for &split in TLS_SPLITS_FAKED {
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:ip_autottl=-{ttl},3-20:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}:ip_autottl=-{ttl},3-20:repeats=1"),
+                ]);
+                out.push(vec![
+                    payload.into(),
+                    format!("--lua-desync=fake:blob={fake}:ip_autottl=-{ttl},3-20:repeats=1"),
+                    format!("--lua-desync={splitf}:pos={split}:ip_autottl=-{ttl},3-20:repeats=1"),
+                    "--payload=empty".into(),
+                    "--out-range=s1<d1".into(),
+                    "--lua-desync=pktmod:ip_ttl=1".into(),
+                ]);
             }
         }
     }
@@ -1229,16 +1147,9 @@ fn fake_faked_tls() -> Vec<Strategy> {
     out
 }
 
-/// 55-fake-faked.sh (TLS1.2 = TLS + wssize variants)
+/// 55-fake-faked.sh (TLS1.2 = TLS without wssize doubling for triple combinations)
 fn fake_faked_tls12() -> Vec<Strategy> {
-    let base = fake_faked_tls();
-    let mut out = base.clone();
-    for s in &base {
-        let mut wssize = vec!["--lua-desync=wssize:wsize=1:scale=6".to_string()];
-        wssize.extend(s.clone());
-        out.push(wssize);
-    }
-    out
+    fake_faked_tls()
 }
 
 /// 60-fake-hostfake.sh — fake + hostfakesplit combinations (HTTP)
@@ -1382,16 +1293,9 @@ fn fake_hostfake_tls() -> Vec<Strategy> {
     out
 }
 
-/// 60-fake-hostfake.sh (TLS1.2 = TLS + wssize variants)
+/// 60-fake-hostfake.sh (TLS1.2 = TLS without wssize doubling for triple combinations)
 fn fake_hostfake_tls12() -> Vec<Strategy> {
-    let base = fake_hostfake_tls();
-    let mut out = base.clone();
-    for s in &base {
-        let mut wssize = vec!["--lua-desync=wssize:wsize=1:scale=6".to_string()];
-        wssize.extend(s.clone());
-        out.push(wssize);
-    }
-    out
+    fake_hostfake_tls()
 }
 
 // --- Entry point ---

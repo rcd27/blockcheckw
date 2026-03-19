@@ -1,3 +1,0 @@
-udp.PayloadLength=148 and udp.Payload32[0]=0x01000000 or
-udp.PayloadLength=92 and udp.Payload32[0]=0x02000000 or
-udp.PayloadLength=64 and udp.Payload32[0]=0x03000000

@@ -1,7 +1,0 @@
-* text=auto eol=lf
-*.cmd eol=crlf
-*.bat eol=crlf
-*.manifest eol=crlf
-*.rc eol=crlf
-init.d/windivert.filter.examples/** eol=crlf
-files/** binary

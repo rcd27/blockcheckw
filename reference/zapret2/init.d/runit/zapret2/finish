@@ -1,2 +1,0 @@
-#!/bin/sh
-/opt/zapret2/init.d/sysv/zapret2 stop

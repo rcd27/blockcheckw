@@ -1,0 +1,3 @@
+[submodule "reference/zapret2"]
+	path = reference/zapret2
+	url = https://github.com/bol-van/zapret2.git

@@ -1,0 +1,173 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Targets with pre-built std — regular cross, stable toolchain
+  build-stable:
+    if: needs.release-please.outputs.release_created == 'true'
+    needs: [release-please]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, target: x86_64-unknown-linux-musl,  upx: true }
+          - { arch: x86,    target: i586-unknown-linux-musl,     upx: true }
+          - { arch: arm64,  target: aarch64-unknown-linux-musl,  upx: true }
+          - { arch: arm,    target: arm-unknown-linux-musleabi,   upx: true }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cross
+
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Compress with UPX
+        if: matrix.upx
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          version: latest
+          files: target/${{ matrix.target }}/release/blockcheckw
+          args: --best --lzma
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blockcheckw-linux-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/blockcheckw
+          if-no-files-found: error
+
+  # Targets without pre-built std, but cross has Docker images
+  build-nightly:
+    if: needs.release-please.outputs.release_created == 'true'
+    needs: [release-please]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: mips,   target: mips-unknown-linux-musl,        upx: true  }
+          - { arch: mipsel, target: mipsel-unknown-linux-musl,      upx: true  }
+          - { arch: mips64, target: mips64-unknown-linux-muslabi64,  upx: false }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: taiki-e/install-action@cross
+
+      - name: Build
+        run: cross +nightly build --release --target ${{ matrix.target }} -Zbuild-std=std,panic_abort
+
+      - name: Compress with UPX
+        if: matrix.upx
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          version: latest
+          files: target/${{ matrix.target }}/release/blockcheckw
+          args: --best --lzma
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blockcheckw-linux-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/blockcheckw
+          if-no-files-found: error
+
+  # Targets where cross has no Docker image — cargo + musl-cross toolchain
+  build-musl-cross:
+    if: needs.release-please.outputs.release_created == 'true'
+    needs: [release-please]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: ppc
+            target: powerpc-unknown-linux-musl
+            upx: true
+            musl_name: powerpc-unknown-linux-musl
+            linker_env: CARGO_TARGET_POWERPC_UNKNOWN_LINUX_MUSL_LINKER
+          - arch: riscv64
+            target: riscv64gc-unknown-linux-musl
+            upx: true
+            musl_name: riscv64-unknown-linux-musl
+            linker_env: CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install musl-cross toolchain
+        run: |
+          curl -fSL --retry 3 -o /tmp/toolchain.tar.xz "https://github.com/cross-tools/musl-cross/releases/download/20250929/${{ matrix.musl_name }}.tar.xz"
+          tar xJf /tmp/toolchain.tar.xz -C /opt
+          echo "/opt/${{ matrix.musl_name }}/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: cargo +nightly build --release --target ${{ matrix.target }} -Zbuild-std=std,panic_abort
+        env:
+          ${{ matrix.linker_env }}: ${{ matrix.musl_name }}-gcc
+
+      - name: Compress with UPX
+        if: matrix.upx
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          version: latest
+          files: target/${{ matrix.target }}/release/blockcheckw
+          args: --best --lzma
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blockcheckw-linux-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/blockcheckw
+          if-no-files-found: error
+
+  upload-assets:
+    if: needs.release-please.outputs.release_created == 'true'
+    needs: [release-please, build-stable, build-nightly, build-musl-cross]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: blockcheckw-*
+          path: artifacts
+
+      - name: Package archives
+        run: |
+          mkdir -p release
+          for dir in artifacts/blockcheckw-linux-*; do
+            arch=$(basename "$dir" | sed 's/blockcheckw-linux-//')
+            chmod +x "$dir/blockcheckw"
+            tar -czf "release/blockcheckw-linux-${arch}.tar.gz" -C "$dir" blockcheckw
+          done
+
+      - name: Generate checksums
+        working-directory: release
+        run: sha256sum blockcheckw-*.tar.gz > SHA256SUMS.txt
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" release/blockcheckw-*.tar.gz release/SHA256SUMS.txt --repo "${{ github.repository }}"

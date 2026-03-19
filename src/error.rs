@@ -25,6 +25,9 @@ pub enum BlockcheckError {
 
     #[error("no IPv4 addresses found for {domain}")]
     DnsNoAddresses { domain: String },
+
+    #[error("strategies file is empty (no valid strategy lines found)")]
+    StrategiesFileEmpty,
 }
 
 #[derive(Debug)]

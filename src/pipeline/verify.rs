@@ -157,7 +157,10 @@ pub async fn run_verification(
             verify_config.passes,
         ));
 
-        screen.begin_progress(candidates.len() as u64);
+        screen.begin_progress_with_prefix(
+            candidates.len() as u64,
+            &format!("Verify {protocol} [{pass}/{}]", verify_config.passes),
+        );
 
         let (results, _stats) = run_parallel(
             &verify_core,

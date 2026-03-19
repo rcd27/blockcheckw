@@ -116,6 +116,8 @@ blockcheckw benchmark --raw
 
 ## Запуск
 
+blockcheckw требует root-привилегий для управления nftables и nfqws2. Если запустить без root, программа автоматически перезапустит себя через `sudo -E` (или `su --preserve-environment` как fallback), сохраняя все аргументы командной строки. Если ни sudo, ни su не найдены — выход с кодом 2.
+
 ### Scan — поиск рабочих стратегий
 
 ```shell
@@ -124,6 +126,14 @@ blockcheckw scan
 
 По умолчанию сканирует `rutracker.org` по всем трём протоколам (HTTP, TLS1.2, TLS1.3).
 Количество воркеров задаётся глобальным флагом `-w`.
+
+Для каждого заблокированного протокола blockcheckw выполняет два этапа:
+1. **Scan** — прогоняет все стратегии (быстрый таймаут 1s), находит кандидатов
+2. **Verify** — берёт только найденных кандидатов и перепроверяет их 3 раза (таймаут 3s)
+
+Progress bar показывает текущую фазу: `Scanning HTTP`, `Verify HTTP [1/3]`, `Verify HTTP [2/3]` и т.д. — чтобы было видно, что это не зацикливание, а отдельные проходы верификации.
+
+После завершения обоих этапов для одного протокола blockcheckw переходит к следующему.
 
 ```
 === DNS resolve ===
@@ -140,13 +150,14 @@ Blocked protocols: HTTP, HTTPS/TLS1.2
 
 === Scanning HTTP ===
   generated 2449 strategies, workers=64
+  Scanning HTTP ⠋ [00:01:26] [████████████████████] 2449/2449 (28.4/s)
   completed: 2449 | success: 149 | failed: 2300 | errors: 0 | 86.4s (28.4 strat/sec)
 
 === Verifying HTTP ===
   149 candidates, 3 passes, timeout=3s
-  verify pass 1/3
-  verify pass 2/3
-  verify pass 3/3
+  Verify HTTP [1/3] ⠋ [00:00:15] [████████████████████] 149/149
+  Verify HTTP [2/3] ⠋ [00:00:14] [████████████████████] 149/149
+  Verify HTTP [3/3] ⠋ [00:00:15] [████████████████████] 149/149
   verified: 8/149 strategies (3/3 passes each)
 
 === Summary for rutracker.org ===
@@ -258,6 +269,7 @@ WARNING conflicting DPI bypass detected:
 | `--verify-min N` | Минимум успешных прогонов для верификации | `= verify-passes` |
 | `--verify-timeout T` | Таймаут curl при верификации (секунды) | `3` |
 | `--top N` | Показать топ-N ранжированных стратегий (0 = все) | `5` |
+| `-o` / `--output FILE` | Сохранить стратегии в файл (совместим с `test --from-file`) | off |
 | `--verbose` | Показать результат по каждой стратегии | off |
 
 **Примеры:**
@@ -292,6 +304,149 @@ blockcheckw -w 64 scan --top 0
 
 # 5 проходов, подробный вывод
 blockcheckw -w 64 scan --verify-passes 5 --verbose
+
+# Сохранить стратегии в файл → затем глубокое тестирование
+blockcheckw -w 64 scan -o /tmp/strategies.txt
+blockcheckw test --from-file /tmp/strategies.txt -p http -n 10
+```
+
+### Test — глубокое тестирование конкретных стратегий
+
+Команда `test` позволяет детально протестировать конкретные стратегии обхода: многократные запуски, статистика success rate / latency / стабильность, сравнение стратегий между собой, JSON-экспорт для анализа.
+
+В отличие от `scan` (который прогоняет каждую стратегию однократно), `test` запускает каждую стратегию N раз **последовательно и изолированно**, чтобы получить надёжную статистику.
+
+```shell
+blockcheckw test \
+    --from-file strategies.txt \
+    --domain rutracker.org \
+    --protocol tls13 \
+    --passes 10 \
+    --delay-ms 500 \
+    --curl-timeout 3 \
+    --with-baseline \
+    --json results.json \
+    --verbose
+```
+
+#### Формат файла стратегий
+
+Одна стратегия на строку (аргументы nfqws2). Пустые строки и комментарии (`#`) пропускаются:
+
+```
+# Комментарии пропускаются
+--payload=tls_client_hello --lua-desync=fake:blob=0x1603:ip_ttl=6
+--payload=tls_client_hello --lua-desync=multisplit:pos=1
+```
+
+#### Пример вывода
+
+```
+=== Strategy Test: rutracker.org / HTTPS/TLS1.3 ===
+  10 passes per strategy, timeout=3s
+
+--- Strategy #1 ---
+  nfqws2 --payload=tls_client_hello --lua-desync=fake:blob=0x1603:ip_ttl=6
+
+  Passes:   10/10 SUCCESS (100.0%)
+  Latency:  median=142ms  p95=210ms  p99=245ms  min=98ms  max=267ms
+  Verdict:  STABLE
+
+--- Strategy #2 ---
+  nfqws2 --payload=tls_client_hello --lua-desync=multisplit:pos=1
+
+  Passes:   7/10 SUCCESS (70.0%)
+  Latency:  median=1850ms  p95=2800ms  p99=2950ms  min=120ms  max=3000ms
+  Verdict:  FLAKY
+  Errors:   3x UNAVAILABLE code=28
+
+=== Comparison ===
+  #    Strategy (short)                    Success  Verdict     Median   p95
+  1    ...fake:blob=0x1603:ip_ttl=6       100.0%   STABLE      142ms    210ms
+  2    ...multisplit:pos=1                  70.0%   FLAKY      1850ms   2800ms
+
+  Winner: Strategy #1 (100.0%, median 142ms)
+```
+
+#### Оценка стабильности
+
+| Вердикт | Success Rate | Описание |
+|:--------|:-------------|:---------|
+| STABLE | 100% | Работает всегда |
+| RELIABLE | >= 80% | Надёжная, редкие сбои |
+| FLAKY | 50-79% | Нестабильная |
+| UNRELIABLE | 1-49% | Ненадёжная |
+| BROKEN | 0% | Не работает |
+
+#### JSON-экспорт
+
+С `--json results.json` результаты сохраняются в JSON для дальнейшего анализа:
+
+```json
+{
+  "meta": {
+    "domain": "rutracker.org",
+    "protocol": "HTTPS/TLS1.3",
+    "passes": 10,
+    "curl_timeout": "3",
+    "timestamp": "2026-03-19T12:00:00Z"
+  },
+  "baseline": null,
+  "strategies": [
+    {
+      "args": "--payload=tls_client_hello --lua-desync=fake:blob=0x1603:ip_ttl=6",
+      "success_rate": 1.0,
+      "stability": "stable",
+      "latency": { "median_ms": 142, "p95_ms": 210, "p99_ms": 245, "min_ms": 98, "max_ms": 267 },
+      "error_distribution": {},
+      "passes": [
+        { "index": 1, "success": true, "latency_ms": 142, "verdict": "Available", "timestamp": 1742389200 }
+      ]
+    }
+  ]
+}
+```
+
+**Флаги:**
+
+| Флаг | Описание | По умолчанию |
+|:-----|:---------|:-------------|
+| `-d` / `--domain` | Домен для проверки | `rutracker.org` |
+| `-p` / `--protocol` | Один протокол: `http`, `tls12`, `tls13` | (обязательный) |
+| `--dns MODE` | DNS режим: `auto`, `system`, `doh` | `auto` |
+| `--from-file PATH` | Файл со стратегиями (одна на строку) | (обязательный) |
+| `-n` / `--passes N` | Количество проходов на стратегию | `10` |
+| `--delay-ms MS` | Задержка между проходами (мс) | `0` |
+| `--curl-timeout T` | curl --max-time (секунды) | `3` |
+| `--with-baseline` | Добавить контрольную группу (без bypass) | off |
+| `--json PATH` | Экспортировать результаты в JSON | off |
+| `--verbose` | Показать результат каждого прохода | off |
+
+**Примеры:**
+
+```shell
+# Создать файл стратегий
+cat > /tmp/strategies.txt << 'EOF'
+--payload=tls_client_hello --lua-desync=fake:blob=0x1603:ip_ttl=6
+--payload=tls_client_hello --lua-desync=multisplit:pos=1
+EOF
+
+# Базовый тест: 5 проходов
+sudo blockcheckw test --from-file /tmp/strategies.txt -p tls13 -n 5
+
+# С baseline, JSON и verbose
+sudo blockcheckw test \
+    --from-file /tmp/strategies.txt \
+    -p tls13 -n 10 \
+    --with-baseline \
+    --json /tmp/results.json \
+    --verbose
+
+# Тест HTTP стратегий с задержкой
+sudo blockcheckw test \
+    --from-file /tmp/http_strategies.txt \
+    -d rutracker.org -p http -n 20 \
+    --delay-ms 1000 --curl-timeout 5
 ```
 
 ## Производительность

@@ -13,6 +13,8 @@ use blockcheckw::network::dns::DnsSpoofResult;
 use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::benchmark;
 use blockcheckw::pipeline::runner::run_parallel;
+use blockcheckw::pipeline::test_report;
+use blockcheckw::pipeline::test_runner::{self, TestConfig};
 use blockcheckw::pipeline::verify::{self, VerifyConfig};
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
@@ -43,6 +45,49 @@ enum Command {
         /// Raw output: table only, no recommendation (for scripts)
         #[arg(long)]
         raw: bool,
+    },
+
+    /// Test specific strategies with detailed statistics
+    Test {
+        /// Target domain
+        #[arg(short, long, default_value = "rutracker.org")]
+        domain: String,
+
+        /// Protocol: http, tls12, tls13
+        #[arg(short, long)]
+        protocol: String,
+
+        /// DNS mode: auto, system, doh
+        #[arg(long, default_value = "auto")]
+        dns: String,
+
+        /// Load strategies from file (one strategy per line)
+        #[arg(long)]
+        from_file: String,
+
+        /// Number of passes per strategy
+        #[arg(short = 'n', long, default_value_t = 10)]
+        passes: usize,
+
+        /// Delay between passes (ms)
+        #[arg(long, default_value_t = 0)]
+        delay_ms: u64,
+
+        /// curl --max-time (seconds)
+        #[arg(long, default_value = "3")]
+        curl_timeout: String,
+
+        /// Include baseline (no-bypass) control group
+        #[arg(long)]
+        with_baseline: bool,
+
+        /// Export results as JSON to file
+        #[arg(long)]
+        json: Option<String>,
+
+        /// Show per-pass details
+        #[arg(long)]
+        verbose: bool,
     },
 
     /// Scan domain for working DPI bypass strategies
@@ -82,6 +127,10 @@ enum Command {
         /// Show top N ranked strategies per protocol (0 = all)
         #[arg(long, default_value_t = 5)]
         top: usize,
+
+        /// Save found strategies to file (compatible with test --from-file)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 
@@ -98,6 +147,8 @@ async fn main() {
     }));
 
     let cli = Cli::parse();
+
+    blockcheckw::system::elevate::require_root();
 
     match cli.command {
         Some(Command::Benchmark {
@@ -117,6 +168,44 @@ async fn main() {
             let max = max_workers.unwrap_or_else(benchmark::default_max_workers);
             benchmark::run_benchmark(strategies, max, raw).await;
         }
+        Some(Command::Test {
+            domain,
+            protocol,
+            dns,
+            from_file,
+            passes,
+            delay_ms,
+            curl_timeout,
+            with_baseline,
+            json,
+            verbose,
+        }) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
+                .init();
+
+            let protocols = match blockcheckw::config::parse_protocols(&protocol) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("ERROR: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if protocols.len() != 1 {
+                eprintln!("ERROR: test command requires exactly one protocol (http, tls12, or tls13)");
+                std::process::exit(1);
+            }
+            let protocol = protocols[0];
+            let dns_mode = match blockcheckw::config::parse_dns_mode(&dns) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("ERROR: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            run_test(&domain, protocol, dns_mode, &from_file, passes, delay_ms, &curl_timeout, with_baseline, json.as_deref(), verbose).await;
+        }
         Some(Command::Scan {
             domain,
             protocols,
@@ -127,6 +216,7 @@ async fn main() {
             verbose,
             timeout,
             top,
+            output,
         }) => {
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
@@ -151,7 +241,7 @@ async fn main() {
                 min_passes: verify_min.unwrap_or(verify_passes),
                 curl_max_time: verify_timeout,
             };
-            run_scan(cli.workers, &domain, &protocols, dns_mode, &verify_config, verbose, timeout, top).await;
+            run_scan(cli.workers, &domain, &protocols, dns_mode, &verify_config, verbose, timeout, top, output.as_deref()).await;
         }
         None => run_default(cli.workers).await,
     }
@@ -160,7 +250,7 @@ async fn main() {
 // TODO: run_scan and conflict detection logic should be extracted from main.rs into a
 // library module so they can be unit-tested and reused
 #[allow(clippy::too_many_arguments)]
-async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode: DnsMode, verify_config: &VerifyConfig, verbose: bool, timeout_secs: u64, top_n: usize) {
+async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode: DnsMode, verify_config: &VerifyConfig, verbose: bool, timeout_secs: u64, top_n: usize, output: Option<&str>) {
     let config = Arc::new(CoreConfig {
         worker_count: workers,
         ..CoreConfig::default()
@@ -301,7 +391,10 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
                 style(config.worker_count).bold()
             ));
 
-            screen.begin_progress(strategies.len() as u64);
+            screen.begin_progress_with_prefix(
+                strategies.len() as u64,
+                &format!("Scanning {protocol}"),
+            );
 
             let (results, stats) = run_parallel(
                 &config,
@@ -469,6 +562,184 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
                 screen.println(&format!(
                     "  {} (use --top 0 to show all)",
                     style(format!("... and {} more", total - top_n)).dim()
+                ));
+            }
+        }
+    }
+
+    // 5. Write strategies to file
+    if let Some(path) = output {
+        match write_strategies_file(path, domain, &summary) {
+            Ok(count) => {
+                screen.println(&format!(
+                    "\n  {} {} strategies written to {}",
+                    style("OK").green().bold(),
+                    count,
+                    style(path).cyan(),
+                ));
+            }
+            Err(e) => {
+                screen.println(&format!(
+                    "\n  {} failed to write {}: {e}",
+                    style("ERROR:").red().bold(),
+                    style(path).cyan(),
+                ));
+            }
+        }
+    }
+
+    screen.finish_info();
+}
+
+#[allow(clippy::type_complexity)]
+fn write_strategies_file(
+    path: &str,
+    domain: &str,
+    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64, bool)],
+) -> std::io::Result<usize> {
+    use std::fmt::Write as _;
+
+    let timestamp = test_report::chrono_like_timestamp();
+    let mut buf = String::new();
+    let mut total_count = 0;
+
+    writeln!(buf, "# blockcheckw scan results for {domain}").unwrap();
+    writeln!(buf, "# {timestamp}").unwrap();
+
+    for (protocol, strategies, _, _, _, _, _) in summary {
+        if strategies.is_empty() {
+            continue;
+        }
+        let ranked = rank::rank_strategies(strategies);
+        writeln!(buf).unwrap();
+        writeln!(buf, "# {} — {} strategies", protocol, ranked.len()).unwrap();
+        for score in &ranked {
+            writeln!(buf, "{}", score.strategy_args.join(" ")).unwrap();
+        }
+        total_count += ranked.len();
+    }
+
+    std::fs::write(path, buf)?;
+    Ok(total_count)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_test(
+    domain: &str,
+    protocol: Protocol,
+    dns_mode: DnsMode,
+    from_file: &str,
+    passes: usize,
+    delay_ms: u64,
+    curl_timeout: &str,
+    with_baseline: bool,
+    json_path: Option<&str>,
+    verbose: bool,
+) {
+    let config = Arc::new(CoreConfig::default());
+
+    // Signal handler: cleanup nftables on Ctrl+C
+    let cleanup_config = config.clone();
+    tokio::spawn(async move {
+        if signal::ctrl_c().await.is_ok() {
+            eprintln!("\nCtrl+C received, cleaning up...");
+            nftables::drop_table(&cleanup_config.nft_table).await;
+            std::process::exit(130);
+        }
+    });
+
+    let mut screen = ui::ScanScreen::new();
+
+    // DNS resolve
+    screen.println(&ui::section("DNS resolve"));
+    screen.println(&format!("  dns mode: {}", style(dns_mode.to_string()).bold()));
+    let ips = match dns::resolve_domain(domain, dns_mode).await {
+        Ok(resolution) => {
+            screen.println(&format!(
+                "  {} {} {} (via {})",
+                domain,
+                ui::ARROW,
+                style(resolution.ips.join(", ")).bold(),
+                resolution.method,
+            ));
+            resolution.ips
+        }
+        Err(e) => {
+            eprintln!("{} {e}", style("ERROR:").red().bold());
+            std::process::exit(1);
+        }
+    };
+
+    // Conflict detection
+    if !handle_bypass_conflicts(&config.nft_table).await {
+        std::process::exit(1);
+    }
+
+    // Read strategies file
+    let file_content = match std::fs::read_to_string(from_file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{} failed to read {from_file}: {e}", style("ERROR:").red().bold());
+            std::process::exit(1);
+        }
+    };
+    let strategies = match test_runner::parse_strategies_file(&file_content) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{} {e}", style("ERROR:").red().bold());
+            std::process::exit(1);
+        }
+    };
+
+    screen.println(&format!(
+        "\n  {} strategies loaded from {}",
+        style(strategies.len()).bold(),
+        style(from_file).cyan(),
+    ));
+
+    let test_config = TestConfig {
+        passes,
+        delay_ms,
+        curl_max_time: curl_timeout.to_string(),
+        with_baseline,
+    };
+
+    let results = test_runner::run_strategy_tests(
+        &test_config,
+        &config,
+        domain,
+        protocol,
+        &ips,
+        &strategies,
+        &screen,
+    )
+    .await;
+
+    // Terminal report
+    test_report::render_terminal_report(
+        &results,
+        domain,
+        protocol,
+        passes,
+        curl_timeout,
+        verbose,
+        &screen,
+    );
+
+    // JSON export
+    if let Some(path) = json_path {
+        match test_report::write_json(path, domain, protocol, passes, curl_timeout, &results) {
+            Ok(()) => {
+                screen.println(&format!(
+                    "\n  {} JSON report written to {}",
+                    style("OK").green().bold(),
+                    style(path).cyan(),
+                ));
+            }
+            Err(e) => {
+                screen.println(&format!(
+                    "\n  {} {e}",
+                    style("ERROR:").red().bold(),
                 ));
             }
         }

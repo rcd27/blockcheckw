@@ -1,7 +1,9 @@
 use std::time::Instant;
 
+use std::fmt::Write;
+
 use console::style;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use tokio::task::JoinSet;
 use tracing::info;
 
@@ -83,9 +85,12 @@ pub async fn run_parallel(
             owned_pb = ProgressBar::new(strategies.len() as u64);
             owned_pb.set_style(
                 ProgressStyle::with_template(
-                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({per_sec}, ETA {eta})"
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({rate}, ETA {eta})"
                 )
                 .unwrap()
+                .with_key("rate", |state: &ProgressState, w: &mut dyn Write| {
+                    write!(w, "{:.1}/s", state.per_sec()).unwrap();
+                })
                 .progress_chars("=>-"),
             );
             owned_pb.enable_steady_tick(std::time::Duration::from_millis(100));

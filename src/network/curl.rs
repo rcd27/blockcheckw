@@ -14,7 +14,7 @@ pub struct CurlResult {
     pub headers: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CurlVerdict {
     Available,
     SuspiciousRedirect { code: u16, location: String },

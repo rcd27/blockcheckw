@@ -1,5 +1,7 @@
+use std::fmt::Write;
+
 use console::{style, Emoji, Term};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 
 pub static CHECKMARK: Emoji<'_, '_> = Emoji("✓ ", "+ ");
 pub static CROSS: Emoji<'_, '_> = Emoji("✗ ", "x ");
@@ -309,6 +311,11 @@ impl ScanScreen {
     /// Create divider + progress bar and add both to `MultiProgress`.
     /// If an info_bar exists, inserts divider and pb before it so info stays at the bottom.
     pub fn begin_progress(&mut self, total: u64) {
+        self.begin_progress_with_prefix(total, "");
+    }
+
+    /// Create divider + progress bar with a prefix label (e.g. "Verify HTTP [2/3]").
+    pub fn begin_progress_with_prefix(&mut self, total: u64, prefix: &str) {
         let width = Term::stdout().size().1 as usize;
 
         let divider = ProgressBar::new(0);
@@ -328,13 +335,30 @@ impl ScanScreen {
         divider.set_style(ProgressStyle::with_template("{msg}").unwrap());
         divider.set_message(format!("{}", style("─".repeat(width)).dim()));
 
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({per_sec}, ETA {eta})"
-            )
-            .unwrap()
-            .progress_chars("=>-"),
-        );
+        let rate_key = |state: &ProgressState, w: &mut dyn Write| {
+            write!(w, "{:.1}/s", state.per_sec()).unwrap();
+        };
+
+        if prefix.is_empty() {
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({rate}, ETA {eta})"
+                )
+                .unwrap()
+                .with_key("rate", rate_key)
+                .progress_chars("=>-"),
+            );
+        } else {
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{prefix:.bold} {spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({rate}, ETA {eta})"
+                )
+                .unwrap()
+                .with_key("rate", rate_key)
+                .progress_chars("=>-"),
+            );
+            pb.set_prefix(prefix.to_string());
+        }
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         self.divider_bar = Some(divider);

@@ -88,6 +88,7 @@ enum Command {
 #[tokio::main]
 async fn main() {
     // Panic hook: cleanup nftables table on panic (async runtime may be dead, use sync Command)
+    // FIXME: if nft hangs, the process will hang forever (no timeout on sync Command)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = std::process::Command::new("nft")
@@ -156,6 +157,8 @@ async fn main() {
     }
 }
 
+// TODO: run_scan and conflict detection logic should be extracted from main.rs into a
+// library module so they can be unit-tested and reused
 #[allow(clippy::too_many_arguments)]
 async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode: DnsMode, verify_config: &VerifyConfig, verbose: bool, timeout_secs: u64, top_n: usize) {
     let config = Arc::new(CoreConfig {
@@ -164,6 +167,8 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
     });
 
     // Signal handler: cleanup nftables on Ctrl+C
+    // FIXME: handler fires only once; a second Ctrl+C won't be caught.
+    // Also, process::exit(130) may skip Drop impls for running nfqws2 processes.
     let cleanup_config = config.clone();
     tokio::spawn(async move {
         if signal::ctrl_c().await.is_ok() {
@@ -601,6 +606,7 @@ async fn resolve_bypass_conflicts(conflicts: &BypassConflicts) {
     use blockcheckw::system::process::run_process;
 
     if conflicts.has_nfqws2_processes {
+        // FIXME: killall kills ALL nfqws2 processes system-wide, including production ones
         let _ = run_process(&["killall", "nfqws2"], 5_000).await;
         // Give processes time to exit
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;

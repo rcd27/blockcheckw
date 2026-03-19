@@ -23,6 +23,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # TODO: build jobs should depend on a test job (cargo test + clippy) to prevent
+  # releasing broken builds. Currently builds depend only on release-please.
+
   # Targets with pre-built std — regular cross, stable toolchain
   build-stable:
     if: needs.release-please.outputs.release_created == 'true'

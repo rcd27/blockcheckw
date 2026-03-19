@@ -20,6 +20,8 @@ impl fmt::Display for IpInfo {
     }
 }
 
+// TODO: use std::sync::LazyLock or precompile a single regex instead of
+// compiling a new Regex for each field on every call
 fn extract_field(json: &str, field: &str) -> Option<String> {
     let pattern = format!(r#""{field}"\s*:\s*"([^"]+)""#);
     let re = regex::Regex::new(&pattern).ok()?;

@@ -98,6 +98,8 @@ pub async fn run_parallel(
     let mut failures = 0usize;
     let mut errors = 0usize;
 
+    // TODO: batch model — last batch may underutilize workers if strategies.len() % worker_count != 0;
+    // consider switching to a semaphore-based or work-stealing approach
     let batches: Vec<&[Vec<String>]> = strategies.chunks(config.worker_count).collect();
 
     for batch in batches {

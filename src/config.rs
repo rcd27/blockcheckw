@@ -51,8 +51,12 @@ impl Default for CoreConfig {
             base_local_port: 30000,
             nft_table: "zapret".to_string(),
             nfqws2_path: detect_nfqws2_path("/opt/zapret2"),
+            // TODO: curl_max_time should be a numeric type (f64), not String
             curl_max_time: "2".to_string(),
+            // FIXME: zapret_base is hardcoded; add CLI option to override
             zapret_base: "/opt/zapret2".to_string(),
+            // FIXME: nfqws2_uid/gid are hardcoded (uid=1 is daemon, gid=3003 is OpenWrt-specific);
+            // these should be configurable or auto-detected per platform
             nfqws2_uid: 1,
             nfqws2_gid: 3003,
         }

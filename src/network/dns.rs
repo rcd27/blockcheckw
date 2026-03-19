@@ -96,6 +96,8 @@ pub async fn resolve_ipv4(domain: &str) -> Result<Vec<String>, BlockcheckError> 
 }
 
 /// Check for DNS spoofing by comparing system DNS and DoH results for known blocked domains.
+// TODO: resolve_ipv4() is called twice per domain (once here, once in captive portal check below);
+// cache the first result to avoid redundant DNS queries and potential TOCTOU inconsistencies
 pub async fn check_dns_spoofing(doh_server_url: &str) -> DnsSpoofResult {
     let mut mismatches = Vec::new();
 

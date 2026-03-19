@@ -2,6 +2,11 @@
 // Mode: SCANLEVEL=force (no optimizations, generate ALL combinations)
 //
 // Source: reference/blockcheckw-prototype/.../StrategyGenerator.kt
+//
+// TODO: many phase functions (fake_tls12, faked_tls12, hostfake_tls12, etc.) share the same
+// "clone base + prepend wssize" pattern — extract a common helper to reduce duplication.
+// TODO: reduce excessive .clone() on Vec<Vec<String>> in phase functions — consider using
+// references or Cow to avoid thousands of allocations during generation.
 
 use crate::config::Protocol;
 
@@ -1554,7 +1559,8 @@ mod tests {
                     dupes += 1;
                 }
             }
-            // NOTE: some duplicates may exist in Kotlin too, we log but don't fail
+            // FIXME: this test should assert_eq!(dupes, 0) instead of just printing a warning;
+            // duplicates waste scan time proportionally
             if dupes > 0 {
                 eprintln!("WARNING: {protocol} has {dupes} duplicate strategies out of {}", strategies.len());
             }

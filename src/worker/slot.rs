@@ -14,6 +14,8 @@ impl WorkerSlot {
         base_qnum: u16,
         base_local_port: u16,
     ) -> Vec<WorkerSlot> {
+        // TODO: validate that base_local_port + count * PORTS_PER_WORKER and base_qnum + count
+        // don't overflow u16 (currently safe with default values, but no bounds check)
         (0..count)
             .map(|i| {
                 let port_start = base_local_port + (i as u16) * PORTS_PER_WORKER;

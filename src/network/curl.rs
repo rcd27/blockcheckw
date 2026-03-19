@@ -57,6 +57,7 @@ fn to_curl_result(pr: ProcessResult) -> CurlResult {
 }
 
 fn process_timeout_ms(max_time: &str) -> u64 {
+    // TODO: accept a numeric type instead of &str to avoid silent fallback on parse error
     let secs: f64 = max_time.parse().unwrap_or(1.0);
     (secs * 1000.0) as u64 + CURL_TIMEOUT_MARGIN_MS
 }
@@ -103,6 +104,8 @@ fn base_http_args(max_time: &str) -> Vec<&str> {
     ]
 }
 
+// TODO: curl_test_http, curl_test_https_tls12, curl_test_https_tls13 are structurally
+// identical — consider unifying into a single parametrized function
 pub async fn curl_test_http(
     domain: &str,
     local_port: Option<&str>,

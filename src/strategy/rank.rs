@@ -1,75 +1,44 @@
 // Strategy scoring and ranking.
 //
-// Four dimensions (0..100 each), weighted into a total score:
-//   Compatibility (40%) — no fooling > autottl > ttl > tcp fooling
-//   Simplicity    (25%) — fewer desync actions = better
-//   Universality  (20%) — no TTL dependency > autottl > fixed ttl
-//   Performance   (15%) — no repeats/multi-stage > repeats > multi-stage
-
-/// TCP fooling indicators in strategy args.
-const TCP_FOOLINGS: &[&str] = &[
-    "tcp_md5", "badsum", "tcp_seq=", "tcp_ack=", "tcp_ts=",
-    "tcp_flags_unset=", "tcp_flags_set=",
-];
+// Strategies are ranked by practical value for the end user who already
+// ran a scan on their hardware. Every strategy in the list WORKS — the
+// question is which one is the best to deploy on a resource-constrained
+// router.
+//
+// Two dimensions, equally weighted:
+//   Performance (50%) — fewer packets = less load on router
+//   Simplicity  (50%) — fewer components = more reliable, easier to debug
 
 pub struct StrategyScore {
     pub strategy_args: Vec<String>,
     pub total: u32,
-    pub compatibility: u32,
-    pub simplicity: u32,
-    pub universality: u32,
     pub performance: u32,
+    pub simplicity: u32,
     pub stars: u8,
-    pub tags: Vec<&'static str>,
 }
 
 pub fn score_strategy(args: &[String]) -> StrategyScore {
     let joined = args.join(" ");
 
-    let compatibility = score_compatibility(&joined);
-    let simplicity = score_simplicity(&joined);
-    let universality = score_universality(&joined);
     let performance = score_performance(&joined);
+    let simplicity = score_simplicity(&joined);
 
-    let total = (compatibility as f64 * 0.40
-        + simplicity as f64 * 0.25
-        + universality as f64 * 0.20
-        + performance as f64 * 0.15) as u32;
+    let total = (performance as f64 * 0.50 + simplicity as f64 * 0.50) as u32;
 
-    let stars = if total >= 75 {
+    let stars = if total >= 80 {
         3
-    } else if total >= 45 {
+    } else if total >= 50 {
         2
     } else {
         1
     };
 
-    let mut tags = Vec::new();
-    if compatibility == 100 {
-        tags.push("universal");
-    }
-    if compatibility <= 20 {
-        tags.push("tcp fooling, may fail on some networks");
-    }
-    if universality <= 30 {
-        tags.push("TTL-dependent (hop count specific)");
-    }
-    if simplicity <= 40 {
-        tags.push("multi-stage, complex");
-    }
-    if performance <= 40 {
-        tags.push("high packet overhead");
-    }
-
     StrategyScore {
         strategy_args: args.to_vec(),
         total,
-        compatibility,
-        simplicity,
-        universality,
         performance,
+        simplicity,
         stars,
-        tags,
     }
 }
 
@@ -79,61 +48,9 @@ pub fn rank_strategies(strategies: &[Vec<String>]) -> Vec<StrategyScore> {
     scored
 }
 
-// --- Dimension scorers ---
-
-fn has_tcp_fooling(joined: &str) -> bool {
-    TCP_FOOLINGS.iter().any(|f| joined.contains(f))
-}
-
-fn score_compatibility(joined: &str) -> u32 {
-    if has_tcp_fooling(joined) {
-        20
-    } else if joined.contains("ip_autottl=") {
-        70
-    } else if joined.contains("ip_ttl=") {
-        50
-    } else {
-        100
-    }
-}
-
-fn count_desync_actions(joined: &str) -> usize {
-    joined.matches("--lua-desync=").count()
-}
-
-fn is_multi_stage(joined: &str) -> bool {
-    joined.contains("--payload=empty") && joined.contains("--out-range=")
-}
-
-fn score_simplicity(joined: &str) -> u32 {
-    let actions = count_desync_actions(joined);
-    let multi = is_multi_stage(joined);
-
-    match (actions, multi) {
-        (a, true) if a >= 3 => 20,
-        (a, false) if a >= 3 => 40,
-        (_, true) => 40,
-        (2, false) => 70,
-        _ => 100, // 0 or 1 action, no multi-stage
-    }
-}
-
-fn score_universality(joined: &str) -> u32 {
-    if joined.contains("ip_ttl=") && !joined.contains("ip_autottl=") {
-        // fixed TTL — check it's not just pktmod:ip_ttl=1 (limiter, not fooling)
-        // We look for ip_ttl= that is NOT preceded by pktmod:
-        let has_real_ttl = joined.split("--lua-desync=").any(|part| {
-            part.contains("ip_ttl=") && !part.starts_with("pktmod:")
-        });
-        if has_real_ttl {
-            return 30;
-        }
-    }
-    if joined.contains("ip_autottl=") {
-        return 60;
-    }
-    100
-}
+// --- Performance (50%) ---
+// Fewer packets = better for low-power routers.
+// repeats=1 is best, high repeats or multi-stage is worst.
 
 fn parse_max_repeats(joined: &str) -> u32 {
     let mut max_repeats = 0u32;
@@ -147,18 +64,43 @@ fn parse_max_repeats(joined: &str) -> u32 {
     max_repeats
 }
 
+fn is_multi_stage(joined: &str) -> bool {
+    joined.contains("--payload=empty") && joined.contains("--out-range=")
+}
+
 fn score_performance(joined: &str) -> u32 {
     let repeats = parse_max_repeats(joined);
     let multi = is_multi_stage(joined);
 
-    if repeats > 100 || (repeats > 1 && multi) {
-        20
-    } else if repeats > 20 || multi {
-        40
-    } else if repeats >= 2 {
-        70
-    } else {
-        100
+    match (repeats, multi) {
+        (r, true) if r > 1 => 10,   // multi-stage + high repeats = worst
+        (r, _) if r > 100 => 10,    // extreme repeats
+        (r, _) if r > 20 => 30,     // high repeats
+        (_, true) => 40,             // multi-stage with pktmod limiter
+        (r, _) if r > 1 => 60,      // moderate repeats
+        _ => 100,                    // repeats=0 or 1, no multi-stage
+    }
+}
+
+// --- Simplicity (50%) ---
+// Fewer desync actions = simpler, more reliable, easier to debug.
+
+fn count_desync_actions(joined: &str) -> usize {
+    joined.matches("--lua-desync=").count()
+}
+
+fn score_simplicity(joined: &str) -> u32 {
+    let actions = count_desync_actions(joined);
+    let multi = is_multi_stage(joined);
+
+    match (actions, multi) {
+        (a, true) if a >= 4 => 10,  // 4+ actions + multi-stage
+        (a, true) if a >= 3 => 20,  // 3 actions + multi-stage
+        (a, false) if a >= 4 => 30, // 4+ actions
+        (a, false) if a >= 3 => 50, // 3 actions
+        (_, true) => 50,            // 2 actions + multi-stage
+        (2, false) => 80,           // 2 actions
+        _ => 100,                   // 1 action
     }
 }
 
@@ -171,123 +113,57 @@ mod tests {
     }
 
     #[test]
-    fn test_http_basic_high_score() {
-        let s = score_strategy(&args("--payload=http_req --lua-desync=http_unixeol"));
-        assert_eq!(s.compatibility, 100);
-        assert_eq!(s.simplicity, 100);
-        assert_eq!(s.universality, 100);
-        assert_eq!(s.performance, 100);
+    fn simple_strategy_scores_high() {
+        let s = score_strategy(&args(
+            "--payload=tls_client_hello --lua-desync=fakedsplit:pos=sniext+4:tcp_ts=-1000"
+        ));
+        assert_eq!(s.simplicity, 100); // 1 action
+        assert_eq!(s.performance, 100); // no repeats
         assert_eq!(s.total, 100);
         assert_eq!(s.stars, 3);
-        assert!(s.tags.contains(&"universal"));
     }
 
     #[test]
-    fn test_multisplit_no_fooling() {
-        let s = score_strategy(&args("--payload=http_req --lua-desync=multisplit:pos=method+2"));
-        assert_eq!(s.compatibility, 100);
-        assert_eq!(s.universality, 100);
-        assert_eq!(s.stars, 3);
-    }
-
-    #[test]
-    fn test_fake_with_fixed_ttl() {
+    fn multi_stage_scores_lower() {
         let s = score_strategy(&args(
-            "--payload=http_req --lua-desync=fake:blob=fake_default_http:ip_ttl=6:repeats=1"
+            "--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:ip_ttl=5:repeats=1 --lua-desync=multisplit:pos=host+1 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1"
         ));
-        assert_eq!(s.compatibility, 50);
-        assert_eq!(s.universality, 30);
-        assert!(s.tags.contains(&"TTL-dependent (hop count specific)"));
-        assert_eq!(s.stars, 2);
-    }
-
-    #[test]
-    fn test_fake_with_autottl() {
-        let s = score_strategy(&args(
-            "--payload=http_req --lua-desync=fake:blob=fake_default_http:ip_autottl=-4,3-20:repeats=1"
-        ));
-        assert_eq!(s.compatibility, 70);
-        assert_eq!(s.universality, 60);
-        // total = 70*0.4 + 100*0.25 + 60*0.2 + 100*0.15 = 80 → 3 stars
-        assert_eq!(s.stars, 3);
-    }
-
-    #[test]
-    fn test_tcp_md5_fooling() {
-        let s = score_strategy(&args(
-            "--payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1"
-        ));
-        assert_eq!(s.compatibility, 20);
-        assert!(s.tags.contains(&"tcp fooling, may fail on some networks"));
-    }
-
-    #[test]
-    fn test_multi_stage_tcp_md5() {
-        let s = score_strategy(&args(
-            "--payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --payload=empty --out-range=<s1 --lua-desync=send:tcp_md5"
-        ));
-        assert_eq!(s.compatibility, 20);
-        assert_eq!(s.simplicity, 40); // 2 desync actions + multi-stage
-        assert!(s.tags.contains(&"tcp fooling, may fail on some networks"));
-        assert!(s.tags.contains(&"multi-stage, complex"));
+        assert_eq!(s.simplicity, 20); // 3 actions + multi-stage
+        assert_eq!(s.performance, 40); // multi-stage
         assert_eq!(s.stars, 1);
     }
 
     #[test]
-    fn test_high_repeats() {
+    fn high_repeats_score_low() {
         let s = score_strategy(&args(
-            "--payload=http_req --lua-desync=tcpseg:pos=0,method+2:ip_id=rnd:repeats=260"
+            "--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=260"
         ));
-        assert_eq!(s.performance, 20);
-        assert!(s.tags.contains(&"high packet overhead"));
+        assert_eq!(s.performance, 10); // extreme repeats
+        assert_eq!(s.simplicity, 100); // 1 action
     }
 
     #[test]
-    fn test_pktmod_ttl_not_counted_as_real_ttl() {
-        // multi-stage with pktmod:ip_ttl=1 should NOT count as fixed TTL
-        // unless there's also a real ip_ttl= in another action
+    fn two_actions_moderate() {
         let s = score_strategy(&args(
-            "--payload=http_req --lua-desync=fake:blob=fake_default_http:ip_autottl=-1,3-20:repeats=1 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1"
+            "--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=1 --lua-desync=multisplit:pos=1,midsld"
         ));
-        // Should be autottl, not fixed TTL
-        assert_eq!(s.universality, 60);
+        assert_eq!(s.simplicity, 80); // 2 actions
+        assert_eq!(s.performance, 100); // repeats=1
+        assert_eq!(s.total, 90);
+        assert_eq!(s.stars, 3);
     }
 
     #[test]
-    fn test_ranking_order() {
+    fn ranking_simple_beats_complex() {
         let strategies = vec![
-            args("--payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --payload=empty --out-range=<s1 --lua-desync=send:tcp_md5"),
-            args("--payload=http_req --lua-desync=http_unixeol"),
-            args("--payload=http_req --lua-desync=fake:blob=fake_default_http:ip_ttl=6:repeats=1"),
-            args("--payload=http_req --lua-desync=multisplit:pos=method+2"),
+            // Complex: 3 actions + multi-stage + high repeats
+            args("--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:ip_ttl=5:repeats=1 --lua-desync=fakedsplit:pos=midsld:ip_ttl=5:repeats=1 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1"),
+            // Simple: 1 action, no repeats
+            args("--payload=tls_client_hello --lua-desync=fakedsplit:pos=sniext+4:tcp_ts=-1000"),
         ];
 
         let ranked = rank_strategies(&strategies);
-
-        // http_unixeol and multisplit should be top (both score 100)
-        assert_eq!(ranked[0].total, 100);
-        assert_eq!(ranked[1].total, 100);
-        // fake with TTL should be next
-        assert!(ranked[2].total > ranked[3].total, "fake_ttl ({}) should score higher than tcp_md5 ({})", ranked[2].total, ranked[3].total);
-        // tcp_md5 multi-stage should be last
-        assert!(ranked[3].total < 45);
-    }
-
-    #[test]
-    fn test_seqovl_with_drop() {
-        // seqovl + drop = 2 desync actions
-        let s = score_strategy(&args(
-            "--payload=http_req --lua-desync=tcpseg:pos=0,-1:seqovl=1 --lua-desync=drop"
-        ));
-        assert_eq!(s.simplicity, 70); // 2 desync actions
-        assert_eq!(s.compatibility, 100); // no fooling
-    }
-
-    #[test]
-    fn test_three_desync_actions_multi_stage() {
-        let s = score_strategy(&args(
-            "--payload=http_req --lua-desync=fake:blob=fake_default_http:ip_ttl=5:repeats=1 --lua-desync=multisplit:pos=method+2 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1"
-        ));
-        assert_eq!(s.simplicity, 20); // 3 actions + multi-stage
+        assert!(ranked[0].total > ranked[1].total, "simple should rank higher");
+        assert_eq!(ranked[0].strategy_args, strategies[1]);
     }
 }

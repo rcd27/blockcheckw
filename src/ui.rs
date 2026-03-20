@@ -222,21 +222,12 @@ pub fn ranked_strategy_line(rank: usize, score: &crate::strategy::rank::Strategy
     };
 
     let args_str = score.strategy_args.join(" ");
-    let mut line = format!(
+    format!(
         "  #{:<2} {} nfqws2 {}",
         rank,
         star_styled,
         style(&args_str).cyan(),
-    );
-
-    if !score.tags.is_empty() {
-        line.push_str(&format!(
-            "\n         ({})",
-            style(score.tags.join(", ")).dim()
-        ));
-    }
-
-    line
+    )
 }
 
 /// Layout manager for scan output. Ensures all text goes through `MultiProgress`

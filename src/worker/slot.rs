@@ -50,23 +50,24 @@ mod tests {
 
     #[test]
     fn test_create_slots() {
+        let ppw = PORTS_PER_WORKER;
         let slots = WorkerSlot::create_slots(4, 200, 30000);
         assert_eq!(slots.len(), 4);
 
         assert_eq!(slots[0].id, 0);
         assert_eq!(slots[0].qnum, 200);
         assert_eq!(slots[0].port_start, 30000);
-        assert_eq!(slots[0].port_end, 30009);
+        assert_eq!(slots[0].port_end, 30000 + ppw - 1);
 
         assert_eq!(slots[1].id, 1);
         assert_eq!(slots[1].qnum, 201);
-        assert_eq!(slots[1].port_start, 30010);
-        assert_eq!(slots[1].port_end, 30019);
+        assert_eq!(slots[1].port_start, 30000 + ppw);
+        assert_eq!(slots[1].port_end, 30000 + 2 * ppw - 1);
 
         assert_eq!(slots[3].id, 3);
         assert_eq!(slots[3].qnum, 203);
-        assert_eq!(slots[3].port_start, 30030);
-        assert_eq!(slots[3].port_end, 30039);
+        assert_eq!(slots[3].port_start, 30000 + 3 * ppw);
+        assert_eq!(slots[3].port_end, 30000 + 4 * ppw - 1);
     }
 
     #[test]
@@ -75,9 +76,9 @@ mod tests {
             id: 0,
             qnum: 200,
             port_start: 30000,
-            port_end: 30009,
+            port_end: 30000 + PORTS_PER_WORKER - 1,
         };
-        assert_eq!(slot.local_port_arg(), "30000-30009");
+        assert_eq!(slot.local_port_arg(), format!("30000-{}", 30000 + PORTS_PER_WORKER - 1));
     }
 
     #[test]
@@ -86,8 +87,8 @@ mod tests {
             id: 0,
             qnum: 200,
             port_start: 30000,
-            port_end: 30009,
+            port_end: 30000 + PORTS_PER_WORKER - 1,
         };
-        assert_eq!(slot.sport_range(), "30000-30009");
+        assert_eq!(slot.sport_range(), format!("30000-{}", 30000 + PORTS_PER_WORKER - 1));
     }
 }

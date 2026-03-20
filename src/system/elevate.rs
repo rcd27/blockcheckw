@@ -52,6 +52,12 @@ pub fn require_root() {
     std::process::exit(2);
 }
 
+/// Enable tcp_tw_reuse so TIME_WAIT ports can be reused for new outgoing connections.
+/// Without this, rapid sequential curl calls on --local-port ranges exhaust ports.
+pub fn tune_tcp() {
+    let _ = std::fs::write("/proc/sys/net/ipv4/tcp_tw_reuse", "1");
+}
+
 fn has_command(name: &str) -> bool {
     Command::new("which")
         .arg(name)

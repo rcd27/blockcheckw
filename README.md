@@ -42,6 +42,26 @@ cargo build --release --target aarch64-unknown-linux-musl &&
 scp target/aarch64-unknown-linux-musl/release/blockcheckw root@router:/tmp/
 ```
 
+## Автодополнение (shell completions)
+
+Автодополнение команд и флагов по `<TAB>`, как в `gh`, `docker`, `cargo`.
+
+```shell
+# Автоматическая установка (определяет шелл из $SHELL)
+blockcheckw completions --install
+
+# Указать шелл явно
+blockcheckw completions --install zsh
+```
+
+Поддерживаемые шеллы: **bash**, **zsh**, **fish**.
+
+Если нужен вывод в stdout (для кастомной установки):
+
+```shell
+blockcheckw completions bash > ~/.local/share/bash-completion/completions/blockcheckw
+```
+
 ## Тесты
 
 ### Unit-тесты

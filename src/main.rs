@@ -19,8 +19,22 @@ use blockcheckw::pipeline::worker_task::CurlTestMode;
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
 
+const fn help_styles() -> clap::builder::styling::Styles {
+    use clap::builder::styling::{AnsiColor, Color, Style, Styles};
+
+    Styles::styled()
+        .header(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))).bold().underline())
+        .usage(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))).bold())
+        .literal(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold())
+        .placeholder(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan))))
+}
+
 #[derive(Parser)]
-#[command(name = "blockcheckw", about = "Parallel DPI bypass strategy scanner")]
+#[command(
+    name = "blockcheckw",
+    about = "Parallel DPI bypass strategy scanner",
+    styles = help_styles(),
+)]
 struct Cli {
     /// Number of parallel workers
     #[arg(short, long, default_value_t = 8)]
@@ -153,6 +167,7 @@ async fn main() {
     }
 
     blockcheckw::system::elevate::require_root();
+    blockcheckw::system::elevate::tune_tcp();
 
     match cli.command {
         Some(Command::Benchmark {

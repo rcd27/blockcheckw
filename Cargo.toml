@@ -11,7 +11,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.17"
 console = "0.15"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "color"] }
 clap_complete = "4"
 regex = "1"
 serde = { version = "1", features = ["derive"] }

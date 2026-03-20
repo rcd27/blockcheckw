@@ -3,6 +3,7 @@ use console::style;
 use crate::config::{CoreConfig, Protocol};
 use crate::network::dns;
 use crate::pipeline::runner::run_parallel;
+use crate::pipeline::worker_task::CurlTestMode;
 
 #[derive(Debug, Clone)]
 pub struct BenchmarkPoint {
@@ -262,7 +263,7 @@ pub async fn run_benchmark(
 
         let (_, stats) = run_parallel(
             &config, domain, protocol, run_strategies, &ips,
-            Some(&multi), Some(&pb),
+            Some(&multi), Some(&pb), CurlTestMode::Standard,
         ).await;
 
         let point = BenchmarkPoint {

@@ -21,10 +21,13 @@ pub async fn test_baseline(domain: &str, protocol: Protocol, max_time: &str, ips
 }
 
 pub fn format_baseline_verdict(result: &BaselineResult) -> String {
-    if result.is_blocked() {
-        format!("{}: BLOCKED ({})", result.protocol, result.verdict)
-    } else {
-        format!("{}: available without bypass", result.protocol)
+    match &result.verdict {
+        CurlVerdict::Available => {
+            format!("{}: available without bypass", result.protocol)
+        }
+        other => {
+            format!("{}: BLOCKED ({other})", result.protocol)
+        }
     }
 }
 
@@ -42,6 +45,9 @@ pub fn format_baseline_verdict_styled(result: &BaselineResult) -> String {
         }
         CurlVerdict::Unavailable { curl_exit_code } => {
             ui::verdict_blocked(&proto, &format!("UNAVAILABLE code={curl_exit_code}"))
+        }
+        CurlVerdict::DataTransferFailed { size_download } => {
+            ui::verdict_warning(&proto, &format!("data transfer failed ({size_download}B downloaded)"))
         }
     }
 }

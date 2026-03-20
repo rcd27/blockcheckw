@@ -15,7 +15,8 @@ use blockcheckw::pipeline::benchmark;
 use blockcheckw::pipeline::runner::run_parallel;
 use blockcheckw::pipeline::test_report;
 use blockcheckw::pipeline::test_runner::{self, TestConfig};
-use blockcheckw::pipeline::verify::{self, VerifyConfig};
+use blockcheckw::pipeline::verify::{self, DataTransferConfig, VerifyConfig};
+use blockcheckw::pipeline::worker_task::CurlTestMode;
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
 
@@ -131,6 +132,18 @@ enum Command {
         /// Save found strategies to file (compatible with test --from-file)
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Skip data transfer validation after HEAD verification
+        #[arg(long)]
+        skip_data_transfer: bool,
+
+        /// curl --max-time for data transfer validation (seconds)
+        #[arg(long, default_value = "8")]
+        dt_timeout: String,
+
+        /// Minimum downloaded bytes for data transfer validation
+        #[arg(long, default_value_t = 1024)]
+        dt_min_bytes: u64,
     },
 }
 
@@ -217,6 +230,9 @@ async fn main() {
             timeout,
             top,
             output,
+            skip_data_transfer,
+            dt_timeout,
+            dt_min_bytes,
         }) => {
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
@@ -240,6 +256,11 @@ async fn main() {
                 passes: verify_passes,
                 min_passes: verify_min.unwrap_or(verify_passes),
                 curl_max_time: verify_timeout,
+                data_transfer: DataTransferConfig {
+                    enabled: !skip_data_transfer,
+                    curl_max_time: dt_timeout,
+                    min_bytes: dt_min_bytes,
+                },
             };
             run_scan(cli.workers, &domain, &protocols, dns_mode, &verify_config, verbose, timeout, top, output.as_deref()).await;
         }
@@ -404,6 +425,7 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
                 &ips,
                 Some(screen.multi()),
                 Some(screen.pb()),
+                CurlTestMode::Standard,
             )
             .await;
 
@@ -463,6 +485,17 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
                     summary_v.required_passes,
                     summary_v.total_passes,
                 ));
+
+                if let Some(ref dt) = summary_v.data_transfer_results {
+                    screen.println(&format!(
+                        "  {}: {}/{} strategies pass (GET, {}s timeout, min {}B)",
+                        style("data transfer").bold(),
+                        style(dt.passed).green().bold(),
+                        dt.tested,
+                        dt.timeout,
+                        dt.min_bytes,
+                    ));
+                }
 
                 if verbose {
                     for tally in &summary_v.tallies {
@@ -790,7 +823,7 @@ async fn run_default(workers: usize) {
     info!("blockcheckw starting: {protocol} {domain}");
     info!("workers={}, strategies={}", config.worker_count, strategies.len());
 
-    let (results, stats) = run_parallel(&config, domain, protocol, &strategies, &ips, None, None).await;
+    let (results, stats) = run_parallel(&config, domain, protocol, &strategies, &ips, None, None, CurlTestMode::Standard).await;
 
     info!("=== Results ===");
     for r in &results {

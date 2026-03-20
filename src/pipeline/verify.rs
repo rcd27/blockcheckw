@@ -4,7 +4,9 @@ use console::style;
 
 use crate::config::{CoreConfig, Protocol};
 use crate::error::TaskResult;
+use crate::network::curl::DATA_TRANSFER_MIN_BYTES;
 use crate::pipeline::runner::{run_parallel, StrategyResult};
+use crate::pipeline::worker_task::CurlTestMode;
 use crate::ui::ScanScreen;
 
 /// Configuration for verification passes.
@@ -16,6 +18,8 @@ pub struct VerifyConfig {
     pub min_passes: usize,
     /// curl --max-time for verification (stricter than scan)
     pub curl_max_time: String,
+    /// Data transfer validation config
+    pub data_transfer: DataTransferConfig,
 }
 
 impl Default for VerifyConfig {
@@ -24,8 +28,39 @@ impl Default for VerifyConfig {
             passes: 3,
             min_passes: 3,
             curl_max_time: "3".to_string(),
+            data_transfer: DataTransferConfig::default(),
         }
     }
+}
+
+/// Configuration for data transfer validation phase.
+#[derive(Debug, Clone)]
+pub struct DataTransferConfig {
+    /// Enable data transfer validation (GET request after HEAD passes)
+    pub enabled: bool,
+    /// curl --max-time for data transfer test (longer than HEAD)
+    pub curl_max_time: String,
+    /// Minimum bytes that must be downloaded for a strategy to pass
+    pub min_bytes: u64,
+}
+
+impl Default for DataTransferConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            curl_max_time: "8".to_string(),
+            min_bytes: DATA_TRANSFER_MIN_BYTES,
+        }
+    }
+}
+
+/// Summary of data transfer validation results.
+#[derive(Debug)]
+pub struct DataTransferSummary {
+    pub tested: usize,
+    pub passed: usize,
+    pub timeout: String,
+    pub min_bytes: u64,
 }
 
 /// Per-strategy pass/fail tally across all verification passes.
@@ -48,6 +83,8 @@ pub struct VerificationSummary {
     /// If strict verification yielded 0 results, auto-relax finds the best
     /// non-zero threshold. None if strict already found results or all tallies are 0/N.
     pub relaxed: Option<RelaxedResult>,
+    /// Data transfer validation results (None if skipped).
+    pub data_transfer_results: Option<DataTransferSummary>,
 }
 
 /// Strategies found by lowering the verification threshold.
@@ -133,6 +170,7 @@ fn extract_outcomes(
 }
 
 /// Run N verification passes on candidate strategies, return tally and filtered results.
+/// If data_transfer is enabled, runs an additional GET-based pass after HEAD passes.
 pub async fn run_verification(
     config: &CoreConfig,
     domain: &str,
@@ -170,6 +208,7 @@ pub async fn run_verification(
             ips,
             Some(screen.multi()),
             Some(screen.pb()),
+            CurlTestMode::Standard,
         )
         .await;
 
@@ -188,14 +227,105 @@ pub async fn run_verification(
         None
     };
 
+    // Data transfer validation: only for HTTPS, only for strategies that passed HEAD
+    let dt_config = &verify_config.data_transfer;
+    let is_https = matches!(protocol, Protocol::HttpsTls12 | Protocol::HttpsTls13);
+
+    let (final_verified, final_relaxed, dt_summary) = if dt_config.enabled && is_https {
+        // Pick strategies to test: verified first, fall back to relaxed
+        let dt_candidates = if !verified.is_empty() {
+            &verified
+        } else if let Some(ref r) = relaxed {
+            &r.strategies
+        } else {
+            // Nothing passed HEAD — skip data transfer
+            return VerificationSummary {
+                total_candidates: candidates.len(),
+                verified_count: verified.len(),
+                required_passes: verify_config.min_passes,
+                total_passes: verify_config.passes,
+                tallies,
+                verified,
+                relaxed,
+                data_transfer_results: None,
+            };
+        };
+
+        screen.println(&format!(
+            "  {} data transfer check: {} strategies, GET {}s timeout, min {}B",
+            style("verify").bold(),
+            dt_candidates.len(),
+            dt_config.curl_max_time,
+            dt_config.min_bytes,
+        ));
+
+        screen.begin_progress_with_prefix(
+            dt_candidates.len() as u64,
+            &format!("Data transfer {protocol}"),
+        );
+
+        let dt_core = Arc::new(CoreConfig {
+            curl_max_time: dt_config.curl_max_time.clone(),
+            ..config.clone()
+        });
+
+        let (dt_results, _dt_stats) = run_parallel(
+            &dt_core,
+            domain,
+            protocol,
+            dt_candidates,
+            ips,
+            Some(screen.multi()),
+            Some(screen.pb()),
+            CurlTestMode::DataTransfer {
+                min_bytes: dt_config.min_bytes,
+            },
+        )
+        .await;
+
+        screen.finish_progress();
+
+        let dt_passed: Vec<Vec<String>> = dt_results
+            .iter()
+            .filter(|r| matches!(r.result, TaskResult::Success { .. }))
+            .map(|r| r.strategy_args.clone())
+            .collect();
+
+        let summary = DataTransferSummary {
+            tested: dt_candidates.len(),
+            passed: dt_passed.len(),
+            timeout: dt_config.curl_max_time.clone(),
+            min_bytes: dt_config.min_bytes,
+        };
+
+        if !verified.is_empty() {
+            // Data transfer filters verified strategies
+            (dt_passed, None, Some(summary))
+        } else {
+            // Data transfer filters relaxed strategies
+            let new_relaxed = if dt_passed.is_empty() {
+                relaxed.clone()
+            } else {
+                Some(RelaxedResult {
+                    actual_min: relaxed.as_ref().map(|r| r.actual_min).unwrap_or(0),
+                    strategies: dt_passed,
+                })
+            };
+            (vec![], new_relaxed, Some(summary))
+        }
+    } else {
+        (verified, relaxed, None)
+    };
+
     VerificationSummary {
         total_candidates: candidates.len(),
-        verified_count: verified.len(),
+        verified_count: final_verified.len(),
         required_passes: verify_config.min_passes,
         total_passes: verify_config.passes,
         tallies,
-        verified,
-        relaxed,
+        verified: final_verified,
+        relaxed: final_relaxed,
+        data_transfer_results: dt_summary,
     }
 }
 

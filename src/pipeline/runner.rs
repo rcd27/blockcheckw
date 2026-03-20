@@ -10,7 +10,7 @@ use tracing::info;
 use crate::config::{CoreConfig, Protocol};
 use crate::error::TaskResult;
 use crate::firewall::nftables;
-use crate::pipeline::worker_task::{execute_worker_task, WorkerTask};
+use crate::pipeline::worker_task::{execute_worker_task_with_mode, CurlTestMode, WorkerTask};
 use crate::worker::slot::WorkerSlot;
 
 #[derive(Debug)]
@@ -43,6 +43,7 @@ impl RunStats {
 ///
 /// If `multi` is provided, vanilla output goes above all bars via `multi.println()`.
 /// If `external_pb` is provided, progress ticks on it. Otherwise a new bar is created.
+/// `mode` selects Standard (HEAD for HTTPS) or DataTransfer (GET + size check).
 pub async fn run_parallel(
     config: &CoreConfig,
     domain: &str,
@@ -51,6 +52,7 @@ pub async fn run_parallel(
     ips: &[String],
     multi: Option<&MultiProgress>,
     external_pb: Option<&ProgressBar>,
+    mode: CurlTestMode,
 ) -> (Vec<StrategyResult>, RunStats) {
     let start = Instant::now();
     let slots = WorkerSlot::create_slots(config.worker_count, config.base_qnum, config.base_local_port);
@@ -122,7 +124,7 @@ pub async fn run_parallel(
             };
 
             join_set.spawn(async move {
-                let result = execute_worker_task(&config, &task).await;
+                let result = execute_worker_task_with_mode(&config, &task, mode).await;
                 (task.strategy_args, result)
             });
         }

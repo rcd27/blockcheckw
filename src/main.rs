@@ -14,7 +14,6 @@ use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::benchmark;
 use blockcheckw::pipeline::runner::run_parallel;
 use blockcheckw::pipeline::test_report;
-use blockcheckw::pipeline::verify::{self, DataTransferConfig, VerifyConfig};
 use blockcheckw::pipeline::worker_task::CurlTestMode;
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
@@ -86,22 +85,6 @@ enum Command {
         #[arg(long, default_value = "auto")]
         dns: String,
 
-        /// Number of verification passes (0 = skip verification)
-        #[arg(long, default_value_t = 3)]
-        verify_passes: usize,
-
-        /// Minimum passes required to consider a strategy verified (default: = verify-passes)
-        #[arg(long)]
-        verify_min: Option<usize>,
-
-        /// curl --max-time for verification passes (seconds)
-        #[arg(long, default_value = "3")]
-        verify_timeout: String,
-
-        /// Show per-strategy verification tallies
-        #[arg(long)]
-        verbose: bool,
-
         /// Overall scan timeout in seconds (0 = no limit)
         #[arg(long, default_value_t = 0)]
         timeout: u64,
@@ -117,18 +100,6 @@ enum Command {
         /// Load strategies from file instead of using built-in corpus
         #[arg(long)]
         from_file: Option<String>,
-
-        /// Skip data transfer validation after HEAD verification
-        #[arg(long)]
-        skip_data_transfer: bool,
-
-        /// curl --max-time for data transfer validation (seconds)
-        #[arg(long, default_value = "8")]
-        dt_timeout: String,
-
-        /// Minimum downloaded bytes for data transfer validation
-        #[arg(long, default_value_t = 1024)]
-        dt_min_bytes: u64,
     },
 }
 
@@ -191,17 +162,10 @@ async fn main() {
             domain,
             protocols,
             dns,
-            verify_passes,
-            verify_min,
-            verify_timeout,
-            verbose,
             timeout,
             top,
             output,
             from_file,
-            skip_data_transfer,
-            dt_timeout,
-            dt_min_bytes,
         }) => {
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
@@ -221,17 +185,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            let verify_config = VerifyConfig {
-                passes: verify_passes,
-                min_passes: verify_min.unwrap_or(verify_passes),
-                curl_max_time: verify_timeout,
-                data_transfer: DataTransferConfig {
-                    enabled: !skip_data_transfer,
-                    curl_max_time: dt_timeout,
-                    min_bytes: dt_min_bytes,
-                },
-            };
-            run_scan(cli.workers, &domain, &protocols, dns_mode, &verify_config, verbose, timeout, top, output.as_deref(), from_file.as_deref()).await;
+            run_scan(cli.workers, &domain, &protocols, dns_mode, timeout, top, output.as_deref(), from_file.as_deref()).await;
         }
         Some(Command::Completions { .. }) => unreachable!("handled above"),
         None => run_default(cli.workers).await,
@@ -241,7 +195,7 @@ async fn main() {
 // TODO: run_scan and conflict detection logic should be extracted from main.rs into a
 // library module so they can be unit-tested and reused
 #[allow(clippy::too_many_arguments)]
-async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode: DnsMode, verify_config: &VerifyConfig, verbose: bool, timeout_secs: u64, top_n: usize, output: Option<&str>, from_file: Option<&str>) {
+async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode: DnsMode, timeout_secs: u64, top_n: usize, output: Option<&str>, from_file: Option<&str>) {
     let config = Arc::new(CoreConfig {
         worker_count: workers,
         ..CoreConfig::default()
@@ -355,9 +309,9 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
     screen.println(&ui::blocked_list(&blocked_names.join(", ")));
 
     // 3. Scan each blocked protocol
-    //                       protocol, strategies,    success, fail,  err,   elapsed, unstable
+    //                       protocol, strategies,    success, fail,  err,   elapsed
     #[allow(clippy::type_complexity)]
-    let mut summary: Vec<(Protocol, Vec<Vec<String>>, usize, usize, usize, f64, bool)> = Vec::new();
+    let mut summary: Vec<(Protocol, Vec<Vec<String>>, usize, usize, usize, f64)> = Vec::new();
     let mut timed_out = false;
 
     let scan_future = async {
@@ -439,91 +393,13 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
                 stats.throughput(),
             ));
 
-            // 3b. Verification
-            let (final_strategies, is_unstable) = if verify_config.passes > 0 && !working.is_empty() {
-                // Re-check for conflicts before verify (production services may have restarted)
-                let conflicts = detect_bypass_conflicts(&config.nft_table).await;
-                if !conflicts.is_empty() {
-                    screen.println(&format!(
-                        "  {} {}",
-                        style("!").yellow().bold(),
-                        style("conflicting DPI bypass restarted during scan, killing again...").yellow(),
-                    ));
-                    resolve_bypass_conflicts(&conflicts).await;
-                }
-
-                screen.newline();
-                screen.println(&ui::section(&format!("Verifying {protocol}")));
-                screen.println(&format!(
-                    "  {} candidates, {} passes, timeout={}s",
-                    style(working.len()).bold(),
-                    style(verify_config.passes).bold(),
-                    verify_config.curl_max_time,
-                ));
-
-                let summary_v = verify::run_verification(
-                    &config,
-                    domain,
-                    protocol,
-                    &working,
-                    &ips,
-                    verify_config,
-                    &mut screen,
-                )
-                .await;
-
-                screen.println(&ui::verify_summary_line(
-                    summary_v.verified_count,
-                    summary_v.total_candidates,
-                    summary_v.required_passes,
-                    summary_v.total_passes,
-                ));
-
-                if let Some(ref dt) = summary_v.data_transfer_results {
-                    screen.println(&format!(
-                        "  {}: {}/{} strategies pass (GET, {}s timeout, min {}B)",
-                        style("data transfer").bold(),
-                        style(dt.passed).green().bold(),
-                        dt.tested,
-                        dt.timeout,
-                        dt.min_bytes,
-                    ));
-                }
-
-                if verbose {
-                    for tally in &summary_v.tallies {
-                        screen.println(&ui::verify_tally_line(tally, summary_v.required_passes));
-                    }
-                }
-
-                if !summary_v.verified.is_empty() {
-                    (summary_v.verified, false)
-                } else if let Some(relaxed) = &summary_v.relaxed {
-                    screen.println(&ui::verify_relaxed_header(
-                        summary_v.required_passes,
-                        summary_v.total_passes,
-                        relaxed.actual_min,
-                        relaxed.strategies.len(),
-                    ));
-                    for tally in summary_v.tallies.iter().filter(|t| t.pass_count >= relaxed.actual_min) {
-                        screen.println(&ui::verify_tally_line(tally, relaxed.actual_min));
-                    }
-                    (relaxed.strategies.clone(), true)
-                } else {
-                    (vec![], false)
-                }
-            } else {
-                (working, false)
-            };
-
             summary.push((
                 protocol,
-                final_strategies,
+                working,
                 stats.successes,
                 stats.failures,
                 stats.errors,
                 stats.elapsed.as_secs_f64(),
-                is_unstable,
             ));
         }
     };
@@ -564,7 +440,7 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
     }
 
     // Blocked protocols results (ranked)
-    for (protocol, strategies, _successes, _failures, _errors, _elapsed, unstable) in &summary {
+    for (protocol, strategies, _successes, _failures, _errors, _elapsed) in &summary {
         let proto = protocol.to_string();
         if strategies.is_empty() {
             screen.println(&ui::summary_no_strategies(&proto));
@@ -573,11 +449,7 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
             let total = ranked.len();
             let show = if top_n == 0 || top_n >= total { total } else { top_n };
 
-            if *unstable {
-                screen.println(&ui::summary_found_unstable(&proto, total));
-            } else {
-                screen.println(&ui::summary_found(&proto, total));
-            }
+            screen.println(&ui::summary_found(&proto, total));
 
             screen.println(&ui::top_strategies_header(&proto, show, total));
             for (i, score) in ranked.iter().take(show).enumerate() {
@@ -642,7 +514,7 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
 fn write_vanilla_report(
     path: &str,
     domain: &str,
-    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64, bool)],
+    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64)],
 ) -> std::io::Result<usize> {
     use std::fmt::Write as _;
 
@@ -651,7 +523,7 @@ fn write_vanilla_report(
 
     writeln!(buf, "* SUMMARY").unwrap();
 
-    for (protocol, strategies, _, _, _, _, _) in summary {
+    for (protocol, strategies, _, _, _, _) in summary {
         let test_name = match protocol {
             Protocol::Http => "curl_test_http",
             Protocol::HttpsTls12 => "curl_test_https_tls12",
@@ -671,7 +543,7 @@ fn write_vanilla_report(
 fn write_strategies_file(
     path: &str,
     domain: &str,
-    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64, bool)],
+    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64)],
 ) -> std::io::Result<usize> {
     use std::fmt::Write as _;
 
@@ -682,7 +554,7 @@ fn write_strategies_file(
     writeln!(buf, "# blockcheckw scan results for {domain}").unwrap();
     writeln!(buf, "# {timestamp}").unwrap();
 
-    for (protocol, strategies, _, _, _, _, _) in summary {
+    for (protocol, strategies, _, _, _, _) in summary {
         if strategies.is_empty() {
             continue;
         }

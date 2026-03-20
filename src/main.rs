@@ -621,7 +621,57 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
         }
     }
 
+    // 6. Write vanilla-compatible report (always)
+    let report_path = "report_vanilla.txt";
+    match write_vanilla_report(report_path, domain, &summary) {
+        Ok(count) => {
+            screen.println(&format!(
+                "  {} vanilla report: {} strategies → {}",
+                style("OK").green().bold(),
+                count,
+                style(report_path).cyan(),
+            ));
+        }
+        Err(e) => {
+            screen.println(&format!(
+                "  {} failed to write vanilla report: {e}",
+                style("ERROR:").red().bold(),
+            ));
+        }
+    }
+
     screen.finish_info();
+}
+
+/// Write a vanilla blockcheck2-compatible report.
+/// Format: `curl_test_<proto> ipv4 <domain> : nfqws2 <args>`
+#[allow(clippy::type_complexity)]
+fn write_vanilla_report(
+    path: &str,
+    domain: &str,
+    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64, bool)],
+) -> std::io::Result<usize> {
+    use std::fmt::Write as _;
+
+    let mut buf = String::new();
+    let mut total = 0;
+
+    writeln!(buf, "* SUMMARY").unwrap();
+
+    for (protocol, strategies, _, _, _, _, _) in summary {
+        let test_name = match protocol {
+            Protocol::Http => "curl_test_http",
+            Protocol::HttpsTls12 => "curl_test_https_tls12",
+            Protocol::HttpsTls13 => "curl_test_https_tls13",
+        };
+        for s in strategies {
+            writeln!(buf, "{test_name} ipv4 {domain} : nfqws2 {}", s.join(" ")).unwrap();
+            total += 1;
+        }
+    }
+
+    std::fs::write(path, buf)?;
+    Ok(total)
 }
 
 #[allow(clippy::type_complexity)]

@@ -5,7 +5,14 @@ edition = "2021"
 description = "blockcheck.sh wrapper for better scanning speed"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "process", "time", "signal", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "process", "time", "signal", "macros", "net", "io-util"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio-rustls = "0.26"
+rustls = "0.23"
+webpki-roots = "1"
+socket2 = { version = "0.5", features = ["all"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -23,6 +30,10 @@ libc = "0.2"
 [[test]]
 name = "parallel_benchmark"
 path = "tests/parallel_benchmark.rs"
+
+[[test]]
+name = "e2e_infra"
+path = "tests/e2e_infra.rs"
 
 [profile.release]
 strip = true

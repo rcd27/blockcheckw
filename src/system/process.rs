@@ -41,6 +41,49 @@ pub async fn run_process(
     })
 }
 
+/// Run a command with stdin input, capturing stdout/stderr.
+pub async fn run_process_stdin(
+    args: &[&str],
+    stdin_data: &str,
+    timeout_ms: u64,
+) -> Result<ProcessResult, BlockcheckError> {
+    use tokio::io::AsyncWriteExt;
+
+    let (program, cmd_args) = args.split_first().ok_or_else(|| BlockcheckError::ProcessSpawn {
+        reason: "empty command".to_string(),
+    })?;
+
+    let mut child = Command::new(program)
+        .args(cmd_args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| BlockcheckError::ProcessSpawn {
+            reason: e.to_string(),
+        })?;
+
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let data = stdin_data.to_string();
+    tokio::spawn(async move {
+        let _ = stdin.write_all(data.as_bytes()).await;
+        drop(stdin);
+    });
+
+    let output = timeout(Duration::from_millis(timeout_ms), child.wait_with_output())
+        .await
+        .map_err(|_| BlockcheckError::ProcessTimeout { timeout_ms })?
+        .map_err(|e| BlockcheckError::ProcessSpawn {
+            reason: e.to_string(),
+        })?;
+
+    Ok(ProcessResult {
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
 /// A background process handle. Wraps a tokio::process::Child.
 pub struct BackgroundProcess {
     child: tokio::process::Child,

@@ -10,7 +10,7 @@ use tracing::info;
 use crate::config::{CoreConfig, Protocol};
 use crate::error::TaskResult;
 use crate::firewall::nftables;
-use crate::pipeline::worker_task::{execute_worker_task_with_mode, CurlTestMode, WorkerTask};
+use crate::pipeline::worker_task::{execute_worker_task_rules_ready, HttpTestMode, WorkerTask};
 use crate::worker::slot::WorkerSlot;
 
 #[derive(Debug)]
@@ -41,9 +41,9 @@ impl RunStats {
 
 /// Run strategies in parallel batches using worker slots.
 ///
-/// If `multi` is provided, vanilla output goes above all bars via `multi.println()`.
-/// If `external_pb` is provided, progress ticks on it. Otherwise a new bar is created.
-/// `mode` selects Standard (HEAD for HTTPS) or DataTransfer (GET + size check).
+/// nftables rules are added once per batch (not per strategy), drastically
+/// reducing nft fork+exec overhead. Only nfqws2 start/kill and HTTP tests
+/// happen per strategy.
 pub async fn run_parallel(
     config: &CoreConfig,
     domain: &str,
@@ -52,10 +52,27 @@ pub async fn run_parallel(
     ips: &[String],
     multi: Option<&MultiProgress>,
     external_pb: Option<&ProgressBar>,
-    mode: CurlTestMode,
+    mode: HttpTestMode,
+) -> (Vec<StrategyResult>, RunStats) {
+    run_parallel_with_deadline(config, domain, protocol, strategies, ips, multi, external_pb, mode, None).await
+}
+
+/// Run strategies in parallel batches with optional deadline.
+/// If `deadline` is set, stops processing new batches after the deadline
+/// and returns partial results.
+pub async fn run_parallel_with_deadline(
+    config: &CoreConfig,
+    domain: &str,
+    protocol: Protocol,
+    strategies: &[Vec<String>],
+    ips: &[String],
+    multi: Option<&MultiProgress>,
+    external_pb: Option<&ProgressBar>,
+    mode: HttpTestMode,
+    deadline: Option<Instant>,
 ) -> (Vec<StrategyResult>, RunStats) {
     let start = Instant::now();
-    let slots = WorkerSlot::create_slots(config.worker_count, config.base_qnum, config.base_local_port);
+    let slots = WorkerSlot::create_slots(config.worker_count, config.base_qnum);
 
     // Cleanup any leftover nftables table from a previous crashed run
     nftables::drop_table(&config.nft_table).await;
@@ -84,8 +101,8 @@ pub async fn run_parallel(
     let pb: &ProgressBar = match external_pb {
         Some(epb) => epb,
         None => {
-            owned_pb = ProgressBar::new(strategies.len() as u64);
-            owned_pb.set_style(
+            let raw_pb = ProgressBar::new(strategies.len() as u64);
+            raw_pb.set_style(
                 ProgressStyle::with_template(
                     "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({rate}, ETA {eta})"
                 )
@@ -95,7 +112,12 @@ pub async fn run_parallel(
                 })
                 .progress_chars("=>-"),
             );
-            owned_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+            raw_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+            owned_pb = if let Some(m) = multi {
+                m.add(raw_pb)
+            } else {
+                raw_pb
+            };
             &owned_pb
         }
     };
@@ -105,11 +127,47 @@ pub async fn run_parallel(
     let mut failures = 0usize;
     let mut errors = 0usize;
 
-    // TODO: batch model — last batch may underutilize workers if strategies.len() % worker_count != 0;
-    // consider switching to a semaphore-based or work-stealing approach
     let batches: Vec<&[Vec<String>]> = strategies.chunks(config.worker_count).collect();
 
     for batch in batches {
+        // Check deadline before starting a new batch
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                break;
+            }
+        }
+
+        // Determine which slots are used in this batch
+        let batch_slots: Vec<WorkerSlot> = slots.iter().take(batch.len()).cloned().collect();
+
+        // Add all nftables vmap elements + dispatch rules for this batch
+        if let Err(e) = nftables::add_all_worker_rules(
+            &config.nft_table,
+            &batch_slots,
+            protocol.port(),
+            ips,
+        )
+        .await
+        {
+            // All strategies in this batch fail
+            for strategy_args in batch {
+                errors += 1;
+                let line = format!("nft batch add failed: {e}");
+                if let Some(m) = multi {
+                    let _ = m.println(&line);
+                } else {
+                    pb.suspend(|| eprintln!("{line}"));
+                }
+                pb.inc(1);
+                all_results.push(StrategyResult {
+                    strategy_args: strategy_args.clone(),
+                    result: TaskResult::Error { error: e.clone() },
+                });
+            }
+            continue;
+        }
+
+        // Run all strategies in this batch concurrently (rules are already in place)
         let mut join_set = JoinSet::new();
 
         for (index, strategy_args) in batch.iter().enumerate() {
@@ -124,7 +182,7 @@ pub async fn run_parallel(
             };
 
             join_set.spawn(async move {
-                let result = execute_worker_task_with_mode(&config, &task, mode).await;
+                let result = execute_worker_task_rules_ready(&config, &task, mode).await;
                 (task.strategy_args, result)
             });
         }
@@ -182,6 +240,9 @@ pub async fn run_parallel(
                 }
             }
         }
+
+        // Remove all rules for this batch in ONE nft call
+        nftables::remove_all_worker_rules(&config.nft_table, &batch_slots).await;
     }
 
     if external_pb.is_none() {

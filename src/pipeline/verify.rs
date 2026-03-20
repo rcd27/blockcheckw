@@ -4,9 +4,9 @@ use console::style;
 
 use crate::config::{CoreConfig, Protocol};
 use crate::error::TaskResult;
-use crate::network::curl::DATA_TRANSFER_MIN_BYTES;
+use crate::network::http_client::DATA_TRANSFER_MIN_BYTES;
 use crate::pipeline::runner::{run_parallel, StrategyResult};
-use crate::pipeline::worker_task::CurlTestMode;
+use crate::pipeline::worker_task::HttpTestMode;
 use crate::ui::ScanScreen;
 
 /// Configuration for verification passes.
@@ -16,8 +16,8 @@ pub struct VerifyConfig {
     pub passes: usize,
     /// Minimum passes required to consider a strategy verified
     pub min_passes: usize,
-    /// curl --max-time for verification (stricter than scan)
-    pub curl_max_time: String,
+    /// Request timeout in seconds for verification (stricter than scan)
+    pub request_timeout: u64,
     /// Data transfer validation config
     pub data_transfer: DataTransferConfig,
 }
@@ -27,7 +27,7 @@ impl Default for VerifyConfig {
         Self {
             passes: 3,
             min_passes: 3,
-            curl_max_time: "3".to_string(),
+            request_timeout: 3,
             data_transfer: DataTransferConfig::default(),
         }
     }
@@ -38,8 +38,8 @@ impl Default for VerifyConfig {
 pub struct DataTransferConfig {
     /// Enable data transfer validation (GET request after HEAD passes)
     pub enabled: bool,
-    /// curl --max-time for data transfer test (longer than HEAD)
-    pub curl_max_time: String,
+    /// Request timeout in seconds for data transfer test (longer than HEAD)
+    pub request_timeout: u64,
     /// Minimum bytes that must be downloaded for a strategy to pass
     pub min_bytes: u64,
 }
@@ -48,7 +48,7 @@ impl Default for DataTransferConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            curl_max_time: "8".to_string(),
+            request_timeout: 8,
             min_bytes: DATA_TRANSFER_MIN_BYTES,
         }
     }
@@ -181,7 +181,7 @@ pub async fn run_verification(
     screen: &mut ScanScreen,
 ) -> VerificationSummary {
     let verify_core = Arc::new(CoreConfig {
-        curl_max_time: verify_config.curl_max_time.clone(),
+        request_timeout: verify_config.request_timeout,
         ..config.clone()
     });
 
@@ -208,7 +208,7 @@ pub async fn run_verification(
             ips,
             Some(screen.multi()),
             Some(screen.pb()),
-            CurlTestMode::Standard,
+            HttpTestMode::Standard,
         )
         .await;
 
@@ -255,7 +255,7 @@ pub async fn run_verification(
             "  {} data transfer check: {} strategies, GET {}s timeout, min {}B",
             style("verify").bold(),
             dt_candidates.len(),
-            dt_config.curl_max_time,
+            dt_config.request_timeout,
             dt_config.min_bytes,
         ));
 
@@ -265,7 +265,7 @@ pub async fn run_verification(
         );
 
         let dt_core = Arc::new(CoreConfig {
-            curl_max_time: dt_config.curl_max_time.clone(),
+            request_timeout: dt_config.request_timeout,
             ..config.clone()
         });
 
@@ -277,7 +277,7 @@ pub async fn run_verification(
             ips,
             Some(screen.multi()),
             Some(screen.pb()),
-            CurlTestMode::DataTransfer {
+            HttpTestMode::DataTransfer {
                 min_bytes: dt_config.min_bytes,
             },
         )
@@ -294,7 +294,7 @@ pub async fn run_verification(
         let summary = DataTransferSummary {
             tested: dt_candidates.len(),
             passed: dt_passed.len(),
-            timeout: dt_config.curl_max_time.clone(),
+            timeout: format!("{}s", dt_config.request_timeout),
             min_bytes: dt_config.min_bytes,
         };
 
@@ -332,7 +332,7 @@ pub async fn run_verification(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{CurlVerdictAvailable, TaskResult};
+    use crate::error::{HttpVerdictAvailable, TaskResult};
     use crate::pipeline::runner::StrategyResult;
 
     fn args(s: &str) -> Vec<String> {
@@ -459,21 +459,21 @@ mod tests {
             StrategyResult {
                 strategy_args: args("--c"),
                 result: TaskResult::Success {
-                    verdict: CurlVerdictAvailable,
+                    verdict: HttpVerdictAvailable,
                     strategy_args: args("--c"),
                 },
             },
             StrategyResult {
                 strategy_args: args("--a"),
                 result: TaskResult::Success {
-                    verdict: CurlVerdictAvailable,
+                    verdict: HttpVerdictAvailable,
                     strategy_args: args("--a"),
                 },
             },
             StrategyResult {
                 strategy_args: args("--b"),
                 result: TaskResult::Failed {
-                    verdict: crate::network::curl::CurlVerdict::Unavailable { curl_exit_code: 7 },
+                    verdict: crate::network::http_client::HttpVerdict::Unavailable { reason: "connection refused".to_string() },
                 },
             },
         ];
@@ -496,7 +496,7 @@ mod tests {
         let cfg = VerifyConfig::default();
         assert_eq!(cfg.passes, 3);
         assert_eq!(cfg.min_passes, 3);
-        assert_eq!(cfg.curl_max_time, "3");
+        assert_eq!(cfg.request_timeout, 3);
     }
 
     // ── find_relaxed ───────────────────────────────────────────

@@ -1,15 +1,15 @@
 use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
-use crate::error::{CurlVerdictAvailable, TaskResult};
+use crate::error::{BlockcheckError, HttpVerdictAvailable, TaskResult};
 use crate::firewall::nftables;
-use crate::network::curl::{
-    curl_test, curl_test_data, interpret_curl_result, interpret_data_transfer_result,
-    pick_random_ip, CurlVerdict,
+use crate::network::http_client::{
+    http_test, http_test_data, interpret_data_transfer_result,
+    interpret_http_result, pick_random_ip, HttpVerdict,
 };
 use crate::worker::nfqws2::start_nfqws2;
 use crate::worker::slot::WorkerSlot;
 
 #[derive(Debug, Clone, Copy)]
-pub enum CurlTestMode {
+pub enum HttpTestMode {
     /// Standard mode: HEAD for HTTPS, GET for HTTP
     Standard,
     /// Data transfer mode: GET with size_download check
@@ -18,9 +18,9 @@ pub enum CurlTestMode {
     },
 }
 
-impl Default for CurlTestMode {
+impl Default for HttpTestMode {
     fn default() -> Self {
-        CurlTestMode::Standard
+        HttpTestMode::Standard
     }
 }
 
@@ -35,7 +35,7 @@ pub struct WorkerTask {
 
 /// Execute a full worker task cycle with standard mode.
 pub async fn execute_worker_task(config: &CoreConfig, task: &WorkerTask) -> TaskResult {
-    execute_worker_task_with_mode(config, task, CurlTestMode::Standard).await
+    execute_worker_task_with_mode(config, task, HttpTestMode::Standard).await
 }
 
 /// Execute a full worker task cycle:
@@ -43,13 +43,13 @@ pub async fn execute_worker_task(config: &CoreConfig, task: &WorkerTask) -> Task
 /// 2. Sleep for init delay (wait for nfqws2 to bind to NFQUEUE)
 /// 3. Add outgoing nftables rule (postnat)
 /// 4. Add incoming SYN,ACK nftables rule (prenat, for autottl)
-/// 5. Run curl test (Standard or DataTransfer mode)
+/// 5. Run HTTP test with SO_MARK on socket (pre-connect)
 /// 6. Interpret result
 /// 7. Cleanup: remove rules FIRST, then kill nfqws2
 pub async fn execute_worker_task_with_mode(
     config: &CoreConfig,
     task: &WorkerTask,
-    mode: CurlTestMode,
+    mode: HttpTestMode,
 ) -> TaskResult {
     // Step 1: Start nfqws2 FIRST — must be listening before rules direct packets to NFQUEUE
     let mut nfqws2_process = match start_nfqws2(config, task.slot.qnum, &task.strategy_args) {
@@ -62,10 +62,10 @@ pub async fn execute_worker_task_with_mode(
     // Step 2: Wait for nfqws2 to bind to NFQUEUE
     tokio::time::sleep(std::time::Duration::from_millis(NFQWS2_INIT_DELAY_MS)).await;
 
-    // Step 3: Add outgoing nftables rule (postnat) — listener is ready
+    // Step 3: Add outgoing nftables rule (postnat)
     let postnat_handle = match nftables::add_worker_rule(
         &config.nft_table,
-        &task.slot.sport_range(),
+        task.slot.fwmark,
         task.protocol.port(),
         task.slot.qnum,
         &task.ips,
@@ -79,10 +79,10 @@ pub async fn execute_worker_task_with_mode(
         }
     };
 
-    // Step 4: Add incoming SYN,ACK rule (prenat, for autottl) — listener is ready
+    // Step 4: Add incoming SYN,ACK rule (prenat)
     let prenat_handle = match nftables::add_incoming_rule(
         &config.nft_table,
-        &task.slot.sport_range(),
+        task.slot.fwmark,
         task.protocol.port(),
         task.slot.qnum,
         &task.ips,
@@ -91,54 +91,130 @@ pub async fn execute_worker_task_with_mode(
     {
         Ok(h) => h,
         Err(e) => {
-            // Cleanup postnat rule + kill nfqws2
             let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
             nfqws2_process.kill().await;
             return TaskResult::Error { error: e };
         }
     };
 
-    // Step 5-6: curl test + interpret result (mode-dependent)
-    let local_port = task.slot.local_port_arg();
-    let ip = pick_random_ip(&task.ips);
+    // Step 5-6: HTTP test with marked socket, interpret result
+    let ip = match pick_random_ip(&task.ips) {
+        Some(ip) => ip,
+        None => {
+            let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle).await;
+            nfqws2_process.kill().await;
+            return TaskResult::Error {
+                error: BlockcheckError::DnsNoAddresses {
+                    domain: task.domain.clone(),
+                },
+            };
+        }
+    };
 
     let verdict = match mode {
-        CurlTestMode::Standard => {
-            let curl_result = curl_test(
+        HttpTestMode::Standard => {
+            let result = http_test(
                 task.protocol,
                 &task.domain,
-                Some(&local_port),
-                &config.curl_max_time,
                 ip,
+                task.slot.fwmark,
+                config.request_timeout,
             )
             .await;
-            interpret_curl_result(&curl_result, &task.domain)
+            interpret_http_result(&result, &task.domain)
         }
-        CurlTestMode::DataTransfer { min_bytes } => {
-            let curl_result = curl_test_data(
+        HttpTestMode::DataTransfer { min_bytes } => {
+            let result = http_test_data(
                 task.protocol,
                 &task.domain,
-                Some(&local_port),
-                &config.curl_max_time,
                 ip,
+                task.slot.fwmark,
+                config.request_timeout,
             )
             .await;
-            interpret_data_transfer_result(&curl_result, &task.domain, min_bytes)
+            interpret_data_transfer_result(&result, &task.domain, min_bytes)
         }
     };
 
     let result = match verdict {
-        CurlVerdict::Available => TaskResult::Success {
-            verdict: CurlVerdictAvailable,
+        HttpVerdict::Available => TaskResult::Success {
+            verdict: HttpVerdictAvailable,
             strategy_args: task.strategy_args.clone(),
         },
         other => TaskResult::Failed { verdict: other },
     };
 
     // Step 7: Cleanup — remove rules FIRST (stop intercepting), then kill nfqws2
-    let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
-    let _ = nftables::remove_prenat_rule(&config.nft_table, prenat_handle).await;
+    let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle).await;
     nfqws2_process.kill().await;
 
     result
+}
+
+/// Execute a worker task assuming nftables rules are already in place.
+/// Only starts/kills nfqws2 and runs the HTTP test.
+/// Used when rules are managed at the batch level (not per-strategy).
+pub async fn execute_worker_task_rules_ready(
+    config: &CoreConfig,
+    task: &WorkerTask,
+    mode: HttpTestMode,
+) -> TaskResult {
+    // Start nfqws2
+    let mut nfqws2_process = match start_nfqws2(config, task.slot.qnum, &task.strategy_args) {
+        Ok(p) => p,
+        Err(e) => {
+            return TaskResult::Error { error: e };
+        }
+    };
+
+    // Wait for nfqws2 to bind to NFQUEUE
+    tokio::time::sleep(std::time::Duration::from_millis(NFQWS2_INIT_DELAY_MS)).await;
+
+    // HTTP test with marked socket
+    let ip = match pick_random_ip(&task.ips) {
+        Some(ip) => ip,
+        None => {
+            nfqws2_process.kill().await;
+            return TaskResult::Error {
+                error: BlockcheckError::DnsNoAddresses {
+                    domain: task.domain.clone(),
+                },
+            };
+        }
+    };
+
+    let verdict = match mode {
+        HttpTestMode::Standard => {
+            let result = http_test(
+                task.protocol,
+                &task.domain,
+                ip,
+                task.slot.fwmark,
+                config.request_timeout,
+            )
+            .await;
+            interpret_http_result(&result, &task.domain)
+        }
+        HttpTestMode::DataTransfer { min_bytes } => {
+            let result = http_test_data(
+                task.protocol,
+                &task.domain,
+                ip,
+                task.slot.fwmark,
+                config.request_timeout,
+            )
+            .await;
+            interpret_data_transfer_result(&result, &task.domain, min_bytes)
+        }
+    };
+
+    nfqws2_process.kill().await;
+
+    match verdict {
+        HttpVerdict::Available => TaskResult::Success {
+            verdict: HttpVerdictAvailable,
+            strategy_args: task.strategy_args.clone(),
+        },
+        other => TaskResult::Failed { verdict: other },
+    }
 }

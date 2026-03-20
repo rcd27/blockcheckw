@@ -6,7 +6,9 @@ use serde::Serialize;
 use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
 use crate::error::BlockcheckError;
 use crate::firewall::nftables;
-use crate::network::curl::{curl_test, interpret_curl_result, pick_random_ip, CurlVerdict};
+use crate::network::http_client::{
+    http_test, interpret_http_result, pick_random_ip, HttpVerdict,
+};
 use crate::ui;
 use crate::worker::nfqws2::start_nfqws2;
 use crate::worker::slot::WorkerSlot;
@@ -14,7 +16,7 @@ use crate::worker::slot::WorkerSlot;
 pub struct TestConfig {
     pub passes: usize,
     pub delay_ms: u64,
-    pub curl_max_time: String,
+    pub request_timeout: u64,
     pub with_baseline: bool,
 }
 
@@ -141,7 +143,7 @@ fn shell_split(s: &str) -> Vec<String> {
     args
 }
 
-/// Execute one timed test pass: start nfqws2, add rules, curl, measure latency, cleanup.
+/// Execute one timed test pass: start nfqws2, add rules, http test, measure latency, cleanup.
 async fn execute_timed_test(
     config: &CoreConfig,
     slot: &WorkerSlot,
@@ -149,7 +151,7 @@ async fn execute_timed_test(
     protocol: Protocol,
     ips: &[String],
     strategy_args: &[String],
-    curl_max_time: &str,
+    request_timeout: u64,
 ) -> PassResult {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -178,7 +180,7 @@ async fn execute_timed_test(
     // Add outgoing rule
     let postnat_handle = match nftables::add_worker_rule(
         &config.nft_table,
-        &slot.sport_range(),
+        slot.fwmark,
         protocol.port(),
         slot.qnum,
         ips,
@@ -201,7 +203,7 @@ async fn execute_timed_test(
     // Add incoming SYN,ACK rule
     let prenat_handle = match nftables::add_incoming_rule(
         &config.nft_table,
-        &slot.sport_range(),
+        slot.fwmark,
         protocol.port(),
         slot.qnum,
         ips,
@@ -222,15 +224,15 @@ async fn execute_timed_test(
         }
     };
 
-    // Curl test with timing
-    let local_port = slot.local_port_arg();
-    let ip = pick_random_ip(ips);
-    let curl_start = Instant::now();
-    let curl_result = curl_test(protocol, domain, Some(&local_port), curl_max_time, ip).await;
-    let latency_ms = curl_start.elapsed().as_millis() as u64;
+    // HTTP test with timing
+    let ip_str = pick_random_ip(ips).unwrap_or("127.0.0.1");
 
-    let verdict = interpret_curl_result(&curl_result, domain);
-    let success = matches!(verdict, CurlVerdict::Available);
+    let test_start = Instant::now();
+    let result = http_test(protocol, domain, ip_str, slot.fwmark, request_timeout).await;
+    let verdict = interpret_http_result(&result, domain);
+    let success = matches!(verdict, HttpVerdict::Available);
+    let verdict_str = format!("{verdict}");
+    let latency_ms = test_start.elapsed().as_millis() as u64;
 
     // Cleanup
     let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
@@ -240,7 +242,7 @@ async fn execute_timed_test(
     PassResult {
         pass_index: 0,
         success,
-        verdict: format!("{verdict}"),
+        verdict: verdict_str,
         latency_ms,
         timestamp,
     }
@@ -251,25 +253,26 @@ async fn execute_baseline_pass(
     domain: &str,
     protocol: Protocol,
     ips: &[String],
-    curl_max_time: &str,
+    request_timeout: u64,
 ) -> PassResult {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let ip = pick_random_ip(ips);
-    let curl_start = Instant::now();
-    let curl_result = curl_test(protocol, domain, None, curl_max_time, ip).await;
-    let latency_ms = curl_start.elapsed().as_millis() as u64;
+    let ip_str = pick_random_ip(ips).unwrap_or("127.0.0.1");
 
-    let verdict = interpret_curl_result(&curl_result, domain);
-    let success = matches!(verdict, CurlVerdict::Available);
+    let test_start = Instant::now();
+    let result = http_test(protocol, domain, ip_str, 0, request_timeout).await;
+    let verdict = interpret_http_result(&result, domain);
+    let success = matches!(verdict, HttpVerdict::Available);
+    let verdict_str = format!("{verdict}");
+    let latency_ms = test_start.elapsed().as_millis() as u64;
 
     PassResult {
         pass_index: 0,
         success,
-        verdict: format!("{verdict}"),
+        verdict: verdict_str,
         latency_ms,
         timestamp,
     }
@@ -294,7 +297,7 @@ pub async fn run_strategy_tests(
     }
 
     // Create a single worker slot for sequential testing
-    let slots = WorkerSlot::create_slots(1, core_config.base_qnum, core_config.base_local_port);
+    let slots = WorkerSlot::create_slots(1, core_config.base_qnum);
     let slot = &slots[0];
 
     // Baseline (if enabled)
@@ -310,7 +313,7 @@ pub async fn run_strategy_tests(
                 domain,
                 protocol,
                 ips,
-                &test_config.curl_max_time,
+                test_config.request_timeout,
             )
             .await;
             result.pass_index = i + 1;
@@ -355,7 +358,7 @@ pub async fn run_strategy_tests(
                 protocol,
                 ips,
                 strategy,
-                &test_config.curl_max_time,
+                test_config.request_timeout,
             )
             .await;
             result.pass_index = i + 1;
@@ -570,7 +573,6 @@ mod tests {
     #[test]
     fn test_percentile_basic() {
         let data = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-        // p50 with nearest-rank: idx = round(0.5 * 9) = 5 → 60
         assert_eq!(percentile(&data, 50), 60);
         assert_eq!(percentile(&data, 0), 10);
         assert_eq!(percentile(&data, 100), 100);

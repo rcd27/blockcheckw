@@ -14,7 +14,7 @@ use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::benchmark;
 use blockcheckw::pipeline::runner::run_parallel;
 use blockcheckw::pipeline::test_report;
-use blockcheckw::pipeline::worker_task::CurlTestMode;
+use blockcheckw::pipeline::worker_task::HttpTestMode;
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
 
@@ -47,13 +47,21 @@ struct Cli {
 enum Command {
     /// Run parallel scaling benchmark to find optimal worker count
     Benchmark {
-        /// Number of strategies to generate (fake TTL 1..N)
-        #[arg(short, long, default_value_t = 64)]
-        strategies: usize,
+        /// Seconds to run per worker-count level
+        #[arg(short, long, default_value_t = 30)]
+        time: u64,
 
-        /// Maximum number of workers to test (default: CPU cores * 16)
+        /// Maximum number of workers to test
         #[arg(short = 'M', long)]
         max_workers: Option<usize>,
+
+        /// Target domain
+        #[arg(short, long, default_value = "rutracker.org")]
+        domain: String,
+
+        /// Protocol to benchmark (http, tls12, tls13)
+        #[arg(short, long, default_value = "tls12")]
+        protocol: String,
 
         /// Raw output: table only, no recommendation (for scripts)
         #[arg(long)]
@@ -139,16 +147,27 @@ async fn main() {
 
     blockcheckw::system::elevate::require_root();
     blockcheckw::system::elevate::tune_tcp();
+    blockcheckw::system::elevate::raise_nofile_limit();
 
     match cli.command {
         Some(Command::Benchmark {
-            strategies,
+            time,
             max_workers,
+            domain,
+            protocol,
             raw,
         }) => {
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
                 .init();
+
+            let protocol = match blockcheckw::config::parse_protocols(&protocol) {
+                Ok(p) => p[0],
+                Err(e) => {
+                    eprintln!("ERROR: {e}");
+                    std::process::exit(1);
+                }
+            };
 
             let config = CoreConfig::default();
             if !handle_bypass_conflicts(&config.nft_table).await {
@@ -156,7 +175,7 @@ async fn main() {
             }
 
             let max = max_workers.unwrap_or_else(benchmark::default_max_workers);
-            benchmark::run_benchmark(strategies, max, raw).await;
+            benchmark::run_benchmark(time, max, raw, &domain, protocol).await;
         }
         Some(Command::Scan {
             domain,
@@ -288,7 +307,7 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
     let mut blocked_protocols = Vec::new();
 
     for &protocol in protocols {
-        let result = baseline::test_baseline(domain, protocol, &config.curl_max_time, &ips).await;
+        let result = baseline::test_baseline(domain, protocol, config.request_timeout, &ips).await;
         screen.println(&baseline::format_baseline_verdict_styled(&result));
         if result.is_blocked() {
             blocked_protocols.push(protocol);
@@ -372,7 +391,7 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
                 &ips,
                 Some(screen.multi()),
                 Some(screen.pb()),
-                CurlTestMode::Standard,
+                HttpTestMode::Standard,
             )
             .await;
 
@@ -469,6 +488,7 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
     if let Some(path) = output {
         match write_strategies_file(path, domain, &summary) {
             Ok(count) => {
+                blockcheckw::system::elevate::chown_to_caller(path);
                 screen.println(&format!(
                     "\n  {} {} strategies written to {}",
                     style("OK").green().bold(),
@@ -491,6 +511,7 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
     let vanilla_path = format!("{now}_report_vanilla.txt");
     match write_vanilla_report(&vanilla_path, domain, &summary) {
         Ok(count) => {
+            blockcheckw::system::elevate::chown_to_caller(&vanilla_path);
             screen.println(&format!(
                 "  {} vanilla report: {} strategies → {}",
                 style("OK").green().bold(),
@@ -509,6 +530,7 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
     let ranked_path = format!("{now}_report.txt");
     match write_ranked_report(&ranked_path, domain, &summary) {
         Ok(count) => {
+            blockcheckw::system::elevate::chown_to_caller(&ranked_path);
             screen.println(&format!(
                 "  {} ranked report: {} strategies → {}",
                 style("OK").green().bold(),
@@ -819,7 +841,7 @@ async fn run_default(workers: usize) {
     info!("blockcheckw starting: {protocol} {domain}");
     info!("workers={}, strategies={}", config.worker_count, strategies.len());
 
-    let (results, stats) = run_parallel(&config, domain, protocol, &strategies, &ips, None, None, CurlTestMode::Standard).await;
+    let (results, stats) = run_parallel(&config, domain, protocol, &strategies, &ips, None, None, HttpTestMode::Standard).await;
 
     info!("=== Results ===");
     for r in &results {

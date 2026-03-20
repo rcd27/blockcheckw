@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use blockcheckw::config::{CoreConfig, Protocol};
 use blockcheckw::pipeline::runner::run_parallel;
-use blockcheckw::pipeline::worker_task::CurlTestMode;
+use blockcheckw::pipeline::worker_task::HttpTestMode;
 
 /// Generate N test strategies (fake with TTL 1..N).
 fn generate_strategies(count: usize) -> Vec<Vec<String>> {
@@ -98,7 +98,7 @@ async fn parallel_scaling_bench() {
         eprintln!("\n--- Running with worker_count={wc}, strategies={strategy_count} ---");
         let start = Instant::now();
 
-        let (results, stats) = run_parallel(&config, domain, protocol, &strategies, &ips, None, None, CurlTestMode::Standard).await;
+        let (results, stats) = run_parallel(&config, domain, protocol, &strategies, &ips, None, None, HttpTestMode::Standard).await;
 
         let elapsed_ms = start.elapsed().as_millis();
 

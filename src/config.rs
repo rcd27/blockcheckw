@@ -1,7 +1,7 @@
 use std::fmt;
 
-pub const PORTS_PER_WORKER: u16 = 200;
 pub const DESYNC_MARK: u32 = 0x10000000;
+pub const WORKER_MARK_BASE: u32 = 0x20000000;
 pub const NFQWS2_INIT_DELAY_MS: u64 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,10 +34,9 @@ pub fn parse_dns_mode(s: &str) -> Result<DnsMode, String> {
 pub struct CoreConfig {
     pub worker_count: usize,
     pub base_qnum: u16,
-    pub base_local_port: u16,
     pub nft_table: String,
     pub nfqws2_path: String,
-    pub curl_max_time: String,
+    pub request_timeout: u64,
     pub zapret_base: String,
     pub nfqws2_uid: u32,
     pub nfqws2_gid: u32,
@@ -48,11 +47,9 @@ impl Default for CoreConfig {
         Self {
             worker_count: 8,
             base_qnum: 200,
-            base_local_port: 30000,
             nft_table: "zapret".to_string(),
             nfqws2_path: detect_nfqws2_path("/opt/zapret2"),
-            // TODO: curl_max_time should be a numeric type (f64), not String
-            curl_max_time: "2".to_string(),
+            request_timeout: 2,
             // FIXME: zapret_base is hardcoded; add CLI option to override
             zapret_base: "/opt/zapret2".to_string(),
             // FIXME: nfqws2_uid/gid are hardcoded (uid=1 is daemon, gid=3003 is OpenWrt-specific);
@@ -84,9 +81,9 @@ impl Protocol {
 
     pub fn test_func_name(self) -> &'static str {
         match self {
-            Protocol::Http => "curl_test_http",
-            Protocol::HttpsTls12 => "curl_test_https_tls12",
-            Protocol::HttpsTls13 => "curl_test_https_tls13",
+            Protocol::Http => "http_test_http",
+            Protocol::HttpsTls12 => "http_test_https_tls12",
+            Protocol::HttpsTls13 => "http_test_https_tls13",
         }
     }
 }

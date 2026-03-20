@@ -28,16 +28,19 @@ pub enum BlockcheckError {
 
     #[error("strategies file is empty (no valid strategy lines found)")]
     StrategiesFileEmpty,
+
+    #[error("HTTP client build failed: {reason}")]
+    HttpClientBuild { reason: String },
 }
 
 #[derive(Debug)]
 pub enum TaskResult {
     Success {
-        verdict: CurlVerdictAvailable,
+        verdict: HttpVerdictAvailable,
         strategy_args: Vec<String>,
     },
     Failed {
-        verdict: super::network::curl::CurlVerdict,
+        verdict: super::network::http_client::HttpVerdict,
     },
     Error {
         error: BlockcheckError,
@@ -45,7 +48,7 @@ pub enum TaskResult {
 }
 
 #[derive(Debug)]
-pub struct CurlVerdictAvailable;
+pub struct HttpVerdictAvailable;
 
 impl fmt::Display for TaskResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

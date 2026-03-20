@@ -11,6 +11,8 @@ REFDIR="$(cd "$(dirname "$0")/../../reference/zapret2" && pwd)"
 TESTDIR="$REFDIR/blockcheck2.d/standard"
 
 # --- Stub pktws_curl_test_update: print strategy args, always "succeed" ---
+# Returning 0 (success) preserves vanilla's early-exit optimizations:
+# once a TTL works, higher TTLs are skipped (correct behavior).
 pktws_curl_test_update() {
     # $1 = test function name (ignored)
     # $2 = domain (ignored)

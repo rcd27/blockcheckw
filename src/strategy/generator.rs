@@ -33,10 +33,47 @@ pub fn generate_strategies(protocol: Protocol) -> Vec<Strategy> {
     }
 }
 
-/// Load strategies from an external file (for custom strategy lists).
-pub fn load_strategies_from_file(path: &Path) -> std::io::Result<Vec<Strategy>> {
+/// Load strategies from an external file.
+/// Supports two formats:
+/// 1. Plain: one strategy per line (`--payload=tls_client_hello --lua-desync=...`)
+/// 2. Vanilla summary: `curl_test_https_tls12 ipv4 domain : nfqws2 <args>`
+///
+/// For vanilla format, filters by protocol.
+pub fn load_strategies_from_file(path: &Path, protocol: Option<Protocol>) -> std::io::Result<Vec<Strategy>> {
     let data = std::fs::read_to_string(path)?;
-    Ok(parse_strategies(&data))
+    let is_vanilla = data.lines().any(|l| l.starts_with("* SUMMARY") || l.starts_with("curl_test_"));
+
+    if is_vanilla {
+        Ok(parse_vanilla_summary(&data, protocol))
+    } else {
+        Ok(parse_strategies(&data))
+    }
+}
+
+/// Parse vanilla blockcheck2 summary format.
+/// Each line: `curl_test_<proto> ipv4 <domain> : nfqws2 <args>`
+fn parse_vanilla_summary(data: &str, protocol: Option<Protocol>) -> Vec<Strategy> {
+    data.lines()
+        .filter_map(|line| {
+            if !line.starts_with("curl_test_") {
+                return None;
+            }
+            // Check protocol filter
+            if let Some(proto) = protocol {
+                let prefix = match proto {
+                    Protocol::Http => "curl_test_http ",
+                    Protocol::HttpsTls12 => "curl_test_https_tls12 ",
+                    Protocol::HttpsTls13 => "curl_test_https_tls13 ",
+                };
+                if !line.starts_with(prefix) {
+                    return None;
+                }
+            }
+            // Extract args after "nfqws2 "
+            line.split_once(": nfqws2 ")
+                .map(|(_, args)| args.split_whitespace().map(String::from).collect())
+        })
+        .collect()
 }
 
 #[cfg(test)]

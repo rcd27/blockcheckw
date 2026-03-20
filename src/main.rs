@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
 use tokio::signal;
 use tracing::info;
@@ -14,7 +14,6 @@ use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::benchmark;
 use blockcheckw::pipeline::runner::run_parallel;
 use blockcheckw::pipeline::test_report;
-use blockcheckw::pipeline::test_runner::{self, TestConfig};
 use blockcheckw::pipeline::verify::{self, DataTransferConfig, VerifyConfig};
 use blockcheckw::pipeline::worker_task::CurlTestMode;
 use blockcheckw::strategy::{generator, rank};
@@ -48,47 +47,15 @@ enum Command {
         raw: bool,
     },
 
-    /// Test specific strategies with detailed statistics
-    Test {
-        /// Target domain
-        #[arg(short, long, default_value = "rutracker.org")]
-        domain: String,
+    /// Generate shell completions (prints to stdout, or installs with --install)
+    Completions {
+        /// Shell to generate completions for (auto-detected if omitted)
+        #[arg(value_enum)]
+        shell: Option<clap_complete::Shell>,
 
-        /// Protocol: http, tls12, tls13
-        #[arg(short, long)]
-        protocol: String,
-
-        /// DNS mode: auto, system, doh
-        #[arg(long, default_value = "auto")]
-        dns: String,
-
-        /// Load strategies from file (one strategy per line)
+        /// Install completions into the appropriate system directory
         #[arg(long)]
-        from_file: String,
-
-        /// Number of passes per strategy
-        #[arg(short = 'n', long, default_value_t = 10)]
-        passes: usize,
-
-        /// Delay between passes (ms)
-        #[arg(long, default_value_t = 0)]
-        delay_ms: u64,
-
-        /// curl --max-time (seconds)
-        #[arg(long, default_value = "3")]
-        curl_timeout: String,
-
-        /// Include baseline (no-bypass) control group
-        #[arg(long)]
-        with_baseline: bool,
-
-        /// Export results as JSON to file
-        #[arg(long)]
-        json: Option<String>,
-
-        /// Show per-pass details
-        #[arg(long)]
-        verbose: bool,
+        install: bool,
     },
 
     /// Scan domain for working DPI bypass strategies
@@ -129,9 +96,13 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         top: usize,
 
-        /// Save found strategies to file (compatible with test --from-file)
+        /// Save found strategies to file
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Load strategies from file instead of using built-in corpus
+        #[arg(long)]
+        from_file: Option<String>,
 
         /// Skip data transfer validation after HEAD verification
         #[arg(long)]
@@ -161,6 +132,26 @@ async fn main() {
 
     let cli = Cli::parse();
 
+    // Completions don't need root — handle before elevation
+    if let Some(Command::Completions { shell, install }) = &cli.command {
+        let shell = shell.unwrap_or_else(|| detect_shell().unwrap_or_else(|| {
+            eprintln!("Could not detect shell. Specify it explicitly: blockcheckw completions bash");
+            std::process::exit(1);
+        }));
+
+        if *install {
+            install_completions(shell);
+        } else {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "blockcheckw",
+                &mut std::io::stdout(),
+            );
+        }
+        return;
+    }
+
     blockcheckw::system::elevate::require_root();
 
     match cli.command {
@@ -181,44 +172,6 @@ async fn main() {
             let max = max_workers.unwrap_or_else(benchmark::default_max_workers);
             benchmark::run_benchmark(strategies, max, raw).await;
         }
-        Some(Command::Test {
-            domain,
-            protocol,
-            dns,
-            from_file,
-            passes,
-            delay_ms,
-            curl_timeout,
-            with_baseline,
-            json,
-            verbose,
-        }) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
-                .init();
-
-            let protocols = match blockcheckw::config::parse_protocols(&protocol) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("ERROR: {e}");
-                    std::process::exit(1);
-                }
-            };
-            if protocols.len() != 1 {
-                eprintln!("ERROR: test command requires exactly one protocol (http, tls12, or tls13)");
-                std::process::exit(1);
-            }
-            let protocol = protocols[0];
-            let dns_mode = match blockcheckw::config::parse_dns_mode(&dns) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("ERROR: {e}");
-                    std::process::exit(1);
-                }
-            };
-
-            run_test(&domain, protocol, dns_mode, &from_file, passes, delay_ms, &curl_timeout, with_baseline, json.as_deref(), verbose).await;
-        }
         Some(Command::Scan {
             domain,
             protocols,
@@ -230,6 +183,7 @@ async fn main() {
             timeout,
             top,
             output,
+            from_file,
             skip_data_transfer,
             dt_timeout,
             dt_min_bytes,
@@ -262,8 +216,9 @@ async fn main() {
                     min_bytes: dt_min_bytes,
                 },
             };
-            run_scan(cli.workers, &domain, &protocols, dns_mode, &verify_config, verbose, timeout, top, output.as_deref()).await;
+            run_scan(cli.workers, &domain, &protocols, dns_mode, &verify_config, verbose, timeout, top, output.as_deref(), from_file.as_deref()).await;
         }
+        Some(Command::Completions { .. }) => unreachable!("handled above"),
         None => run_default(cli.workers).await,
     }
 }
@@ -271,7 +226,7 @@ async fn main() {
 // TODO: run_scan and conflict detection logic should be extracted from main.rs into a
 // library module so they can be unit-tested and reused
 #[allow(clippy::too_many_arguments)]
-async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode: DnsMode, verify_config: &VerifyConfig, verbose: bool, timeout_secs: u64, top_n: usize, output: Option<&str>) {
+async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode: DnsMode, verify_config: &VerifyConfig, verbose: bool, timeout_secs: u64, top_n: usize, output: Option<&str>, from_file: Option<&str>) {
     let config = Arc::new(CoreConfig {
         worker_count: workers,
         ..CoreConfig::default()
@@ -405,12 +360,35 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
 
             screen.newline();
             screen.println(&ui::section(&format!("Scanning {protocol}")));
-            let strategies = generator::generate_strategies(protocol);
-            screen.println(&format!(
-                "  generated {} strategies, workers={}",
-                style(strategies.len()).bold(),
-                style(config.worker_count).bold()
-            ));
+            let strategies = if let Some(path) = from_file {
+                match generator::load_strategies_from_file(std::path::Path::new(path), Some(protocol)) {
+                    Ok(s) => {
+                        screen.println(&format!(
+                            "  loaded {} strategies from {}, workers={}",
+                            style(s.len()).bold(),
+                            style(path).cyan(),
+                            style(config.worker_count).bold()
+                        ));
+                        s
+                    }
+                    Err(e) => {
+                        screen.println(&format!(
+                            "  {} failed to read {}: {e}",
+                            style("ERROR:").red().bold(),
+                            style(path).cyan(),
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                let s = generator::generate_strategies(protocol);
+                screen.println(&format!(
+                    "  {} strategies, workers={}",
+                    style(s.len()).bold(),
+                    style(config.worker_count).bold()
+                ));
+                s
+            };
 
             screen.begin_progress_with_prefix(
                 strategies.len() as u64,
@@ -706,129 +684,126 @@ fn write_strategies_file(
     Ok(total_count)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_test(
-    domain: &str,
-    protocol: Protocol,
-    dns_mode: DnsMode,
-    from_file: &str,
-    passes: usize,
-    delay_ms: u64,
-    curl_timeout: &str,
-    with_baseline: bool,
-    json_path: Option<&str>,
-    verbose: bool,
-) {
-    let config = Arc::new(CoreConfig::default());
+fn detect_shell() -> Option<clap_complete::Shell> {
+    let shell_env = std::env::var("SHELL").ok()?;
+    let shell_name = std::path::Path::new(&shell_env).file_name()?.to_str()?;
+    match shell_name {
+        "bash" => Some(clap_complete::Shell::Bash),
+        "zsh" => Some(clap_complete::Shell::Zsh),
+        "fish" => Some(clap_complete::Shell::Fish),
+        "elvish" => Some(clap_complete::Shell::Elvish),
+        "pwsh" | "powershell" => Some(clap_complete::Shell::PowerShell),
+        _ => None,
+    }
+}
 
-    // Signal handler: cleanup nftables on Ctrl+C
-    let cleanup_config = config.clone();
-    tokio::spawn(async move {
-        if signal::ctrl_c().await.is_ok() {
-            eprintln!("\nCtrl+C received, cleaning up...");
-            nftables::drop_table(&cleanup_config.nft_table).await;
-            std::process::exit(130);
+fn install_completions(shell: clap_complete::Shell) {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let (dir, filename) = match shell {
+        clap_complete::Shell::Bash => {
+            // Prefer user-local dir, fallback to system
+            let user_dir = dirs_for_bash();
+            (user_dir, "blockcheckw".to_string())
         }
-    });
-
-    let mut screen = ui::ScanScreen::new();
-
-    // DNS resolve
-    screen.println(&ui::section("DNS resolve"));
-    screen.println(&format!("  dns mode: {}", style(dns_mode.to_string()).bold()));
-    let ips = match dns::resolve_domain(domain, dns_mode).await {
-        Ok(resolution) => {
-            screen.println(&format!(
-                "  {} {} {} (via {})",
-                domain,
-                ui::ARROW,
-                style(resolution.ips.join(", ")).bold(),
-                resolution.method,
-            ));
-            resolution.ips
+        clap_complete::Shell::Zsh => {
+            let dir = zsh_completions_dir().unwrap_or_else(|| {
+                eprintln!("Could not determine zsh completions directory.");
+                eprintln!("Print to stdout instead: blockcheckw completions zsh");
+                std::process::exit(1);
+            });
+            (dir, "_blockcheckw".to_string())
         }
-        Err(e) => {
-            eprintln!("{} {e}", style("ERROR:").red().bold());
+        clap_complete::Shell::Fish => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let dir = PathBuf::from(home).join(".config/fish/completions");
+            (dir, "blockcheckw.fish".to_string())
+        }
+        _ => {
+            eprintln!("--install is not supported for {shell}. Print to stdout instead:");
+            eprintln!("  blockcheckw completions {shell}");
             std::process::exit(1);
         }
     };
 
-    // Conflict detection
-    if !handle_bypass_conflicts(&config.nft_table).await {
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!("Failed to create {}: {e}", dir.display());
         std::process::exit(1);
     }
 
-    // Read strategies file
-    let file_content = match std::fs::read_to_string(from_file) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{} failed to read {from_file}: {e}", style("ERROR:").red().bold());
-            std::process::exit(1);
-        }
-    };
-    let strategies = match test_runner::parse_strategies_file(&file_content) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{} {e}", style("ERROR:").red().bold());
-            std::process::exit(1);
-        }
-    };
+    let path = dir.join(&filename);
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "blockcheckw", &mut buf);
 
-    screen.println(&format!(
-        "\n  {} strategies loaded from {}",
-        style(strategies.len()).bold(),
-        style(from_file).cyan(),
-    ));
-
-    let test_config = TestConfig {
-        passes,
-        delay_ms,
-        curl_max_time: curl_timeout.to_string(),
-        with_baseline,
-    };
-
-    let results = test_runner::run_strategy_tests(
-        &test_config,
-        &config,
-        domain,
-        protocol,
-        &ips,
-        &strategies,
-        &screen,
-    )
-    .await;
-
-    // Terminal report
-    test_report::render_terminal_report(
-        &results,
-        domain,
-        protocol,
-        passes,
-        curl_timeout,
-        verbose,
-        &screen,
-    );
-
-    // JSON export
-    if let Some(path) = json_path {
-        match test_report::write_json(path, domain, protocol, passes, curl_timeout, &results) {
-            Ok(()) => {
-                screen.println(&format!(
-                    "\n  {} JSON report written to {}",
-                    style("OK").green().bold(),
-                    style(path).cyan(),
-                ));
+    match fs::write(&path, &buf) {
+        Ok(()) => {
+            eprintln!("Completions installed to {}", path.display());
+            match shell {
+                clap_complete::Shell::Bash => {
+                    eprintln!("Restart your shell or run: source {}", path.display());
+                }
+                clap_complete::Shell::Zsh => {
+                    eprintln!("Restart your shell or run: autoload -Uz compinit && compinit");
+                }
+                clap_complete::Shell::Fish => {
+                    eprintln!("Completions will be loaded automatically on next shell start.");
+                }
+                _ => {}
             }
-            Err(e) => {
-                screen.println(&format!(
-                    "\n  {} {e}",
-                    style("ERROR:").red().bold(),
-                ));
+        }
+        Err(e) => {
+            eprintln!("Failed to write {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn dirs_for_bash() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    // System-wide directory (works if running as root or user has write access)
+    let system = PathBuf::from("/etc/bash_completion.d");
+    if system.is_dir() {
+        // Check if writable
+        let test_file = system.join(".blockcheckw_write_test");
+        if std::fs::write(&test_file, "").is_ok() {
+            let _ = std::fs::remove_file(&test_file);
+            return system;
+        }
+    }
+    // User-local: ~/.local/share/bash-completion/completions
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local/share/bash-completion/completions")
+}
+
+fn zsh_completions_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    // Try common paths in order
+    let candidates = [
+        // User-local
+        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".zfunc")),
+        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share/zsh/site-functions")),
+        // System-wide
+        Some(PathBuf::from("/usr/local/share/zsh/site-functions")),
+        Some(PathBuf::from("/usr/share/zsh/site-functions")),
+    ];
+
+    // First try existing writable dirs
+    for candidate in &candidates {
+        if let Some(dir) = candidate {
+            if dir.is_dir() {
+                let test = dir.join(".blockcheckw_write_test");
+                if std::fs::write(&test, "").is_ok() {
+                    let _ = std::fs::remove_file(&test);
+                    return Some(dir.clone());
+                }
             }
         }
     }
 
-    screen.finish_info();
+    // Fallback: create user-local dir
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".local/share/zsh/site-functions"))
 }
 
 async fn run_default(workers: usize) {

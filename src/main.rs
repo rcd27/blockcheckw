@@ -486,15 +486,16 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
         }
     }
 
-    // 6. Write vanilla-compatible report (always)
-    let report_path = "report_vanilla.txt";
-    match write_vanilla_report(report_path, domain, &summary) {
+    // 6. Write reports (always)
+    let now = chrono_local_prefix();
+    let vanilla_path = format!("{now}_report_vanilla.txt");
+    match write_vanilla_report(&vanilla_path, domain, &summary) {
         Ok(count) => {
             screen.println(&format!(
                 "  {} vanilla report: {} strategies → {}",
                 style("OK").green().bold(),
                 count,
-                style(report_path).cyan(),
+                style(&vanilla_path).cyan(),
             ));
         }
         Err(e) => {
@@ -505,7 +506,90 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
         }
     }
 
+    let ranked_path = format!("{now}_report.txt");
+    match write_ranked_report(&ranked_path, domain, &summary) {
+        Ok(count) => {
+            screen.println(&format!(
+                "  {} ranked report: {} strategies → {}",
+                style("OK").green().bold(),
+                count,
+                style(&ranked_path).cyan(),
+            ));
+        }
+        Err(e) => {
+            screen.println(&format!(
+                "  {} failed to write ranked report: {e}",
+                style("ERROR:").red().bold(),
+            ));
+        }
+    }
+
     screen.finish_info();
+}
+
+/// Write ranked report with scores and stars.
+#[allow(clippy::type_complexity)]
+fn write_ranked_report(
+    path: &str,
+    domain: &str,
+    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64)],
+) -> std::io::Result<usize> {
+    use std::fmt::Write as _;
+
+    let mut buf = String::new();
+    let mut total = 0;
+
+    writeln!(buf, "# blockcheckw ranked report for {domain}").unwrap();
+
+    for (protocol, strategies, _, _, _, _) in summary {
+        if strategies.is_empty() {
+            continue;
+        }
+        let ranked = rank::rank_strategies(strategies);
+        writeln!(buf).unwrap();
+        writeln!(buf, "# {protocol} — {} strategies", ranked.len()).unwrap();
+
+        for (i, score) in ranked.iter().enumerate() {
+            let stars = match score.stars {
+                3 => "***",
+                2 => "** ",
+                _ => "*  ",
+            };
+            writeln!(
+                buf,
+                "#{:<4} {} [score={:>3} perf={:>3} simple={:>3}] nfqws2 {}",
+                i + 1,
+                stars,
+                score.total,
+                score.performance,
+                score.simplicity,
+                score.strategy_args.join(" "),
+            )
+            .unwrap();
+            total += 1;
+        }
+    }
+
+    std::fs::write(path, buf)?;
+    Ok(total)
+}
+
+/// Generate a local-time prefix for report filenames: "2026-03-20_18-30"
+fn chrono_local_prefix() -> String {
+    use std::process::Command;
+    // Use `date` for local timezone — no chrono dependency
+    let output = Command::new("date").arg("+%Y-%m-%d_%H-%M").output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => {
+            // Fallback: UTC epoch-based
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            format!("{secs}")
+        }
+    }
 }
 
 /// Write a vanilla blockcheck2-compatible report.

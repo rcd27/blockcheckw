@@ -1,0 +1,152 @@
+use std::sync::Arc;
+
+use console::style;
+use tokio::signal;
+
+use blockcheckw::config::{CoreConfig, DnsMode};
+use blockcheckw::firewall::nftables;
+use blockcheckw::network::{dns, isp};
+use blockcheckw::pipeline::check;
+use blockcheckw::strategy::generator;
+use blockcheckw::ui;
+
+use super::handle_bypass_conflicts;
+
+pub async fn run_check_cmd(
+    domain: &str,
+    from_file: &str,
+    dns_mode: DnsMode,
+    timeout: u64,
+    take: usize,
+    passes: usize,
+    output: Option<&str>,
+) {
+    let config = Arc::new(CoreConfig {
+        worker_count: 1,
+        request_timeout: timeout,
+        ..CoreConfig::default()
+    });
+
+    // Signal handler: cleanup nftables on Ctrl+C
+    let cleanup_config = config.clone();
+    tokio::spawn(async move {
+        if signal::ctrl_c().await.is_ok() {
+            eprintln!("\nCtrl+C received, cleaning up...");
+            nftables::drop_table(&cleanup_config.nft_table).await;
+            std::process::exit(130);
+        }
+    });
+
+    let mut screen = ui::ScanScreen::new();
+
+    // Load strategies from vanilla file
+    let strategies = match generator::load_tagged_strategies(std::path::Path::new(from_file)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "{} failed to read {}: {e}",
+                style("ERROR:").red().bold(),
+                style(from_file).cyan(),
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let mut flags = String::new();
+    if take > 0 {
+        flags.push_str(&format!(", --take {take}"));
+    }
+    if passes >= 2 {
+        flags.push_str(&format!(", --passes {passes}"));
+    }
+    screen.println(&format!(
+        "{} loaded {} strategies from {}{}",
+        style("check").bold().cyan(),
+        style(strategies.len()).bold(),
+        style(from_file).cyan(),
+        flags,
+    ));
+
+    // ISP info
+    if let Some(info) = isp::detect_ip_info().await {
+        screen.add_info_line(&format!("  ISP: {info}"));
+    }
+
+    // DNS resolve
+    screen.println(&ui::section("DNS resolve"));
+    screen.println(&format!(
+        "  dns mode: {}",
+        style(dns_mode.to_string()).bold()
+    ));
+    let ips = match dns::resolve_domain(domain, dns_mode).await {
+        Ok(resolution) => {
+            screen.println(&format!(
+                "  {} {} {} (via {})",
+                domain,
+                ui::ARROW,
+                style(resolution.ips.join(", ")).bold(),
+                resolution.method,
+            ));
+            resolution.ips
+        }
+        Err(e) => {
+            eprintln!("{} {e}", style("ERROR:").red().bold());
+            std::process::exit(1);
+        }
+    };
+
+    // Check for conflicts
+    if !handle_bypass_conflicts(&config.nft_table).await {
+        std::process::exit(1);
+    }
+
+    // Run check
+    screen.newline();
+    screen.println(&ui::section("Checking strategies (data transfer)"));
+
+    let report = check::run_check(&config, domain, &strategies, &ips, take, passes, &screen).await;
+
+    // Summary
+    screen.newline();
+    screen.println(&ui::section("Check summary"));
+    screen.println(&format!(
+        "  total: {} | working: {} | elapsed: {:.1}s",
+        report.total,
+        style(report.working).green().bold(),
+        report.elapsed_secs,
+    ));
+    if let Some(ref best) = report.best {
+        screen.println(&format!(
+            "  {} {} nfqws2 {}",
+            style("BEST:").green().bold(),
+            style(&best.protocol).bold(),
+            style(&best.args).cyan().bold(),
+        ));
+    }
+
+    // Output JSON
+    let json = serde_json::to_string_pretty(&report).unwrap();
+
+    if let Some(path) = output {
+        match std::fs::write(path, &json) {
+            Ok(()) => {
+                blockcheckw::system::elevate::chown_to_caller(path);
+                screen.println(&format!(
+                    "  {} JSON report → {}",
+                    style("OK").green().bold(),
+                    style(path).cyan(),
+                ));
+            }
+            Err(e) => {
+                screen.println(&format!(
+                    "  {} failed to write {}: {e}",
+                    style("ERROR:").red().bold(),
+                    style(path).cyan(),
+                ));
+            }
+        }
+    } else {
+        screen.finish_info();
+        println!("{json}");
+    }
+}

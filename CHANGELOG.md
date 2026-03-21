@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/rcd27/blockcheckw/compare/v0.2.0...v0.2.1) (2026-03-21)
+
+
+### Bug Fixes
+
+* **check:** немного свой пайплайн для CHECK, отличающийся от SCAN ([0122d9d](https://github.com/rcd27/blockcheckw/commit/0122d9d109e35df2b64509d590de3c4d5f7356dd))
+* **ci-cd:** локальная проверка CI ([21a3856](https://github.com/rcd27/blockcheckw/commit/21a385673a4d9e2f5de8ef05450e35e046f66fa5))
+
 ## [0.2.0](https://github.com/rcd27/blockcheckw/compare/v0.1.9...v0.2.0) (2026-03-21)
 
 

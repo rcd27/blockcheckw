@@ -305,12 +305,29 @@ impl ScanScreen {
 
     /// Add a fixed info line that stays below the progress bar.
     /// Multiple lines can be added (ISP, DNS, etc).
+    /// A divider is automatically inserted before the first info line.
     pub fn add_info_line(&mut self, msg: &str) {
+        if self.info_bars.is_empty() {
+            let width = Term::stdout().size().1 as usize;
+            let divider = self.multi.add(ProgressBar::new(0));
+            divider.set_style(ProgressStyle::with_template("{msg}").unwrap());
+            divider.set_message(format!("{}", style("─".repeat(width)).dim()));
+            divider.tick();
+            self.info_bars.push(divider);
+        }
         let bar = self.multi.add(ProgressBar::new(0));
         bar.set_style(ProgressStyle::with_template("{msg}").unwrap());
         bar.set_message(format!("{}", style(msg).dim()));
         bar.tick();
         self.info_bars.push(bar);
+    }
+
+    /// Update the last info line in-place (for tally counters, etc).
+    pub fn update_info_line(&self, msg: &str) {
+        if let Some(bar) = self.info_bars.last() {
+            bar.set_message(msg.to_string());
+            bar.tick();
+        }
     }
 
     /// Clear and remove all info bars.

@@ -116,7 +116,16 @@ pub async fn run_check_cmd(
         style("Tip: use --take 10 to stop after 10 working per protocol").yellow()
     ));
 
-    let report = check::run_check(&config, domain, &strategies, &ips, take, passes, &screen).await;
+    let report = check::run_check(
+        &config,
+        domain,
+        &strategies,
+        &ips,
+        take,
+        passes,
+        &mut screen,
+    )
+    .await;
 
     // Summary
     screen.newline();

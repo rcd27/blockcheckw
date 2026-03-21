@@ -41,7 +41,8 @@ fn mem_available_kb() -> Option<u64> {
     None
 }
 
-pub fn worker_counts_to_test(max: usize) -> Vec<usize> {
+pub fn worker_counts_to_test(min: usize, max: usize) -> Vec<usize> {
+    let floor = min.max(4);
     let mut counts: Vec<usize> = (0..)
         .map(|p| 1usize << p)
         .take_while(|&n| n <= max)
@@ -49,7 +50,7 @@ pub fn worker_counts_to_test(max: usize) -> Vec<usize> {
     if counts.last() != Some(&max) {
         counts.push(max);
     }
-    counts.retain(|&n| n >= 4);
+    counts.retain(|&n| n >= floor);
     counts
 }
 
@@ -297,7 +298,7 @@ pub async fn run_benchmark(
 
     let strategies = generator::generate_strategies(protocol);
     let corpus_size = strategies.len();
-    let worker_counts = worker_counts_to_test(max_workers);
+    let worker_counts = worker_counts_to_test(profile.estimated_min, max_workers);
     let level_count = worker_counts.len();
 
     let header = if raw {
@@ -309,11 +310,12 @@ pub async fn run_benchmark(
     } else {
         format!(
             "{}\n\n\
-             === blockcheckw benchmark ===\n\
+             {}\n\
              domain={domain}  protocol={protocol}  corpus={corpus_size} strategies\n\
              {time_per_level}s per level, {level_count} levels ({} total est.)\n\
              Press Ctrl+C to stop\n",
             profile.format_styled(),
+            style("=== blockcheckw benchmark ===").bold().cyan(),
             format_duration(time_per_level * level_count as u64),
         )
     };
@@ -540,12 +542,15 @@ mod tests {
 
     #[test]
     fn test_worker_counts_to_test() {
-        assert_eq!(worker_counts_to_test(64), vec![4, 8, 16, 32, 64]);
-        assert_eq!(worker_counts_to_test(48), vec![4, 8, 16, 32, 48]);
+        assert_eq!(worker_counts_to_test(4, 64), vec![4, 8, 16, 32, 64]);
+        assert_eq!(worker_counts_to_test(4, 48), vec![4, 8, 16, 32, 48]);
         assert_eq!(
-            worker_counts_to_test(512),
+            worker_counts_to_test(4, 512),
             vec![4, 8, 16, 32, 64, 128, 256, 512]
         );
+        // System with 16 cores should start from 16
+        assert_eq!(worker_counts_to_test(16, 256), vec![16, 32, 64, 128, 256]);
+        assert_eq!(worker_counts_to_test(8, 64), vec![8, 16, 32, 64]);
     }
 
     #[test]

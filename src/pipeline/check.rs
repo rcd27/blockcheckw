@@ -67,7 +67,7 @@ pub async fn run_check(
     ips: &[String],
     take: usize,
     passes: usize,
-    screen: &ui::ScanScreen,
+    screen: &mut ui::ScanScreen,
 ) -> CheckReport {
     let start = Instant::now();
     let slot = WorkerSlot::create_slots(1, config.base_qnum)
@@ -118,6 +118,23 @@ pub async fn run_check(
                 acc
             });
 
+    // Sticky tally line at the bottom (like ISP in scan)
+    let build_tally = |working_per_proto: &std::collections::HashMap<String, usize>| -> String {
+        proto_order
+            .iter()
+            .map(|p| {
+                let count = working_per_proto.get(p).copied().unwrap_or(0);
+                if count > 0 {
+                    format!("{}: {}", p, style(format!("{count} \u{2713}")).green())
+                } else {
+                    format!("{}: {}", p, style("\u{2014}").dim())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    screen.add_info_line(&format!("  {}", build_tally(&working_per_proto)));
+
     for (idx, tagged) in strategies.iter().enumerate() {
         // Skip this protocol if we already have enough working strategies
         if take > 0 {
@@ -162,20 +179,8 @@ pub async fn run_check(
         };
         screen.println(&status);
 
-        // Per-protocol working tally
-        let tally: String = proto_order
-            .iter()
-            .map(|p| {
-                let count = working_per_proto.get(p).copied().unwrap_or(0);
-                if count > 0 {
-                    format!("{}: {}", p, style(format!("{count} \u{2713}")).green())
-                } else {
-                    format!("{}: {}", p, style("\u{2014}").dim())
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" | ");
-        screen.println(&format!("  {tally}"));
+        // Update sticky tally
+        screen.update_info_line(&format!("  {}", build_tally(&working_per_proto)));
 
         if checked.working {
             working_tagged.push(tagged);
@@ -201,6 +206,9 @@ pub async fn run_check(
             }
         }
     }
+
+    // Remove sticky tally before Phase 2
+    screen.finish_info();
 
     // ── Phase 2: verification ──
     let best = if passes >= 2 && !working_tagged.is_empty() {
@@ -269,7 +277,18 @@ pub async fn run_check(
                 stats.successes,
                 stats.total_passes,
                 stats.latency_median_ms,
-                style("★".repeat(rank_score.stars as usize)).yellow(),
+                match stats.stability {
+                    StabilityVerdict::Stable =>
+                        style("★".repeat(rank_score.stars as usize)).green(),
+                    StabilityVerdict::Reliable =>
+                        style("★".repeat(rank_score.stars as usize)).green(),
+                    StabilityVerdict::Flaky =>
+                        style("★".repeat(rank_score.stars as usize)).yellow(),
+                    StabilityVerdict::Unreliable =>
+                        style("★".repeat(rank_score.stars as usize)).red(),
+                    StabilityVerdict::Broken =>
+                        style("★".repeat(rank_score.stars as usize)).red().dim(),
+                },
                 rank_score.total,
                 final_score,
             ));
@@ -287,30 +306,6 @@ pub async fn run_check(
 
         // Sort by final_score descending
         verified.sort_by(|a, b| b.final_score.partial_cmp(&a.final_score).unwrap());
-
-        if let Some(best) = verified.first() {
-            screen.newline();
-            screen.println(&format!(
-                "  {} {} nfqws2 {}",
-                style("BEST:").green().bold(),
-                style(&best.protocol).bold(),
-                style(&best.args).cyan().bold(),
-            ));
-            screen.println(&format!(
-                "    success_rate: {:.0}%, median: {}ms, stability: {}, rank: {}, final: {:.1}",
-                best.success_rate * 100.0,
-                best.median_latency_ms,
-                match best.stability {
-                    StabilityVerdict::Stable => style(best.stability.to_string()).green().bold(),
-                    StabilityVerdict::Reliable => style(best.stability.to_string()).green(),
-                    StabilityVerdict::Flaky => style(best.stability.to_string()).yellow().bold(),
-                    StabilityVerdict::Unreliable => style(best.stability.to_string()).red(),
-                    StabilityVerdict::Broken => style(best.stability.to_string()).red().bold(),
-                },
-                best.rank_score,
-                best.final_score,
-            ));
-        }
 
         verified.into_iter().next()
     } else {
@@ -475,7 +470,14 @@ fn interpret_check_result(result: &HttpResult, domain: &str) -> (bool, Option<St
                 )
             }
         }
-        Some(_) => (true, None),
+        Some(code) => {
+            let size = result.size_download.unwrap_or(0);
+            if size == 0 {
+                (false, Some(format!("empty body (HTTP {code})")))
+            } else {
+                (true, None)
+            }
+        }
         None => (false, Some("no response".to_string())),
     }
 }

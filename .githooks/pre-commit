@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Pre-commit hook: автоформатирование staged Rust-файлов.
+set -euo pipefail
+
+# Собираем staged .rs файлы
+staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
+[ -z "$staged" ] && exit 0
+
+# Форматируем и возвращаем в индекс
+echo "$staged" | xargs cargo fmt --
+echo "$staged" | xargs git add

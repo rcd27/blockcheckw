@@ -27,6 +27,7 @@ pub async fn run_benchmark_cmd(
     let max = max_workers
         .map(|w| w as usize)
         .unwrap_or_else(benchmark::default_max_workers);
+    let raw = raw || !console::Term::stderr().is_term();
     benchmark::run_benchmark(time, max, raw, domain, protocol).await;
 
     // Restore zapret2 if we stopped it

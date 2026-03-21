@@ -127,4 +127,6 @@ case ":$PATH:" in
     *) printf '\n\033[1;33mВнимание:\033[0m %s не в PATH. Добавьте:\n  export PATH="%s:$PATH"\n' "$INSTALL_DIR" "$INSTALL_DIR" ;;
 esac
 
-printf '\nСледующий шаг:\n  sudo blockcheckw scan -d rutracker.org\n\n'
+printf '\nСледующие шаги:\n'
+printf '  1. Подобрать число воркеров:  sudo blockcheckw benchmark\n'
+printf '  2. Запустить скан:            sudo blockcheckw -w <N> scan -d rutracker.org\n\n'

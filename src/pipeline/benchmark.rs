@@ -53,11 +53,97 @@ pub fn worker_counts_to_test(max: usize) -> Vec<usize> {
     counts
 }
 
+/// Estimated RAM per worker (nfqws2 process), in MB.
+const RAM_PER_WORKER_MB: u64 = 3;
+
+/// System profile for benchmark UI and smart range estimation.
+pub struct SystemProfile {
+    pub cpu_cores: usize,
+    pub mem_available_mb: u64,
+    pub load_avg_1m: f64,
+    pub estimated_min: usize,
+    pub estimated_max: usize,
+}
+
+impl SystemProfile {
+    pub fn detect() -> Self {
+        let cpu_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+
+        let mem_available_mb = mem_available_kb().unwrap_or(0) / 1024;
+
+        let load_avg_1m = std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|s| {
+                s.split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<f64>().ok())
+            })
+            .unwrap_or(0.0);
+
+        // Leave 30% RAM for system, rest available for workers
+        let usable_ram_mb = (mem_available_mb as f64 * 0.7) as u64;
+        let ram_max = (usable_ram_mb / RAM_PER_WORKER_MB) as usize;
+
+        // min: at least 4, scale with cores
+        let estimated_min = 4usize.max(cpu_cores);
+        // Round down to nearest power of 2 for clean levels
+        let estimated_min = 1 << (usize::BITS - 1 - estimated_min.leading_zeros());
+
+        // max: RAM-limited, CPU-scaled, capped at 1024
+        let estimated_max = ram_max.min(cpu_cores * 64).min(1024).max(estimated_min);
+        // Round down to nearest power of 2
+        let estimated_max = 1 << (usize::BITS - 1 - estimated_max.leading_zeros());
+
+        Self {
+            cpu_cores,
+            mem_available_mb,
+            load_avg_1m,
+            estimated_min,
+            estimated_max,
+        }
+    }
+
+    pub fn format_styled(&self) -> String {
+        let ram_at_min = self.estimated_min as u64 * RAM_PER_WORKER_MB;
+        let ram_at_max = self.estimated_max as u64 * RAM_PER_WORKER_MB;
+        format!(
+            "{}\n\
+             {}  CPU: {} cores | RAM available: {:.1} GB | Load: {:.1}\n\
+             {}  Estimated range: {} \u{2014} {} workers (~{}MB \u{2014} ~{}MB RAM)",
+            style("=== System profile ===").bold().cyan(),
+            style("").dim(),
+            self.cpu_cores,
+            self.mem_available_mb as f64 / 1024.0,
+            self.load_avg_1m,
+            style("").dim(),
+            self.estimated_min,
+            self.estimated_max,
+            ram_at_min,
+            ram_at_max,
+        )
+    }
+
+    pub fn format_raw(&self) -> String {
+        let ram_at_min = self.estimated_min as u64 * RAM_PER_WORKER_MB;
+        let ram_at_max = self.estimated_max as u64 * RAM_PER_WORKER_MB;
+        format!(
+            "system: cpu={} cores  ram_available={:.1}GB  load={:.1}\n\
+             estimated range: {} - {} workers (~{}MB - ~{}MB RAM)",
+            self.cpu_cores,
+            self.mem_available_mb as f64 / 1024.0,
+            self.load_avg_1m,
+            self.estimated_min,
+            self.estimated_max,
+            ram_at_min,
+            ram_at_max,
+        )
+    }
+}
+
 pub fn default_max_workers() -> usize {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    (cpus * 64).min(1024)
+    SystemProfile::detect().estimated_max
 }
 
 /// Find optimal worker count: highest throughput with zero errors.
@@ -207,6 +293,8 @@ pub async fn run_benchmark(
             return None;
         }
     };
+    let profile = SystemProfile::detect();
+
     let strategies = generator::generate_strategies(protocol);
     let corpus_size = strategies.len();
     let worker_counts = worker_counts_to_test(max_workers);
@@ -214,13 +302,18 @@ pub async fn run_benchmark(
 
     let header = if raw {
         format!(
-            "domain={domain}  protocol={protocol}  corpus={corpus_size}  time_per_level={time_per_level}s  max_workers={max_workers}"
+            "{}\n\
+             domain={domain}  protocol={protocol}  corpus={corpus_size}  time_per_level={time_per_level}s  max_workers={max_workers}",
+            profile.format_raw(),
         )
     } else {
         format!(
-            "=== blockcheckw benchmark ===\n\
+            "{}\n\n\
+             === blockcheckw benchmark ===\n\
              domain={domain}  protocol={protocol}  corpus={corpus_size} strategies\n\
-             {time_per_level}s per level, {level_count} levels ({} total est.)\n",
+             {time_per_level}s per level, {level_count} levels ({} total est.)\n\
+             Press Ctrl+C to stop\n",
+            profile.format_styled(),
             format_duration(time_per_level * level_count as u64),
         )
     };
@@ -340,15 +433,11 @@ pub async fn run_benchmark(
     } else {
         build_table_styled(&header, &points, base_throughput.unwrap_or(1.0))
     };
+    let recommendation = format!(">>> Recommended: blockcheckw -w {recommended_workers} scan <<<");
     if !raw {
-        final_table.push_str(&format!(
-            "\n{}",
-            style(format!(
-                "Recommended: blockcheckw -w {recommended_workers} scan"
-            ))
-            .green()
-            .bold()
-        ));
+        final_table.push_str(&format!("\n\n{}", style(recommendation).yellow().bold()));
+    } else {
+        final_table.push_str(&format!("\n\n{recommendation}"));
     }
     table_bar.finish_with_message(final_table);
 

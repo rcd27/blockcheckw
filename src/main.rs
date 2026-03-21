@@ -95,7 +95,7 @@ enum Command {
         #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u64).range(1..=60))]
         timeout: u64,
 
-        /// Stop after finding N working strategies (0 = check all)
+        /// Stop after finding N working strategies per protocol (0 = check all)
         #[arg(long, default_value_t = 0)]
         take: usize,
 

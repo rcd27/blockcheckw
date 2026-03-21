@@ -97,6 +97,24 @@ pub async fn run_check_cmd(
     // Run check
     screen.newline();
     screen.println(&ui::section("Checking strategies (data transfer)"));
+    screen.println(&format!(
+        "  {}",
+        style("This is slower than scan — each strategy is tested with real data transfer")
+            .yellow()
+    ));
+    if passes >= 2 {
+        screen.println(&format!(
+            "  {}",
+            style(format!(
+                "Each working strategy will be verified {passes} times"
+            ))
+            .yellow()
+        ));
+    }
+    screen.println(&format!(
+        "  {}",
+        style("Tip: use --take 10 to stop after 10 working per protocol").yellow()
+    ));
 
     let report = check::run_check(&config, domain, &strategies, &ips, take, passes, &screen).await;
 
@@ -118,30 +136,49 @@ pub async fn run_check_cmd(
         ));
     }
 
-    // Output JSON
+    // Output JSON — always save to file
     let json = serde_json::to_string_pretty(&report).unwrap();
 
-    if let Some(path) = output {
-        match std::fs::write(path, &json) {
-            Ok(()) => {
-                blockcheckw::system::elevate::chown_to_caller(path);
-                screen.println(&format!(
-                    "  {} JSON report → {}",
-                    style("OK").green().bold(),
-                    style(path).cyan(),
-                ));
-            }
-            Err(e) => {
-                screen.println(&format!(
-                    "  {} failed to write {}: {e}",
-                    style("ERROR:").red().bold(),
-                    style(path).cyan(),
-                ));
-            }
+    let path = output.map(String::from).unwrap_or_else(|| {
+        let prefix = super::chrono_local_prefix();
+        format!("{prefix}_check.json")
+    });
+
+    match std::fs::write(&path, &json) {
+        Ok(()) => {
+            blockcheckw::system::elevate::chown_to_caller(&path);
+            screen.println(&format!(
+                "  {} JSON report → {}",
+                style("OK").green().bold(),
+                style(&path).cyan(),
+            ));
         }
-    } else {
-        screen.finish_info();
-        println!("{json}");
+        Err(e) => {
+            screen.println(&format!(
+                "  {} failed to write {}: {e}",
+                style("ERROR:").red().bold(),
+                style(&path).cyan(),
+            ));
+        }
+    }
+
+    // Next step hint
+    if let Some(ref best) = report.best {
+        screen.newline();
+        screen.println(&format!(
+            "  {}",
+            style(">>> Next step: add the best strategy to your zapret2 config <<<")
+                .yellow()
+                .bold(),
+        ));
+        screen.println(&format!(
+            "  Edit /opt/zapret2/config and add to NFQWS_OPT_DESYNC:",
+        ));
+        screen.println(&format!("    {}", style(&best.args).cyan().bold(),));
+        screen.println(&format!(
+            "  Then restart: {}",
+            style("sudo systemctl restart zapret2").cyan(),
+        ));
     }
 
     // Restore zapret2 if we stopped it

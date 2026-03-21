@@ -346,6 +346,17 @@ pub async fn run_scan(
         )),
     }
 
+    if count > 0 {
+        screen.println(&format!(
+            "\n{}",
+            style(format!(
+                ">>> Next step: sudo blockcheckw -w {workers} check --from-file {vanilla_path} -d {domain} <<<"
+            ))
+            .yellow()
+            .bold()
+        ));
+    }
+
     screen.finish_info();
 
     // Restore zapret2 if we stopped it

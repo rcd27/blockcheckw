@@ -103,9 +103,32 @@ pub async fn run_check(
     let mut working_tagged: Vec<&TaggedStrategy> = Vec::new();
     let mut working_count: usize = 0;
     let mut checked_count: usize = 0;
+    // Per-protocol working counters for --take (take N per protocol, not globally)
+    let mut working_per_proto: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    // Ordered list of unique protocols for progress display
+    let proto_order: Vec<String> =
+        strategies
+            .iter()
+            .map(|s| s.protocol.to_string())
+            .fold(Vec::new(), |mut acc, p| {
+                if !acc.contains(&p) {
+                    acc.push(p);
+                }
+                acc
+            });
 
     for (idx, tagged) in strategies.iter().enumerate() {
-        if idx > 0 {
+        // Skip this protocol if we already have enough working strategies
+        if take > 0 {
+            let proto_key = tagged.protocol.to_string();
+            let proto_working = working_per_proto.get(&proto_key).copied().unwrap_or(0);
+            if proto_working >= take {
+                continue;
+            }
+        }
+
+        if checked_count > 0 {
             screen.println(&format!("  {}", style("─".repeat(60)).dim()));
         }
 
@@ -123,6 +146,9 @@ pub async fn run_check(
 
         let status = if checked.working {
             working_count += 1;
+            *working_per_proto
+                .entry(tagged.protocol.to_string())
+                .or_insert(0) += 1;
             format!(
                 "    {} {}B, {}ms, {:.1} KB/s",
                 style("OK").green().bold(),
@@ -136,20 +162,43 @@ pub async fn run_check(
         };
         screen.println(&status);
 
+        // Per-protocol working tally
+        let tally: String = proto_order
+            .iter()
+            .map(|p| {
+                let count = working_per_proto.get(p).copied().unwrap_or(0);
+                if count > 0 {
+                    format!("{}: {}", p, style(format!("{count} \u{2713}")).green())
+                } else {
+                    format!("{}: {}", p, style("\u{2014}").dim())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        screen.println(&format!("  {tally}"));
+
         if checked.working {
             working_tagged.push(tagged);
             results.push(checked);
         }
 
-        if take > 0 && working_count >= take {
-            screen.println(&format!(
-                "  {} found {} working strategies, stopping early ({} of {} checked)",
-                style("--take").bold(),
-                working_count,
-                checked_count,
-                strategies.len(),
-            ));
-            break;
+        // Check if all protocols have reached the take limit
+        if take > 0 {
+            let all_protocols: std::collections::HashSet<String> =
+                strategies.iter().map(|s| s.protocol.to_string()).collect();
+            let all_satisfied = all_protocols
+                .iter()
+                .all(|p| working_per_proto.get(p).copied().unwrap_or(0) >= take);
+            if all_satisfied {
+                screen.println(&format!(
+                    "  {} found {} working strategies per protocol, stopping early ({} of {} checked)",
+                    style("--take").bold(),
+                    take,
+                    checked_count,
+                    strategies.len(),
+                ));
+                break;
+            }
         }
     }
 
@@ -170,6 +219,7 @@ pub async fn run_check(
 
         for (idx, tagged) in working_tagged.iter().enumerate() {
             let args_str = tagged.args.join(" ");
+            screen.println(&format!("  {}", style("─".repeat(60)).dim(),));
             screen.println(&format!(
                 "  [{}/{}] {} nfqws2 {}",
                 idx + 1,
@@ -206,13 +256,20 @@ pub async fn run_check(
             let stability_score = stats.success_rate * 100.0;
             let final_score = stability_score * 0.6 + rank_score.total as f64 * 0.4;
 
+            let styled_verdict = match stats.stability {
+                StabilityVerdict::Stable => style(stats.stability.to_string()).green().bold(),
+                StabilityVerdict::Reliable => style(stats.stability.to_string()).green(),
+                StabilityVerdict::Flaky => style(stats.stability.to_string()).yellow().bold(),
+                StabilityVerdict::Unreliable => style(stats.stability.to_string()).red(),
+                StabilityVerdict::Broken => style(stats.stability.to_string()).red().bold(),
+            };
             screen.println(&format!(
                 "    {}: {}/{} OK, median {}ms, {} (rank {}), final {:.1}",
-                style(&stats.stability).bold(),
+                styled_verdict,
                 stats.successes,
                 stats.total_passes,
                 stats.latency_median_ms,
-                style(format!("★{}", rank_score.stars)).yellow(),
+                style("★".repeat(rank_score.stars as usize)).yellow(),
                 rank_score.total,
                 final_score,
             ));
@@ -243,7 +300,13 @@ pub async fn run_check(
                 "    success_rate: {:.0}%, median: {}ms, stability: {}, rank: {}, final: {:.1}",
                 best.success_rate * 100.0,
                 best.median_latency_ms,
-                best.stability,
+                match best.stability {
+                    StabilityVerdict::Stable => style(best.stability.to_string()).green().bold(),
+                    StabilityVerdict::Reliable => style(best.stability.to_string()).green(),
+                    StabilityVerdict::Flaky => style(best.stability.to_string()).yellow().bold(),
+                    StabilityVerdict::Unreliable => style(best.stability.to_string()).red(),
+                    StabilityVerdict::Broken => style(best.stability.to_string()).red().bold(),
+                },
                 best.rank_score,
                 best.final_score,
             ));

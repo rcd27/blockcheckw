@@ -5,7 +5,9 @@
 - Linux (x86_64, arm64, роутеры на mips/mipsel/arm/ppc/riscv64 — тоже поддерживаются)
 - **root**-доступ (нужен для nftables и SO_MARK)
 - Установленный [zapret2](https://github.com/bol-van/zapret2) — нужен бинарь `nfqws2`
-  (обычно лежит в `/opt/zapret2/nfqws2`)
+  (обычно лежит в `/opt/zapret2/nfqws2`).
+  **Важно**: ставьте из [релиза](https://github.com/bol-van/zapret2/releases/latest),
+  а не через `git clone` — в клоне нет прекомпилированных бинарников
 - `nftables` в системе (`nft` в PATH)
 
 ## Установка
@@ -55,34 +57,9 @@ blockcheckw --version
 
 > Все команды нужно запускать от **root** (`sudo`).
 
-### 1. Сканирование — найти рабочие стратегии
+### 1. Подбор числа воркеров (benchmark)
 
-```bash
-sudo blockcheckw scan -d rutracker.org
-```
-
-Это запустит поиск по всем протоколам (HTTP, TLS 1.2, TLS 1.3). По умолчанию используется
-8 воркеров.
-
-Больше воркеров = быстрее (но больше RAM):
-
-```bash
-# Для VPS/десктопа с запасом RAM:
-sudo blockcheckw -w 256 scan -d rutracker.org
-
-# Только TLS 1.2:
-sudo blockcheckw -w 256 scan -d rutracker.org -p tls12
-```
-
-Сохранить результат в файл:
-
-```bash
-sudo blockcheckw -w 256 scan -d rutracker.org -o report.txt
-```
-
-### 2. Подбор числа воркеров (benchmark)
-
-Не знаете, сколько воркеров поставить? benchmark подберёт оптимальное значение:
+Первым делом узнайте, сколько воркеров тянет ваша система:
 
 ```bash
 sudo blockcheckw benchmark
@@ -100,6 +77,33 @@ sudo blockcheckw benchmark -t 15
 sudo blockcheckw benchmark -t 20 -M 64
 ```
 
+Запомните рекомендованное число — используйте его в `-w` при скане.
+
+### 2. Сканирование — найти рабочие стратегии
+
+```bash
+sudo blockcheckw -w <N> scan -d rutracker.org
+```
+
+Где `<N>` — число воркеров из benchmark. Это запустит поиск по всем протоколам
+(HTTP, TLS 1.2, TLS 1.3).
+
+Примеры:
+
+```bash
+# С рекомендованным числом воркеров:
+sudo blockcheckw -w 256 scan -d rutracker.org
+
+# Только TLS 1.2:
+sudo blockcheckw -w 256 scan -d rutracker.org -p tls12
+```
+
+Сохранить результат в файл:
+
+```bash
+sudo blockcheckw -w 256 scan -d rutracker.org -o report.txt
+```
+
 ### 3. Проверка стратегий (check)
 
 Двухфазная проверка стратегий из vanilla-отчёта с реальным data transfer.
@@ -110,7 +114,7 @@ sudo blockcheckw check --from-file report_vanilla.txt -d rutracker.org
 ```
 
 ```bash
-# Early stop после 10 рабочих, 5 проходов верификации, JSON в файл:
+# Early stop после 10 рабочих на каждый протокол, 5 проходов верификации, JSON в файл:
 sudo blockcheckw check --from-file report_vanilla.txt --take 10 --passes 5 -o result.json
 ```
 
@@ -156,6 +160,14 @@ blockcheckw completions bash >> ~/.bashrc
 ```
 
 ## Решение проблем
+
+**`another blockcheckw instance is already running`** — blockcheckw уже запущен
+(например, benchmark или scan в другом терминале). Дождитесь завершения или остановите:
+
+```bash
+# PID указан в сообщении об ошибке
+sudo kill <PID>
+```
 
 **`Permission denied` / `Operation not permitted`** — запускайте через `sudo`.
 

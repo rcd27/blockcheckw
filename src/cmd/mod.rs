@@ -404,11 +404,14 @@ pub fn acquire_instance_lock() -> std::fs::File {
     let fd = file.as_raw_fd();
     let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if ret != 0 {
+        // Read PID from lock file for a helpful error message
+        let held_pid = std::fs::read_to_string(LOCK_PATH).unwrap_or_default();
+        let held_pid = held_pid.trim();
         eprintln!(
-            "  {} another blockcheckw instance is already running (pid file: {})",
+            "  {} another blockcheckw instance is already running (PID {held_pid})",
             style("ERROR:").red().bold(),
-            LOCK_PATH,
         );
+        eprintln!("  To stop it: sudo kill {held_pid}");
         std::process::exit(1);
     }
 

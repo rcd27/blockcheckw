@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.2.0](https://github.com/rcd27/blockcheckw/compare/v0.1.9...v0.2.0) (2026-03-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **check:** добавлен entry-point в приложение, проверка vanilla списков "рабочих" стратегий на предмет РЕАЛЬНОЙ передачи данных
+
+### Features
+
+* **check:** добавлен entry-point в приложение, проверка vanilla списков "рабочих" стратегий на предмет РЕАЛЬНОЙ передачи данных ([9c877da](https://github.com/rcd27/blockcheckw/commit/9c877da8352caaaba5c58fb12a5982be5ff38968))
+* **completions:** добавление автокомплит зависимостей ([b696430](https://github.com/rcd27/blockcheckw/commit/b69643083fc663588f67458234cbcbfb160c80be))
+* **completions:** реализация CLI completions ([84732e0](https://github.com/rcd27/blockcheckw/commit/84732e076a47a8b75f7c3759974973bca826d0a2))
+* **completions:** увеличено кол-во портов для воркера ([0969b45](https://github.com/rcd27/blockcheckw/commit/0969b45dae774f8c9f2fd1a58af333b15fe9209e))
+* **completions:** цветная схема для completeioins ([f0b5be9](https://github.com/rcd27/blockcheckw/commit/f0b5be999bbeb9ed6fa5709895aa9b2bc09847fd))
+* data-transfer проверка на реальную передачу данных, а не просто HANDSHAKE ([c1cca73](https://github.com/rcd27/blockcheckw/commit/c1cca73f5de41d050e74937fcc6e941d307098bc))
+* **report:** blockcheckw_report.txt по окончании прогона ([d2b260c](https://github.com/rcd27/blockcheckw/commit/d2b260cd205e1c7a159bd2e365f6eb6cff1a73cb))
+* **test:** тестовый режим прогона blockcheckw ([c643c83](https://github.com/rcd27/blockcheckw/commit/c643c83c2de245405a8cba43d783c04e515725a1))
+
+
+### Bug Fixes
+
+* **ranking:** переделана система ранжирования, теперь производительность + простота ([57f6e4a](https://github.com/rcd27/blockcheckw/commit/57f6e4a999d9fa4c39898abc7d1e41049068fda6))
+* **scan:** verify и data-scan убраны из pipeline, как ломающие нахождение стратегий: TIME_WAIT на порту приводил к false negative ([7ac478e](https://github.com/rcd27/blockcheckw/commit/7ac478ee89054a2dd8293abb8bcab6043eae8f92))
+* **strategies:** оптимизация генерации стратегий, приведение к vanilla-style ([868fe6b](https://github.com/rcd27/blockcheckw/commit/868fe6b6e3dd27d9257e5f86416ca05e59e09442))
+* **strategy:** генерация стратегий tls12 1:1 с ваниллой ([e776fb8](https://github.com/rcd27/blockcheckw/commit/e776fb8be4421ba767a359c0f2d71748278a6c08))
+* **ui:** более информативный progress-bar ([0ea9a80](https://github.com/rcd27/blockcheckw/commit/0ea9a809bb9037aeee9f2d39069c30d4f7c81e77))
+
 ## [0.1.9](https://github.com/greynet-systems/blockcheckw/compare/v0.1.8...v0.1.9) (2026-03-10)
 
 

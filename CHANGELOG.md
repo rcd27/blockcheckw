@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.0](https://github.com/rcd27/blockcheckw/compare/v0.2.2...v0.3.0) (2026-03-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* авто-определение `nobody uid/gid`, убран хардкод
+* panic hook без timeout мог уводить роутеры в reboot
+* **nfqws2:** killall nfqws2 заменён на sertvice stop/start (systemd / init.d), fallback без сервиса + gracefull exit с восстановлением
+
+### Features
+
+* **error-prone:** валидация CLI аргументов ([f9fd623](https://github.com/rcd27/blockcheckw/commit/f9fd623c1bbce0d81724d7fa6e579733117b073a))
+* **error-prone:** проверка жизни nfqws2 при старте, если упал, то отображаем это соответственно, без магических sleep(100) ([c04ea7c](https://github.com/rcd27/blockcheckw/commit/c04ea7caec73a69fdbede83afeac24189ad4c655))
+* **error-prone:** проверка на наличие запущенного процесса `blockcheckw` ([0e43a7a](https://github.com/rcd27/blockcheckw/commit/0e43a7a3c7c3084884f7756de27926086501ceb1))
+* **nfqws2:** killall nfqws2 заменён на sertvice stop/start (systemd / init.d), fallback без сервиса + gracefull exit с восстановлением ([55647e0](https://github.com/rcd27/blockcheckw/commit/55647e0c3eff847d5c17fe82f2ef4e697bf0bf7d))
+* **ux:** check_prerequisites на наличие необходимого окружения ([e9a7c07](https://github.com/rcd27/blockcheckw/commit/e9a7c07bd103f0ae760b16f2135ac33ca8f243e2))
+* **ux:** добавлена обработка повторного CTRL+C для force quit ([d4e907c](https://github.com/rcd27/blockcheckw/commit/d4e907c26f25222a00c82cfd60aefe309b667225))
+
+
+### Bug Fixes
+
+* **core:** дублирование RegEx вызовов ([0dfc1fb](https://github.com/rcd27/blockcheckw/commit/0dfc1fb499c671122debe97a38214a151b1e41e5))
+* **core:** обработка "неудачного" setrlimit, chowm ([4a914cc](https://github.com/rcd27/blockcheckw/commit/4a914cc4dbe9c77b8f0dafc4f7f8aca2ee01cf83))
+* **dns:** кэширование DNS ([9c8bfa4](https://github.com/rcd27/blockcheckw/commit/9c8bfa4ebf5445669ce5f3c761417468113889bd))
+* panic hook без timeout мог уводить роутеры в reboot ([a1f98f5](https://github.com/rcd27/blockcheckw/commit/a1f98f58485c3ab82e1e4687d181256bc354c7d8))
+* авто-определение `nobody uid/gid`, убран хардкод ([d8daf8d](https://github.com/rcd27/blockcheckw/commit/d8daf8d21655d4ddf91bde16c65ce607bd70e1de))
+
 ## [0.2.2](https://github.com/rcd27/blockcheckw/compare/v0.2.1...v0.2.2) (2026-03-21)
 
 

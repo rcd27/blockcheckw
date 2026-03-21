@@ -180,9 +180,7 @@ pub async fn run_check_cmd(
                 .yellow()
                 .bold(),
         ));
-        screen.println(&format!(
-            "  Edit /opt/zapret2/config and add to NFQWS_OPT_DESYNC:",
-        ));
+        screen.println("  Edit /opt/zapret2/config and add to NFQWS_OPT_DESYNC:");
         screen.println(&format!("    {}", style(&best.args).cyan().bold(),));
         screen.println(&format!(
             "  Then restart: {}",

@@ -93,7 +93,7 @@ fn score_simplicity(joined: &str) -> u32 {
     let actions = count_desync_actions(joined);
     let multi = is_multi_stage(joined);
 
-    match (actions, multi) {
+    let base = match (actions, multi) {
         (a, true) if a >= 4 => 10,  // 4+ actions + multi-stage
         (a, true) if a >= 3 => 20,  // 3 actions + multi-stage
         (a, false) if a >= 4 => 30, // 4+ actions
@@ -101,7 +101,23 @@ fn score_simplicity(joined: &str) -> u32 {
         (_, true) => 50,            // 2 actions + multi-stage
         (2, false) => 80,           // 2 actions
         _ => 100,                   // 1 action
+    };
+
+    // badsum penalty: CDN/servers may drop or slow down packets with bad checksums
+    if has_badsum(joined) {
+        base / 2
+    } else {
+        base
     }
+}
+
+fn has_badsum(joined: &str) -> bool {
+    joined.contains(":badsum")
+}
+
+/// Get simplicity score for external use (check final_score calculation).
+pub fn simplicity_score(args: &[String]) -> u32 {
+    score_simplicity(&args.join(" "))
 }
 
 #[cfg(test)]

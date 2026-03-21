@@ -33,8 +33,9 @@ pub struct VerifiedStrategy {
     pub args: String,
     pub success_rate: f64,
     pub median_latency_ms: u64,
+    pub median_speed_kbps: f64,
     pub stability: StabilityVerdict,
-    pub rank_score: u32,
+    pub simplicity: u32,
     pub final_score: f64,
 }
 
@@ -236,14 +237,18 @@ pub async fn run_check(
                 style(&args_str).cyan(),
             ));
 
-            // Run K passes, collect PassResults
+            // Run K passes, collect PassResults + speeds
             let mut pass_results = Vec::with_capacity(passes);
+            let mut pass_speeds: Vec<f64> = Vec::with_capacity(passes);
             for pass_idx in 0..passes {
                 let checked = check_single_strategy(config, &slot, domain, tagged, ips).await;
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+                if checked.working {
+                    pass_speeds.push(checked.speed_kbps);
+                }
                 pass_results.push(PassResult {
                     pass_index: pass_idx + 1,
                     success: checked.working,
@@ -258,11 +263,36 @@ pub async fn run_check(
             }
 
             let stats = compute_stats(&pass_results);
-            let rank_score = rank::score_strategy(&tagged.args);
+            let simplicity = rank::simplicity_score(&tagged.args);
 
-            // final_score = stability(success_rate) * 0.6 + rank_score * 0.4
+            // Median speed from successful passes
+            pass_speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median_speed_kbps = if pass_speeds.is_empty() {
+                0.0
+            } else {
+                pass_speeds[pass_speeds.len() / 2]
+            };
+
+            // New final_score: stability 30% + speed 40% + simplicity 30%
+            // Speed is normalized: >10 KB/s = 100, <0.1 KB/s = 0, log scale between
+            let speed_score = if median_speed_kbps <= 0.0 {
+                0.0
+            } else {
+                // log10(0.1)=-1, log10(10)=1 → map [-1,1] to [0,100]
+                let log_speed = median_speed_kbps.log10().clamp(-1.0, 1.0);
+                (log_speed + 1.0) * 50.0
+            };
             let stability_score = stats.success_rate * 100.0;
-            let final_score = stability_score * 0.6 + rank_score.total as f64 * 0.4;
+            let final_score = stability_score * 0.3 + speed_score * 0.4 + simplicity as f64 * 0.3;
+
+            // Stars based on final_score (not static rank)
+            let stars: u8 = if final_score >= 80.0 {
+                3
+            } else if final_score >= 50.0 {
+                2
+            } else {
+                1
+            };
 
             let styled_verdict = match stats.stability {
                 StabilityVerdict::Stable => style(stats.stability.to_string()).green().bold(),
@@ -271,25 +301,24 @@ pub async fn run_check(
                 StabilityVerdict::Unreliable => style(stats.stability.to_string()).red(),
                 StabilityVerdict::Broken => style(stats.stability.to_string()).red().bold(),
             };
+
+            let star_style = match stats.stability {
+                StabilityVerdict::Stable | StabilityVerdict::Reliable => {
+                    style("★".repeat(stars as usize)).green()
+                }
+                StabilityVerdict::Flaky => style("★".repeat(stars as usize)).yellow(),
+                StabilityVerdict::Unreliable => style("★".repeat(stars as usize)).red(),
+                StabilityVerdict::Broken => style("★".repeat(stars as usize)).red().dim(),
+            };
+
             screen.println(&format!(
-                "    {}: {}/{} OK, median {}ms, {} (rank {}), final {:.1}",
+                "    {}: {}/{} OK, median {}ms, {:.1} KB/s, {} final {:.1}",
                 styled_verdict,
                 stats.successes,
                 stats.total_passes,
                 stats.latency_median_ms,
-                match stats.stability {
-                    StabilityVerdict::Stable =>
-                        style("★".repeat(rank_score.stars as usize)).green(),
-                    StabilityVerdict::Reliable =>
-                        style("★".repeat(rank_score.stars as usize)).green(),
-                    StabilityVerdict::Flaky =>
-                        style("★".repeat(rank_score.stars as usize)).yellow(),
-                    StabilityVerdict::Unreliable =>
-                        style("★".repeat(rank_score.stars as usize)).red(),
-                    StabilityVerdict::Broken =>
-                        style("★".repeat(rank_score.stars as usize)).red().dim(),
-                },
-                rank_score.total,
+                median_speed_kbps,
+                star_style,
                 final_score,
             ));
 
@@ -298,8 +327,9 @@ pub async fn run_check(
                 args: args_str,
                 success_rate: stats.success_rate,
                 median_latency_ms: stats.latency_median_ms,
+                median_speed_kbps,
                 stability: stats.stability,
-                rank_score: rank_score.total,
+                simplicity,
                 final_score,
             });
         }
@@ -591,8 +621,9 @@ mod tests {
             args: "--payload=tls_client_hello --lua-desync=fake".to_string(),
             success_rate: 1.0,
             median_latency_ms: 320,
+            median_speed_kbps: 5.5,
             stability: StabilityVerdict::Stable,
-            rank_score: 80,
+            simplicity: 100,
             final_score: 92.0,
         };
         let report = CheckReport {
@@ -606,25 +637,28 @@ mod tests {
         };
         let json = serde_json::to_string_pretty(&report).unwrap();
         assert!(json.contains("\"best\""));
-        assert!(json.contains("\"final_score\": 92.0"));
         assert!(json.contains("\"stability\": \"stable\""));
     }
 
     #[test]
-    fn test_final_score_calculation() {
-        // success_rate=1.0 (100%), rank_score=80
-        // stability_score = 100.0, final = 100*0.6 + 80*0.4 = 60+32 = 92
-        let stability_score = 1.0 * 100.0;
-        let rank_total = 80_u32;
-        let final_score = stability_score * 0.6 + rank_total as f64 * 0.4;
-        assert!((final_score - 92.0).abs() < 0.01);
+    fn test_final_score_new_formula() {
+        // stability 30% + speed 40% + simplicity 30%
+        // speed_score: 5.0 KB/s → log10(5)=0.699 → clamped to [-1,1] → (0.699+1)*50 = 84.9
+        let stability_score = 1.0 * 100.0; // 100%
+        let speed_kbps = 5.0_f64;
+        let speed_score = (speed_kbps.log10().clamp(-1.0, 1.0) + 1.0) * 50.0;
+        let simplicity = 100_u32;
+        let final_score = stability_score * 0.3 + speed_score * 0.4 + simplicity as f64 * 0.3;
+        // 100*0.3 + 84.9*0.4 + 100*0.3 = 30 + 34.0 + 30 = 94.0
+        assert!(final_score > 90.0);
 
-        // success_rate=0.5, rank_score=100
-        // stability_score = 50.0, final = 50*0.6 + 100*0.4 = 30+40 = 70
-        let stability_score = 0.5 * 100.0;
-        let rank_total = 100_u32;
-        let final_score = stability_score * 0.6 + rank_total as f64 * 0.4;
-        assert!((final_score - 70.0).abs() < 0.01);
+        // Slow strategy: 0.1 KB/s → speed_score = 0
+        let speed_score_slow = (0.1_f64.log10().clamp(-1.0, 1.0) + 1.0) * 50.0;
+        assert!((speed_score_slow - 0.0).abs() < 0.01);
+
+        // Fast strategy: 10 KB/s → speed_score = 100
+        let speed_score_fast = (10.0_f64.log10().clamp(-1.0, 1.0) + 1.0) * 50.0;
+        assert!((speed_score_fast - 100.0).abs() < 0.01);
     }
 
     #[test]
@@ -634,13 +668,15 @@ mod tests {
             args: "--payload=http_req --lua-desync=fake".to_string(),
             success_rate: 0.67,
             median_latency_ms: 450,
+            median_speed_kbps: 2.5,
             stability: StabilityVerdict::Flaky,
-            rank_score: 75,
+            simplicity: 100,
             final_score: 70.2,
         };
         let json = serde_json::to_string(&vs).unwrap();
         assert!(json.contains("\"stability\":\"flaky\""));
         assert!(json.contains("\"success_rate\":0.67"));
-        assert!(json.contains("\"rank_score\":75"));
+        assert!(json.contains("\"simplicity\":100"));
+        assert!(json.contains("\"median_speed_kbps\":2.5"));
     }
 }

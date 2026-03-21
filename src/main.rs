@@ -28,6 +28,7 @@ const fn help_styles() -> clap::builder::styling::Styles {
 #[derive(Parser)]
 #[command(
     name = "blockcheckw",
+    version,
     about = "Parallel DPI bypass strategy scanner",
     styles = help_styles(),
 )]

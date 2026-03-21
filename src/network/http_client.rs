@@ -18,6 +18,31 @@ use crate::config::Protocol;
 /// Minimum bytes downloaded to consider data transfer successful.
 pub const DATA_TRANSFER_MIN_BYTES: u64 = 1024;
 
+/// How much HTTP body to download.
+#[derive(Debug, Clone, Copy)]
+pub enum BodyMode {
+    /// HEAD request — don't download body (fast handshake check)
+    Head,
+    /// GET request — download entire body
+    Unlimited,
+    /// GET request — stop after N bytes
+    LimitedTo(u64),
+}
+
+impl BodyMode {
+    fn is_get(self) -> bool {
+        !matches!(self, BodyMode::Head)
+    }
+
+    fn max_bytes(self) -> u64 {
+        match self {
+            BodyMode::Head => 0,
+            BodyMode::Unlimited => u64::MAX,
+            BodyMode::LimitedTo(n) => n,
+        }
+    }
+}
+
 const REDIRECT_CODES: &[u16] = &[301, 302, 307, 308];
 
 #[derive(Debug)]
@@ -143,7 +168,12 @@ pub async fn http_test(
 ) -> HttpResult {
     let timeout = Duration::from_secs(timeout_secs);
 
-    match tokio::time::timeout(timeout, http_test_inner(protocol, domain, ip, fwmark, 0)).await {
+    match tokio::time::timeout(
+        timeout,
+        http_test_inner(protocol, domain, ip, fwmark, BodyMode::Head),
+    )
+    .await
+    {
         Ok(result) => result,
         Err(_) => HttpResult {
             status_code: None,
@@ -155,25 +185,17 @@ pub async fn http_test(
 }
 
 /// Perform an HTTP(S) data transfer test (GET with streaming download).
-///
-/// `max_bytes` limits how much body to download: 0 = unlimited, N > 0 = stop after N bytes.
 pub async fn http_test_data(
     protocol: Protocol,
     domain: &str,
     ip: &str,
     fwmark: u32,
     timeout_secs: u64,
-    max_bytes: u64,
+    mode: BodyMode,
 ) -> HttpResult {
     let timeout = Duration::from_secs(timeout_secs);
 
-    let limit = if max_bytes == 0 { u64::MAX } else { max_bytes };
-    match tokio::time::timeout(
-        timeout,
-        http_test_inner(protocol, domain, ip, fwmark, limit),
-    )
-    .await
-    {
+    match tokio::time::timeout(timeout, http_test_inner(protocol, domain, ip, fwmark, mode)).await {
         Ok(result) => result,
         Err(_) => HttpResult {
             status_code: None,
@@ -191,9 +213,9 @@ async fn http_test_inner(
     domain: &str,
     ip: &str,
     fwmark: u32,
-    max_bytes: u64,
+    mode: BodyMode,
 ) -> HttpResult {
-    let result = http_single_request(protocol, domain, ip, fwmark, max_bytes).await;
+    let result = http_single_request(protocol, domain, ip, fwmark, mode).await;
 
     // Follow one redirect if it points to the same domain
     if let Some(code) = result.status_code {
@@ -201,14 +223,8 @@ async fn http_test_inner(
             if let Some(location) = extract_location(&result.headers) {
                 if location.to_lowercase().contains(&domain.to_lowercase()) {
                     if let Some(redirect_host) = extract_host_from_url(&location) {
-                        return http_single_request(
-                            protocol,
-                            &redirect_host,
-                            ip,
-                            fwmark,
-                            max_bytes,
-                        )
-                        .await;
+                        return http_single_request(protocol, &redirect_host, ip, fwmark, mode)
+                            .await;
                     }
                 }
             }
@@ -220,13 +236,12 @@ async fn http_test_inner(
 
 /// Perform a single HTTP(S) request without following redirects.
 ///
-/// `max_bytes`: 0 = don't read body (HEAD semantics for HTTPS), >0 = GET and read up to N bytes.
 async fn http_single_request(
     protocol: Protocol,
     domain: &str,
     ip: &str,
     fwmark: u32,
-    max_bytes: u64,
+    mode: BodyMode,
 ) -> HttpResult {
     let port = protocol.port();
     let addr: SocketAddr = match format!("{ip}:{port}").parse() {
@@ -256,7 +271,7 @@ async fn http_single_request(
 
     // Step 2: Optionally wrap in TLS
     match protocol {
-        Protocol::Http => do_http_request(TokioIo::new(tcp_stream), domain, max_bytes).await,
+        Protocol::Http => do_http_request(TokioIo::new(tcp_stream), domain, mode).await,
         Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
             let tls_config = make_tls_config(protocol);
             let connector = TlsConnector::from(tls_config);
@@ -284,7 +299,7 @@ async fn http_single_request(
                 }
             };
 
-            do_http_request_https(TokioIo::new(tls_stream), domain, max_bytes).await
+            do_http_request_https(TokioIo::new(tls_stream), domain, mode).await
         }
     }
 }
@@ -316,7 +331,7 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 
 /// Send HTTP/1.1 request over a plain TCP connection (HTTP).
 /// Always uses GET for HTTP (need to see redirects/body).
-async fn do_http_request<IO>(io: IO, domain: &str, max_bytes: u64) -> HttpResult
+async fn do_http_request<IO>(io: IO, domain: &str, mode: BodyMode) -> HttpResult
 where
     IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -343,12 +358,12 @@ where
         .body(Empty::<Bytes>::new())
         .expect("static request build");
 
-    send_and_parse(sender.send_request(req).await, max_bytes).await
+    send_and_parse(sender.send_request(req).await, mode).await
 }
 
 /// Send HTTP/1.1 request over a TLS connection (HTTPS).
-/// Uses HEAD unless max_bytes > 0 (data transfer test).
-async fn do_http_request_https<IO>(io: IO, domain: &str, max_bytes: u64) -> HttpResult
+/// Uses HEAD unless mode is GET (data transfer test).
+async fn do_http_request_https<IO>(io: IO, domain: &str, mode: BodyMode) -> HttpResult
 where
     IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -368,7 +383,7 @@ where
         let _ = conn.await;
     });
 
-    let method = if max_bytes > 0 { "GET" } else { "HEAD" };
+    let method = if mode.is_get() { "GET" } else { "HEAD" };
     // infallible: static headers + empty body
     let req = Request::builder()
         .method(method)
@@ -378,15 +393,14 @@ where
         .body(Empty::<Bytes>::new())
         .expect("static request build");
 
-    send_and_parse(sender.send_request(req).await, max_bytes).await
+    send_and_parse(sender.send_request(req).await, mode).await
 }
 
 /// Parse hyper response into HttpResult.
 ///
-/// `max_bytes`: 0 = don't read body, >0 = read up to N bytes then stop.
 async fn send_and_parse(
     result: Result<hyper::Response<hyper::body::Incoming>, hyper::Error>,
-    max_bytes: u64,
+    mode: BodyMode,
 ) -> HttpResult {
     let response = match result {
         Ok(r) => r,
@@ -416,8 +430,8 @@ async fn send_and_parse(
         ));
     }
 
-    let size_download = if max_bytes > 0 {
-        // Stream body and count bytes; stop early once limit is reached
+    let size_download = if mode.is_get() {
+        let limit = mode.max_bytes();
         let mut total: u64 = 0;
         let mut body = response.into_body();
         while let Some(chunk) = body.frame().await {
@@ -425,7 +439,7 @@ async fn send_and_parse(
                 Ok(frame) => {
                     if let Some(data) = frame.data_ref() {
                         total += data.len() as u64;
-                        if total >= max_bytes {
+                        if total >= limit {
                             break;
                         }
                     }

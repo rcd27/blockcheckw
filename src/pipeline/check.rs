@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::config::{CoreConfig, NFQWS2_INIT_DELAY_MS};
 use crate::firewall::nftables;
-use crate::network::http_client::{http_test_data, pick_random_ip, HttpResult};
+use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, HttpResult};
 use crate::pipeline::test_runner::{compute_stats, PassResult, StabilityVerdict};
 use crate::strategy::generator::TaggedStrategy;
 use crate::strategy::rank;
@@ -355,7 +355,7 @@ async fn check_single_strategy(
         ip,
         slot.fwmark,
         config.request_timeout,
-        0, // unlimited — we just need any response
+        BodyMode::Unlimited,
     )
     .await;
     let latency_ms = test_start.elapsed().as_millis() as u64;

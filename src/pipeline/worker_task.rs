@@ -5,7 +5,7 @@ use crate::error::{BlockcheckError, HttpVerdictAvailable, TaskResult};
 use crate::firewall::nftables;
 use crate::network::http_client::{
     http_test, http_test_data, interpret_data_transfer_result, interpret_http_result,
-    pick_random_ip, HttpVerdict,
+    pick_random_ip, BodyMode, HttpVerdict,
 };
 use crate::worker::nfqws2::start_nfqws2;
 use crate::worker::slot::WorkerSlot;
@@ -134,7 +134,7 @@ pub async fn execute_worker_task_with_mode(
                 ip,
                 task.slot.fwmark,
                 config.request_timeout,
-                0, // unlimited
+                BodyMode::Unlimited,
             )
             .await;
             interpret_data_transfer_result(&result, &task.domain, min_bytes)
@@ -214,7 +214,7 @@ pub async fn execute_worker_task_rules_ready(
                 ip,
                 task.slot.fwmark,
                 config.request_timeout,
-                0, // unlimited
+                BodyMode::Unlimited,
             )
             .await;
             interpret_data_transfer_result(&result, &task.domain, min_bytes)

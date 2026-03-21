@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.1](https://github.com/rcd27/blockcheckw/compare/v0.3.0...v0.3.1) (2026-03-21)
+
+
+### Features
+
+* **docs:** QUICKSTART.md, версия утилиты ([efaad40](https://github.com/rcd27/blockcheckw/commit/efaad40420835e9a19b15d09a4e7fc512fae0b58))
+
+
+### Bug Fixes
+
+* **docs:** разделение readme и quickstart ([df9f568](https://github.com/rcd27/blockcheckw/commit/df9f5689418e4543d288a5fc80fa5140ba1cf986))
+* **fp:** вынос сайд-эффекта ([fa9374b](https://github.com/rcd27/blockcheckw/commit/fa9374b259a82132e788f0c0c00e67a0eaaf1b5e))
+* **performance:** ненужные копирования строк между воркерами ([a0ad7d9](https://github.com/rcd27/blockcheckw/commit/a0ad7d9b1c22c3fed2a54f5bd43c3cea62ce30dc))
+
 ## [0.3.0](https://github.com/rcd27/blockcheckw/compare/v0.2.2...v0.3.0) (2026-03-21)
 
 

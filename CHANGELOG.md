@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2](https://github.com/rcd27/blockcheckw/compare/v0.3.1...v0.3.2) (2026-03-21)
+
+
+### Features
+
+* **ux:** второй прогон, правки по UI ([46f6e0e](https://github.com/rcd27/blockcheckw/commit/46f6e0eed8f8ce8c3e4b2a280d81c6bbd6ef65ba))
+* **ux:** путь обывателя + правки - улучшение UX ([df83bbb](https://github.com/rcd27/blockcheckw/commit/df83bbb412eacf31f0693878c45f350ebfcc6664))
+
 ## [0.3.1](https://github.com/rcd27/blockcheckw/compare/v0.3.0...v0.3.1) (2026-03-21)
 
 

@@ -33,8 +33,8 @@ const fn help_styles() -> clap::builder::styling::Styles {
 )]
 struct Cli {
     /// Number of parallel workers
-    #[arg(short, long, default_value_t = 8)]
-    workers: usize,
+    #[arg(short, long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=2048))]
+    workers: u16,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -45,12 +45,12 @@ enum Command {
     /// Run parallel scaling benchmark to find optimal worker count
     Benchmark {
         /// Seconds to run per worker-count level
-        #[arg(short, long, default_value_t = 30)]
+        #[arg(short, long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(5..))]
         time: u64,
 
         /// Maximum number of workers to test
-        #[arg(short = 'M', long)]
-        max_workers: Option<usize>,
+        #[arg(short = 'M', long, value_parser = clap::value_parser!(u16).range(1..=2048))]
+        max_workers: Option<u16>,
 
         /// Target domain
         #[arg(short, long, default_value = "rutracker.org")]
@@ -91,16 +91,16 @@ enum Command {
         dns: String,
 
         /// Request timeout per strategy in seconds
-        #[arg(long, default_value_t = 6)]
+        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u64).range(1..=60))]
         timeout: u64,
 
         /// Stop after finding N working strategies (0 = check all)
         #[arg(long, default_value_t = 0)]
         take: usize,
 
-        /// Verification passes per working strategy in Phase 2 (0 or 1 = skip Phase 2)
-        #[arg(long, default_value_t = 3)]
-        passes: usize,
+        /// Verification passes per working strategy in Phase 2 (1 = skip Phase 2)
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..=100))]
+        passes: u16,
 
         /// Save JSON report to file (default: stdout)
         #[arg(short, long)]
@@ -231,7 +231,7 @@ async fn main() {
                 dns_mode,
                 timeout,
                 take,
-                passes,
+                passes as usize,
                 output.as_deref(),
             )
             .await;
@@ -260,7 +260,7 @@ async fn main() {
                 }
             };
             cmd::scan::run_scan(
-                cli.workers,
+                cli.workers as usize,
                 &domain,
                 &protocols,
                 dns_mode,

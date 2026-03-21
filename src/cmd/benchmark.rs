@@ -5,7 +5,7 @@ use super::{handle_bypass_conflicts, restore_service};
 
 pub async fn run_benchmark_cmd(
     time: u64,
-    max_workers: Option<usize>,
+    max_workers: Option<u16>,
     domain: &str,
     protocol: &str,
     raw: bool,
@@ -24,7 +24,9 @@ pub async fn run_benchmark_cmd(
         Err(()) => std::process::exit(1),
     };
 
-    let max = max_workers.unwrap_or_else(benchmark::default_max_workers);
+    let max = max_workers
+        .map(|w| w as usize)
+        .unwrap_or_else(benchmark::default_max_workers);
     benchmark::run_benchmark(time, max, raw, domain, protocol).await;
 
     // Restore zapret2 if we stopped it

@@ -512,11 +512,20 @@ pub fn pick_random_ip(ips: &[String]) -> Option<&str> {
     if ips.is_empty() {
         return None;
     }
+    // Mix thread id + timestamp for better distribution across concurrent workers
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos() as usize;
-    Some(&ips[nanos % ips.len()])
+    let thread_id = std::thread::current().id();
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        thread_id.hash(&mut h);
+        nanos.hash(&mut h);
+        h.finish() as usize
+    };
+    Some(&ips[hash % ips.len()])
 }
 
 #[cfg(test)]

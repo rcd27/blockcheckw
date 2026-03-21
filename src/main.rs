@@ -198,7 +198,10 @@ async fn main() {
 
     // Init tracing for all subcommands (warn level)
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     match cli.command {

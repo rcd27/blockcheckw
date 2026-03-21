@@ -88,43 +88,60 @@ sudo blockcheckw -w 256 scan -d rutracker.org -o report.txt
 sudo blockcheckw benchmark
 ```
 
+Быстрый прогон (15 секунд на уровень вместо 30):
+
+```bash
+sudo blockcheckw benchmark -t 15
+```
+
 На роутере с ограниченной памятью:
 
 ```bash
 sudo blockcheckw benchmark -t 20 -M 64
 ```
 
-### 3. Проверка стратегий из ванильного blockcheck2
+### 3. Проверка стратегий (check)
 
-Если у вас уже есть отчёт от оригинального `blockcheck2.sh`, можно проверить стратегии
-оттуда с верификацией:
+Двухфазная проверка стратегий из vanilla-отчёта с реальным data transfer.
 
 ```bash
+# Базовый запуск (все стратегии, 3 прохода верификации):
 sudo blockcheckw check --from-file report_vanilla.txt -d rutracker.org
 ```
 
-Остановиться после 10 рабочих, 5 проходов верификации:
+```bash
+# Early stop после 10 рабочих, 5 проходов верификации, JSON в файл:
+sudo blockcheckw check --from-file report_vanilla.txt --take 10 --passes 5 -o result.json
+```
 
 ```bash
-sudo blockcheckw check --from-file report_vanilla.txt --take 10 --passes 5
+# Без верификации (одиночный проход, как scan):
+sudo blockcheckw check --from-file report_vanilla.txt --passes 1
 ```
+
+**Как работает check:**
+
+- **Фаза 1 (отсев):** GET-запрос на каждую стратегию. HTTP-ответ = стратегия работает
+  (timeout/reset = DPI блокирует, HTTP 400 = fakes дошли до сервера, redirect на чужой
+  домен = заглушка провайдера).
+- **Фаза 2 (верификация):** каждая рабочая стратегия проверяется `--passes` раз.
+  Считается `success_rate`, медианная латентность, stability verdict. Финальный ранг:
+  `stability × 0.6 + rank_score × 0.4`. Лучшая стратегия выводится как **BEST**.
 
 ## Если zapret2 уже запущен
 
-blockcheckw автоматически обнаружит работающий zapret2 и предложит его остановить на время
-скана. После завершения (или Ctrl+C) сервис будет перезапущен.
+blockcheckw автоматически обнаружит работающий zapret2 (nfqws2 процессы, nft-таблицы с
+queue правилами на порт 443) и предложит временно остановить сервис.
 
-## Памятка по RAM
+**Поддерживаемые init-системы:** systemd (`systemctl`), OpenWrt/sysv (`/etc/init.d/zapret2`).
 
-| Воркеры | Примерное потребление |
-|---------|----------------------|
-| 8       | ~30 MB               |
-| 64      | ~200 MB              |
-| 256     | ~750 MB              |
-| 512     | ~1.5 GB              |
-| 1024    | ~3 GB                |
+Поведение:
 
-На роутере с 256 MB RAM используйте не более 64 воркеров.
+- **Сервис найден** — `service stop` перед сканом, `service start` после (автоматически,
+  включая Ctrl+C)
+- **Сервис не найден** (ручной запуск) — kill nfqws2 по PID + drop nft-таблиц,
+  предупреждение о ручном восстановлении
+- **Crash** — перезапустите zapret2 вручную (`systemctl start zapret2`)
 
 ## Shell completions
 
@@ -132,6 +149,7 @@ blockcheckw автоматически обнаружит работающий z
 # Установить автодополнение для текущего шелла:
 sudo blockcheckw completions --install
 ```
+
 ```bash
 # Или вручную для bash:
 blockcheckw completions bash >> ~/.bashrc
@@ -145,10 +163,12 @@ blockcheckw completions bash >> ~/.bashrc
 (по умолчанию `/opt/zapret2/nfqws2`).
 
 **`nft: command not found`** — установите nftables:
+
 ```bash
 # Debian/Ubuntu
 apt install nftables
 ```
+
 ```bash
 # OpenWrt
 opkg install nftables

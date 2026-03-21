@@ -2,7 +2,6 @@
 
 Быстрая обёртка над [blockcheck2](https://github.com/bol-van/zapret2) для параллельного поиска стратегий обхода DPI.
 
-> **Статус: WIP** — работает, но активно дорабатывается.
 
 ## Зачем
 
@@ -11,6 +10,10 @@
 
 blockcheckw запускает их **параллельно** и находит рабочие стратегии за **~2 минуты** при 1024 воркерах (~150
 стратегий/сек).
+
+## Как пользоваться
+
+[Quickstart](./docs/QUICKSTART.md) — установка, использование, решение проблем.
 
 ## Архитектура параллелизма
 
@@ -70,88 +73,6 @@ SYN/ACK (incoming)
   роутеров с медленным CPU/storage это bottleneck
 - **Батчевая модель**: стратегии обрабатываются батчами по W штук. Последний батч может недоиспользовать воркеры
 - **RAM линейно растёт с воркерами**: на роутере с 256MB RAM максимум ~64 воркера
-
-### Выбор числа воркеров
-
-```shell
-# Автоматический подбор (30 сек на каждый уровень, реальный корпус стратегий):
-blockcheckw benchmark
-```
-
-```shell
-# Быстрый прогон:
-blockcheckw benchmark -t 15
-```
-
-```shell
-# С ограничением по воркерам (для роутеров):
-blockcheckw benchmark -t 20 -M 64
-```
-
-## Использование
-
-```shell
-# Скан всех протоколов:
-blockcheckw scan -d rutracker.org
-```
-
-```shell
-# Только TLS 1.2, 256 воркеров:
-blockcheckw -w 256 scan -d rutracker.org -p tls12
-```
-
-## Check: найти лучшую стратегию
-
-Двухфазная проверка стратегий из vanilla-отчёта с реальным data transfer:
-
-```shell
-# Базовый запуск (все стратегии, 3 прохода верификации):
-blockcheckw check --from-file report_vanilla.txt -d rutracker.org
-```
-
-```shell
-# Early stop после 10 рабочих, 5 проходов верификации, JSON в файл:
-blockcheckw check --from-file report_vanilla.txt --take 10 --passes 5 -o result.json
-```
-
-```shell
-# Без верификации (одиночный проход, как scan):
-blockcheckw check --from-file report_vanilla.txt --passes 1
-```
-
-**Фаза 1 (отсев):** последовательный GET-запрос на каждую стратегию. Любой HTTP-ответ = стратегия работает (
-timeout/reset = DPI блокирует, HTTP 400 = fakes дошли до сервера, redirect на чужой домен = заглушка провайдера).
-
-**Фаза 2 (верификация):** каждая рабочая стратегия проверяется `--passes` раз. Считается `success_rate`, медианная
-латентность, stability verdict. Финальный ранг: `stability × 0.6 + rank_score × 0.4`. Лучшая стратегия выводится как *
-*BEST**.
-
-## Совместимость с работающим zapret2
-
-Если на системе уже запущен zapret2, blockcheckw автоматически обнаружит конфликт (nfqws2 процессы, nft-таблицы с queue
-правилами на порт 443) и предложит временно остановить сервис.
-
-**Поддерживаемые init-системы:** systemd (`systemctl`), OpenWrt/sysv (`/etc/init.d/zapret2`).
-
-Поведение:
-
-- **Сервис найден** — `service stop` перед сканом, `service start` после (автоматически, включая Ctrl+C)
-- **Сервис не найден** (ручной запуск) — kill nfqws2 по PID + drop nft-таблиц, предупреждение о ручном восстановлении
-- **Crash** — юзер перезапускает zapret2 самостоятельно (`systemctl start zapret2`)
-
-## Обновить стратегии
-
-Стратегии генерируются из ванильных скриптов blockcheck2 (git submodule):
-
-```shell
-git submodule update --remote reference/zapret2
-bash tools/update_strategies.sh
-```
-
-## Зависимости
-
-- nfqws2 (из zapret2, `/opt/zapret2/`)
-- nftables
 
 ## Благодарности
 

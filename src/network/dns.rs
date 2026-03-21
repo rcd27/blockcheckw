@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+
+use tokio::sync::Mutex;
 
 use crate::config::DnsMode;
 use crate::error::BlockcheckError;
@@ -6,6 +9,10 @@ use crate::network::doh;
 use crate::system::process::run_process;
 
 const DNS_TIMEOUT_MS: u64 = 10_000;
+
+/// DNS resolution cache — avoids redundant queries and TOCTOU races.
+static DNS_CACHE: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const SPOOFING_CHECK_DOMAINS: &[&str] = &["rutracker.org", "pornhub.com", "torproject.org"];
 
@@ -75,6 +82,14 @@ async fn resolve_with_nslookup(domain: &str) -> Option<Vec<String>> {
 }
 
 pub async fn resolve_ipv4(domain: &str) -> Result<Vec<String>, BlockcheckError> {
+    // Check cache first
+    {
+        let cache = DNS_CACHE.lock().await;
+        if let Some(cached) = cache.get(domain) {
+            return Ok(cached.clone());
+        }
+    }
+
     let ips = if let Some(ips) = resolve_with_getent(domain).await {
         Some(ips)
     } else {
@@ -82,7 +97,13 @@ pub async fn resolve_ipv4(domain: &str) -> Result<Vec<String>, BlockcheckError> 
     };
 
     match ips {
-        Some(ips) if !ips.is_empty() => Ok(ips),
+        Some(ips) if !ips.is_empty() => {
+            DNS_CACHE
+                .lock()
+                .await
+                .insert(domain.to_string(), ips.clone());
+            Ok(ips)
+        }
         Some(_) => Err(BlockcheckError::DnsNoAddresses {
             domain: domain.to_string(),
         }),
@@ -94,8 +115,6 @@ pub async fn resolve_ipv4(domain: &str) -> Result<Vec<String>, BlockcheckError> 
 }
 
 /// Check for DNS spoofing by comparing system DNS and DoH results for known blocked domains.
-// TODO: resolve_ipv4() is called twice per domain (once here, once in captive portal check below);
-// cache the first result to avoid redundant DNS queries and potential TOCTOU inconsistencies
 pub async fn check_dns_spoofing(doh_server_url: &str) -> DnsSpoofResult {
     let mut mismatches = Vec::new();
 

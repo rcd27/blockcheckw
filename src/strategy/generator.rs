@@ -11,6 +11,13 @@ use std::path::Path;
 
 type Strategy = Vec<String>;
 
+/// A strategy paired with its protocol, parsed from vanilla format.
+#[derive(Debug, Clone)]
+pub struct TaggedStrategy {
+    pub protocol: Protocol,
+    pub args: Vec<String>,
+}
+
 /// Strategy files baked into the binary at compile time.
 const HTTP_STRATEGIES: &str = include_str!("../../strategies/http.txt");
 const TLS12_STRATEGIES: &str = include_str!("../../strategies/tls12.txt");
@@ -72,6 +79,42 @@ fn parse_vanilla_summary(data: &str, protocol: Option<Protocol>) -> Vec<Strategy
             // Extract args after "nfqws2 "
             line.split_once(": nfqws2 ")
                 .map(|(_, args)| args.split_whitespace().map(String::from).collect())
+        })
+        .collect()
+}
+
+/// Load strategies from a vanilla file, preserving protocol from each line.
+/// Returns error if file is not in vanilla format or has no strategies.
+pub fn load_tagged_strategies(path: &Path) -> std::io::Result<Vec<TaggedStrategy>> {
+    let data = std::fs::read_to_string(path)?;
+    let strategies = parse_vanilla_tagged(&data);
+    if strategies.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "no strategies found in vanilla file (expected curl_test_* lines)",
+        ));
+    }
+    Ok(strategies)
+}
+
+/// Parse vanilla summary, returning each strategy tagged with its protocol.
+fn parse_vanilla_tagged(data: &str) -> Vec<TaggedStrategy> {
+    data.lines()
+        .filter_map(|line| {
+            let protocol = if line.starts_with("curl_test_https_tls13 ") {
+                Protocol::HttpsTls13
+            } else if line.starts_with("curl_test_https_tls12 ") {
+                Protocol::HttpsTls12
+            } else if line.starts_with("curl_test_http ") {
+                Protocol::Http
+            } else {
+                return None;
+            };
+
+            line.split_once(": nfqws2 ").map(|(_, args)| TaggedStrategy {
+                protocol,
+                args: args.split_whitespace().map(String::from).collect(),
+            })
         })
         .collect()
 }
@@ -145,5 +188,37 @@ mod tests {
         // 35-hostfake: hostfakesplit with tcp_md5
         let s = parse("--payload=tls_client_hello --lua-desync=hostfakesplit:tcp_md5:repeats=1");
         assert!(tls12_set.contains(&s), "missing: hostfakesplit tcp_md5");
+    }
+
+    #[test]
+    fn test_parse_vanilla_tagged() {
+        let data = "\
+* SUMMARY
+curl_test_http ipv4 rutracker.org : nfqws2 --payload=http_req --lua-desync=fake:blob=0x00000000
+curl_test_https_tls12 ipv4 rutracker.org : nfqws2 --payload=tls_client_hello --lua-desync=multisplit
+curl_test_https_tls13 ipv4 rutracker.org : nfqws2 --payload=tls_client_hello --lua-desync=fake
+";
+        let tagged = parse_vanilla_tagged(data);
+        assert_eq!(tagged.len(), 3);
+        assert_eq!(tagged[0].protocol, Protocol::Http);
+        assert_eq!(tagged[0].args, vec!["--payload=http_req", "--lua-desync=fake:blob=0x00000000"]);
+        assert_eq!(tagged[1].protocol, Protocol::HttpsTls12);
+        assert_eq!(tagged[2].protocol, Protocol::HttpsTls13);
+    }
+
+    #[test]
+    fn test_parse_vanilla_tagged_empty() {
+        let data = "* SUMMARY\n# just comments\n";
+        let tagged = parse_vanilla_tagged(data);
+        assert!(tagged.is_empty());
+    }
+
+    #[test]
+    fn test_parse_vanilla_tagged_tls13_before_tls12() {
+        // Ensure tls13 prefix doesn't accidentally match tls12
+        let data = "curl_test_https_tls13 ipv4 x.org : nfqws2 --a\ncurl_test_https_tls12 ipv4 x.org : nfqws2 --b\n";
+        let tagged = parse_vanilla_tagged(data);
+        assert_eq!(tagged[0].protocol, Protocol::HttpsTls13);
+        assert_eq!(tagged[1].protocol, Protocol::HttpsTls12);
     }
 }

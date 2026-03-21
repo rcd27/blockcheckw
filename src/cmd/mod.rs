@@ -370,6 +370,54 @@ pub async fn restore_service(mgr: &ServiceManager) {
     }
 }
 
+// ── Instance lock ───────────────────────────────────────────────────────────
+
+const LOCK_PATH: &str = "/var/run/blockcheckw.lock";
+
+/// Acquire an exclusive lock to prevent parallel blockcheckw execution.
+/// Returns the lock file (must be kept alive for the duration of the process).
+/// Exits if another instance is already running.
+pub fn acquire_instance_lock() -> std::fs::File {
+    use std::io::Write;
+
+    // No truncate before flock — truncate would create a new file description
+    // and bypass the existing lock held by another process
+    #[allow(clippy::suspicious_open_options)]
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(LOCK_PATH);
+
+    let mut file = match file {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "  {} cannot create lock file {}: {e}",
+                style("ERROR:").red().bold(),
+                LOCK_PATH,
+            );
+            std::process::exit(1);
+        }
+    };
+
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        eprintln!(
+            "  {} another blockcheckw instance is already running (pid file: {})",
+            style("ERROR:").red().bold(),
+            LOCK_PATH,
+        );
+        std::process::exit(1);
+    }
+
+    // Write PID for diagnostics (truncate after locking, not before)
+    let _ = file.set_len(0);
+    let _ = write!(file, "{}", std::process::id());
+    file
+}
+
 // ── Prerequisites check ─────────────────────────────────────────────────────
 
 /// Check that required binaries and kernel features are available.

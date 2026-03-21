@@ -191,6 +191,9 @@ async fn main() {
     blockcheckw::system::elevate::tune_tcp();
     blockcheckw::system::elevate::raise_nofile_limit();
 
+    // Prevent parallel execution — keep _lock alive until process exits
+    let _lock = cmd::acquire_instance_lock();
+
     cmd::check_prerequisites();
 
     // Init tracing for all subcommands (warn level)

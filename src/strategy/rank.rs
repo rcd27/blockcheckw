@@ -73,12 +73,12 @@ fn score_performance(joined: &str) -> u32 {
     let multi = is_multi_stage(joined);
 
     match (repeats, multi) {
-        (r, true) if r > 1 => 10,   // multi-stage + high repeats = worst
-        (r, _) if r > 100 => 10,    // extreme repeats
-        (r, _) if r > 20 => 30,     // high repeats
-        (_, true) => 40,             // multi-stage with pktmod limiter
-        (r, _) if r > 1 => 60,      // moderate repeats
-        _ => 100,                    // repeats=0 or 1, no multi-stage
+        (r, true) if r > 1 => 10, // multi-stage + high repeats = worst
+        (r, _) if r > 100 => 10,  // extreme repeats
+        (r, _) if r > 20 => 30,   // high repeats
+        (_, true) => 40,          // multi-stage with pktmod limiter
+        (r, _) if r > 1 => 60,    // moderate repeats
+        _ => 100,                 // repeats=0 or 1, no multi-stage
     }
 }
 
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn simple_strategy_scores_high() {
         let s = score_strategy(&args(
-            "--payload=tls_client_hello --lua-desync=fakedsplit:pos=sniext+4:tcp_ts=-1000"
+            "--payload=tls_client_hello --lua-desync=fakedsplit:pos=sniext+4:tcp_ts=-1000",
         ));
         assert_eq!(s.simplicity, 100); // 1 action
         assert_eq!(s.performance, 100); // no repeats
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn high_repeats_score_low() {
         let s = score_strategy(&args(
-            "--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=260"
+            "--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=260",
         ));
         assert_eq!(s.performance, 10); // extreme repeats
         assert_eq!(s.simplicity, 100); // 1 action
@@ -163,7 +163,10 @@ mod tests {
         ];
 
         let ranked = rank_strategies(&strategies);
-        assert!(ranked[0].total > ranked[1].total, "simple should rank higher");
+        assert!(
+            ranked[0].total > ranked[1].total,
+            "simple should rank higher"
+        );
         assert_eq!(ranked[0].strategy_args, strategies[1]);
     }
 }

@@ -26,7 +26,9 @@ pub fn parse_dns_mode(s: &str) -> Result<DnsMode, String> {
         "auto" => Ok(DnsMode::Auto),
         "system" => Ok(DnsMode::System),
         "doh" => Ok(DnsMode::Doh),
-        _ => Err(format!("unknown dns mode: '{s}'. expected: auto, system, doh")),
+        _ => Err(format!(
+            "unknown dns mode: '{s}'. expected: auto, system, doh"
+        )),
     }
 }
 
@@ -115,7 +117,11 @@ pub fn parse_protocols(s: &str) -> Result<Vec<Protocol>, String> {
             "http" => Protocol::Http,
             "tls12" => Protocol::HttpsTls12,
             "tls13" => Protocol::HttpsTls13,
-            _ => return Err(format!("unknown protocol: '{token}'. expected: http, tls12, tls13")),
+            _ => {
+                return Err(format!(
+                    "unknown protocol: '{token}'. expected: http, tls12, tls13"
+                ))
+            }
         };
         protocols.push(protocol);
     }

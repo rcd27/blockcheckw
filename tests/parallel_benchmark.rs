@@ -23,9 +23,7 @@ fn generate_strategies(count: usize) -> Vec<Vec<String>> {
 
 /// Check that no zombie nfqws2 processes remain.
 fn check_no_nfqws2_zombies() -> bool {
-    let output = std::process::Command::new("pidof")
-        .arg("nfqws2")
-        .output();
+    let output = std::process::Command::new("pidof").arg("nfqws2").output();
 
     match output {
         Ok(out) => {
@@ -98,7 +96,17 @@ async fn parallel_scaling_bench() {
         eprintln!("\n--- Running with worker_count={wc}, strategies={strategy_count} ---");
         let start = Instant::now();
 
-        let (results, stats) = run_parallel(&config, domain, protocol, &strategies, &ips, None, None, HttpTestMode::Standard).await;
+        let (results, stats) = run_parallel(
+            &config,
+            domain,
+            protocol,
+            &strategies,
+            &ips,
+            None,
+            None,
+            HttpTestMode::Standard,
+        )
+        .await;
 
         let elapsed_ms = start.elapsed().as_millis();
 
@@ -121,7 +129,10 @@ async fn parallel_scaling_bench() {
             clean_nft,
         });
 
-        assert!(clean_nft, "nftables table not cleaned up for worker_count={wc}");
+        assert!(
+            clean_nft,
+            "nftables table not cleaned up for worker_count={wc}"
+        );
         assert!(clean_nfqws2, "nfqws2 zombies found for worker_count={wc}");
         assert_eq!(
             results.len(),
@@ -134,7 +145,15 @@ async fn parallel_scaling_bench() {
     eprintln!("\n{}", "=".repeat(90));
     eprintln!(
         "{:<12} {:<12} {:<12} {:<14} {:<8} {:<8} {:<8} {:<6} {:<6}",
-        "Workers", "Strategies", "Elapsed(ms)", "Throughput", "Success", "Failed", "Errors", "NFT", "NFQWS2"
+        "Workers",
+        "Strategies",
+        "Elapsed(ms)",
+        "Throughput",
+        "Success",
+        "Failed",
+        "Errors",
+        "NFT",
+        "NFQWS2"
     );
     eprintln!("{}", "-".repeat(90));
     for r in &rows {

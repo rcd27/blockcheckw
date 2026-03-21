@@ -27,8 +27,8 @@ pub fn render_terminal_report(
     ));
 
     for (idx, result) in results.iter().enumerate() {
-        let is_baseline = result.strategy_args.len() == 1
-            && result.strategy_args[0].starts_with("(baseline");
+        let is_baseline =
+            result.strategy_args.len() == 1 && result.strategy_args[0].starts_with("(baseline");
         let header = if is_baseline {
             "Baseline (no bypass)".to_string()
         } else {
@@ -107,10 +107,7 @@ pub fn render_terminal_report(
                 .iter()
                 .map(|(msg, count)| format!("{count}x {msg}"))
                 .collect();
-            screen.println(&format!(
-                "  Errors:   {}",
-                style(errors.join(", ")).dim()
-            ));
+            screen.println(&format!("  Errors:   {}", style(errors.join(", ")).dim()));
         }
     }
 
@@ -122,10 +119,7 @@ pub fn render_terminal_report(
 
 /// Render comparison table for multiple strategies.
 fn render_comparison_table(results: &[StrategyTestResult], screen: &ui::ScanScreen) {
-    screen.println(&format!(
-        "\n{}",
-        ui::section("Comparison")
-    ));
+    screen.println(&format!("\n{}", ui::section("Comparison")));
 
     screen.println(&format!(
         "  {:<4} {:<40} {:>8} {:>11} {:>8} {:>8}",
@@ -133,8 +127,8 @@ fn render_comparison_table(results: &[StrategyTestResult], screen: &ui::ScanScre
     ));
 
     for (idx, result) in results.iter().enumerate() {
-        let is_baseline = result.strategy_args.len() == 1
-            && result.strategy_args[0].starts_with("(baseline");
+        let is_baseline =
+            result.strategy_args.len() == 1 && result.strategy_args[0].starts_with("(baseline");
         let label = if is_baseline {
             "(baseline)".to_string()
         } else {
@@ -179,9 +173,7 @@ fn render_comparison_table(results: &[StrategyTestResult], screen: &ui::ScanScre
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
                     // Higher success rate wins; on tie, lower median latency wins
-                    b.stats
-                        .latency_median_ms
-                        .cmp(&a.stats.latency_median_ms)
+                    b.stats.latency_median_ms.cmp(&a.stats.latency_median_ms)
                 })
         });
 
@@ -265,8 +257,8 @@ pub fn write_json(
     let mut strategies = Vec::new();
 
     for result in results {
-        let is_baseline = result.strategy_args.len() == 1
-            && result.strategy_args[0].starts_with("(baseline");
+        let is_baseline =
+            result.strategy_args.len() == 1 && result.strategy_args[0].starts_with("(baseline");
 
         let json_strat = JsonStrategy {
             args: if is_baseline {
@@ -283,12 +275,7 @@ pub fn write_json(
                 min_ms: result.stats.latency_min_ms,
                 max_ms: result.stats.latency_max_ms,
             },
-            error_distribution: result
-                .stats
-                .error_distribution
-                .iter()
-                .cloned()
-                .collect(),
+            error_distribution: result.stats.error_distribution.iter().cloned().collect(),
             passes: result
                 .pass_results
                 .iter()
@@ -324,8 +311,7 @@ pub fn write_json(
     let json = serde_json::to_string_pretty(&report)
         .map_err(|e| format!("JSON serialization failed: {e}"))?;
 
-    std::fs::write(Path::new(path), json)
-        .map_err(|e| format!("failed to write {path}: {e}"))?;
+    std::fs::write(Path::new(path), json).map_err(|e| format!("failed to write {path}: {e}"))?;
 
     Ok(())
 }
@@ -373,14 +359,23 @@ mod tests {
     use super::*;
     use crate::pipeline::test_runner::{PassResult, StrategyStats, StrategyTestResult};
 
-    fn make_test_result(args: Vec<String>, success_rate: f64, successes: usize, total: usize) -> StrategyTestResult {
+    fn make_test_result(
+        args: Vec<String>,
+        success_rate: f64,
+        successes: usize,
+        total: usize,
+    ) -> StrategyTestResult {
         StrategyTestResult {
             strategy_args: args,
             pass_results: (0..total)
                 .map(|i| PassResult {
                     pass_index: i + 1,
                     success: i < successes,
-                    verdict: if i < successes { "Available".into() } else { "UNAVAILABLE code=28".into() },
+                    verdict: if i < successes {
+                        "Available".into()
+                    } else {
+                        "UNAVAILABLE code=28".into()
+                    },
                     latency_ms: 100 + (i as u64) * 50,
                     timestamp: 1742389200 + i as u64,
                 })
@@ -417,14 +412,15 @@ mod tests {
 
     #[test]
     fn test_json_serialization() {
-        let results = vec![
-            make_test_result(
-                vec!["--payload=tls_client_hello".into(), "--lua-desync=fake:ip_ttl=6".into()],
-                1.0,
-                3,
-                3,
-            ),
-        ];
+        let results = vec![make_test_result(
+            vec![
+                "--payload=tls_client_hello".into(),
+                "--lua-desync=fake:ip_ttl=6".into(),
+            ],
+            1.0,
+            3,
+            3,
+        )];
 
         let result = write_json(
             "/tmp/blockcheckw_test_report.json",

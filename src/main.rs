@@ -8,8 +8,8 @@ use tracing::info;
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
 use blockcheckw::error::TaskResult;
 use blockcheckw::firewall::nftables;
-use blockcheckw::network::{dns, isp};
 use blockcheckw::network::dns::DnsSpoofResult;
+use blockcheckw::network::{dns, isp};
 use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::benchmark;
 use blockcheckw::pipeline::check;
@@ -23,9 +23,22 @@ const fn help_styles() -> clap::builder::styling::Styles {
     use clap::builder::styling::{AnsiColor, Color, Style, Styles};
 
     Styles::styled()
-        .header(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))).bold().underline())
-        .usage(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))).bold())
-        .literal(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold())
+        .header(
+            Style::new()
+                .fg_color(Some(Color::Ansi(AnsiColor::Yellow)))
+                .bold()
+                .underline(),
+        )
+        .usage(
+            Style::new()
+                .fg_color(Some(Color::Ansi(AnsiColor::Yellow)))
+                .bold(),
+        )
+        .literal(
+            Style::new()
+                .fg_color(Some(Color::Ansi(AnsiColor::Green)))
+                .bold(),
+        )
         .placeholder(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan))))
 }
 
@@ -159,10 +172,14 @@ async fn main() {
 
     // Completions don't need root — handle before elevation
     if let Some(Command::Completions { shell, install }) = &cli.command {
-        let shell = shell.unwrap_or_else(|| detect_shell().unwrap_or_else(|| {
-            eprintln!("Could not detect shell. Specify it explicitly: blockcheckw completions bash");
-            std::process::exit(1);
-        }));
+        let shell = shell.unwrap_or_else(|| {
+            detect_shell().unwrap_or_else(|| {
+                eprintln!(
+                    "Could not detect shell. Specify it explicitly: blockcheckw completions bash"
+                );
+                std::process::exit(1);
+            })
+        });
 
         if *install {
             install_completions(shell);
@@ -230,7 +247,16 @@ async fn main() {
                 }
             };
 
-            run_check_cmd(&domain, &from_file, dns_mode, timeout, take, passes, output.as_deref()).await;
+            run_check_cmd(
+                &domain,
+                &from_file,
+                dns_mode,
+                timeout,
+                take,
+                passes,
+                output.as_deref(),
+            )
+            .await;
         }
         Some(Command::Scan {
             domain,
@@ -259,7 +285,17 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            run_scan(cli.workers, &domain, &protocols, dns_mode, timeout, top, output.as_deref(), from_file.as_deref()).await;
+            run_scan(
+                cli.workers,
+                &domain,
+                &protocols,
+                dns_mode,
+                timeout,
+                top,
+                output.as_deref(),
+                from_file.as_deref(),
+            )
+            .await;
         }
         Some(Command::Completions { .. }) => unreachable!("handled above"),
         None => run_default(cli.workers).await,
@@ -269,7 +305,16 @@ async fn main() {
 // TODO: run_scan and conflict detection logic should be extracted from main.rs into a
 // library module so they can be unit-tested and reused
 #[allow(clippy::too_many_arguments)]
-async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode: DnsMode, timeout_secs: u64, top_n: usize, output: Option<&str>, from_file: Option<&str>) {
+async fn run_scan(
+    workers: usize,
+    domain: &str,
+    protocols: &[Protocol],
+    dns_mode: DnsMode,
+    timeout_secs: u64,
+    top_n: usize,
+    output: Option<&str>,
+    from_file: Option<&str>,
+) {
     let config = Arc::new(CoreConfig {
         worker_count: workers,
         ..CoreConfig::default()
@@ -296,7 +341,10 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
 
     // 1. DNS resolve
     screen.println(&ui::section("DNS resolve"));
-    screen.println(&format!("  dns mode: {}", style(dns_mode.to_string()).bold()));
+    screen.println(&format!(
+        "  dns mode: {}",
+        style(dns_mode.to_string()).bold()
+    ));
     let ips = match dns::resolve_domain(domain, dns_mode).await {
         Ok(resolution) => {
             screen.println(&format!(
@@ -404,7 +452,10 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
             screen.newline();
             screen.println(&ui::section(&format!("Scanning {protocol}")));
             let strategies = if let Some(path) = from_file {
-                match generator::load_strategies_from_file(std::path::Path::new(path), Some(protocol)) {
+                match generator::load_strategies_from_file(
+                    std::path::Path::new(path),
+                    Some(protocol),
+                ) {
                     Ok(s) => {
                         screen.println(&format!(
                             "  loaded {} strategies from {}, workers={}",
@@ -521,7 +572,11 @@ async fn run_scan(workers: usize, domain: &str, protocols: &[Protocol], dns_mode
         } else {
             let ranked = rank::rank_strategies(strategies);
             let total = ranked.len();
-            let show = if top_n == 0 || top_n >= total { total } else { top_n };
+            let show = if top_n == 0 || top_n >= total {
+                total
+            } else {
+                top_n
+            };
 
             screen.println(&ui::summary_found(&proto, total));
 
@@ -829,22 +884,24 @@ fn zsh_completions_dir() -> Option<std::path::PathBuf> {
     // Try common paths in order
     let candidates = [
         // User-local
-        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".zfunc")),
-        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share/zsh/site-functions")),
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join(".zfunc")),
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join(".local/share/zsh/site-functions")),
         // System-wide
         Some(PathBuf::from("/usr/local/share/zsh/site-functions")),
         Some(PathBuf::from("/usr/share/zsh/site-functions")),
     ];
 
     // First try existing writable dirs
-    for candidate in &candidates {
-        if let Some(dir) = candidate {
-            if dir.is_dir() {
-                let test = dir.join(".blockcheckw_write_test");
-                if std::fs::write(&test, "").is_ok() {
-                    let _ = std::fs::remove_file(&test);
-                    return Some(dir.clone());
-                }
+    for dir in candidates.iter().flatten() {
+        if dir.is_dir() {
+            let test = dir.join(".blockcheckw_write_test");
+            if std::fs::write(&test, "").is_ok() {
+                let _ = std::fs::remove_file(&test);
+                return Some(dir.clone());
             }
         }
     }
@@ -854,7 +911,15 @@ fn zsh_completions_dir() -> Option<std::path::PathBuf> {
     Some(PathBuf::from(home).join(".local/share/zsh/site-functions"))
 }
 
-async fn run_check_cmd(domain: &str, from_file: &str, dns_mode: DnsMode, timeout: u64, take: usize, passes: usize, output: Option<&str>) {
+async fn run_check_cmd(
+    domain: &str,
+    from_file: &str,
+    dns_mode: DnsMode,
+    timeout: u64,
+    take: usize,
+    passes: usize,
+    output: Option<&str>,
+) {
     let config = Arc::new(CoreConfig {
         worker_count: 1,
         request_timeout: timeout,
@@ -908,7 +973,10 @@ async fn run_check_cmd(domain: &str, from_file: &str, dns_mode: DnsMode, timeout
 
     // DNS resolve
     screen.println(&ui::section("DNS resolve"));
-    screen.println(&format!("  dns mode: {}", style(dns_mode.to_string()).bold()));
+    screen.println(&format!(
+        "  dns mode: {}",
+        style(dns_mode.to_string()).bold()
+    ));
     let ips = match dns::resolve_domain(domain, dns_mode).await {
         Ok(resolution) => {
             screen.println(&format!(
@@ -1016,15 +1084,38 @@ async fn run_default(workers: usize) {
     };
 
     let strategies: Vec<Vec<String>> = vec![
-        vec!["--dpi-desync=fake".to_string(), "--dpi-desync-ttl=1".to_string()],
-        vec!["--dpi-desync=fake".to_string(), "--dpi-desync-ttl=2".to_string()],
-        vec!["--dpi-desync=fake".to_string(), "--dpi-desync-ttl=3".to_string()],
+        vec![
+            "--dpi-desync=fake".to_string(),
+            "--dpi-desync-ttl=1".to_string(),
+        ],
+        vec![
+            "--dpi-desync=fake".to_string(),
+            "--dpi-desync-ttl=2".to_string(),
+        ],
+        vec![
+            "--dpi-desync=fake".to_string(),
+            "--dpi-desync-ttl=3".to_string(),
+        ],
     ];
 
     info!("blockcheckw starting: {protocol} {domain}");
-    info!("workers={}, strategies={}", config.worker_count, strategies.len());
+    info!(
+        "workers={}, strategies={}",
+        config.worker_count,
+        strategies.len()
+    );
 
-    let (results, stats) = run_parallel(&config, domain, protocol, &strategies, &ips, None, None, HttpTestMode::Standard).await;
+    let (results, stats) = run_parallel(
+        &config,
+        domain,
+        protocol,
+        &strategies,
+        &ips,
+        None,
+        None,
+        HttpTestMode::Standard,
+    )
+    .await;
 
     info!("=== Results ===");
     for r in &results {
@@ -1083,18 +1174,17 @@ async fn detect_bypass_conflicts(own_table: &str) -> BypassConflicts {
                     let family = parts[1];
                     let table_name = parts[2];
                     if table_name != own_table && table_name != "fw4" {
-                        if let Ok(table_content) = run_process(
-                            &["nft", "list", "table", family, table_name],
-                            3_000,
-                        ).await {
+                        if let Ok(table_content) =
+                            run_process(&["nft", "list", "table", family, table_name], 3_000).await
+                        {
                             if table_content.exit_code == 0
                                 && table_content.stdout.contains("queue")
                                 && (table_content.stdout.contains("dport 443")
                                     || table_content.stdout.contains("dport { 80, 443"))
                             {
-                                conflicts.conflicting_tables.push(
-                                    (family.to_string(), table_name.to_string()),
-                                );
+                                conflicts
+                                    .conflicting_tables
+                                    .push((family.to_string(), table_name.to_string()));
                             }
                         }
                     }
@@ -1144,7 +1234,9 @@ async fn handle_bypass_conflicts(own_table: &str) -> bool {
     for (family, table) in &conflicts.conflicting_tables {
         eprintln!(
             "  {} nft table '{} {}' has queue rules intercepting port 443",
-            style("!").yellow().bold(), family, table
+            style("!").yellow().bold(),
+            family,
+            table
         );
     }
 
@@ -1167,9 +1259,8 @@ async fn handle_bypass_conflicts(own_table: &str) -> bool {
 
     resolve_bypass_conflicts(&conflicts).await;
     eprintln!(
-        "  {} {}",
-        style("OK").green().bold(),
-        "conflicting processes killed, nft tables dropped"
+        "  {} conflicting processes killed, nft tables dropped",
+        style("OK").green().bold()
     );
     true
 }

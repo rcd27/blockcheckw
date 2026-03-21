@@ -44,7 +44,10 @@ async fn so_mark_set_on_socket() {
         )
     };
     assert_eq!(ret, 0, "getsockopt failed");
-    assert_eq!(mark_out, fwmark, "SO_MARK should be {fwmark:#010X}, got {mark_out:#010X}");
+    assert_eq!(
+        mark_out, fwmark,
+        "SO_MARK should be {fwmark:#010X}, got {mark_out:#010X}"
+    );
 }
 
 #[tokio::test]
@@ -101,7 +104,8 @@ async fn nft_vmap_add_remove_rules() {
         assert!(
             content.contains(&format!("queue num {}", slot.qnum)),
             "table should contain queue num {} for slot {}",
-            slot.qnum, slot.id,
+            slot.qnum,
+            slot.id,
         );
     }
 
@@ -120,7 +124,9 @@ async fn nft_vmap_add_remove_rules() {
 
     for slot in &slots {
         assert!(
-            !list_result2.stdout.contains(&format!("queue num {}", slot.qnum)),
+            !list_result2
+                .stdout
+                .contains(&format!("queue num {}", slot.qnum)),
             "queue num {} should be removed after cleanup",
             slot.qnum,
         );
@@ -147,10 +153,16 @@ async fn nfqws2_receives_marked_traffic() {
     nftables::drop_table(table).await;
     nftables::prepare_table(table).await.expect("prepare_table");
 
-    let strategy = vec!["--dpi-desync=fake".to_string(), "--dpi-desync-ttl=1".to_string()];
+    let strategy = vec![
+        "--dpi-desync=fake".to_string(),
+        "--dpi-desync-ttl=1".to_string(),
+    ];
     let mut nfqws2 = start_nfqws2(&config, slot.qnum, &strategy).expect("start nfqws2");
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    assert!(nfqws2.try_wait().is_none(), "nfqws2 should still be running");
+    assert!(
+        nfqws2.try_wait().is_none(),
+        "nfqws2 should still be running"
+    );
 
     nftables::add_all_worker_rules(table, &slots, 80, &ips)
         .await
@@ -163,7 +175,10 @@ async fn nfqws2_receives_marked_traffic() {
     )
     .await;
 
-    assert!(nfqws2.try_wait().is_none(), "nfqws2 should still be running after processing traffic");
+    assert!(
+        nfqws2.try_wait().is_none(),
+        "nfqws2 should still be running after processing traffic"
+    );
 
     nftables::remove_all_worker_rules(table, &slots).await;
     nfqws2.kill().await;
@@ -222,13 +237,31 @@ async fn autottl_prenat_captures_synack() {
     )
     .await;
 
-    assert!(nfqws2.try_wait().is_none(), "nfqws2 should still be running after autottl flow");
+    assert!(
+        nfqws2.try_wait().is_none(),
+        "nfqws2 should still be running after autottl flow"
+    );
 
     // Check conntrack for ct mark
-    if let Ok(ct_result) = run_process(&["conntrack", "-L", "-d", "1.1.1.1", "-p", "tcp", "--dport", "443"], 5000).await {
+    if let Ok(ct_result) = run_process(
+        &[
+            "conntrack",
+            "-L",
+            "-d",
+            "1.1.1.1",
+            "-p",
+            "tcp",
+            "--dport",
+            "443",
+        ],
+        5000,
+    )
+    .await
+    {
         let combined = DESYNC_MARK | slot.fwmark;
         let has_mark = ct_result.stdout.lines().any(|line| {
-            line.contains(&format!("mark={combined}")) || line.contains(&format!("mark=0x{combined:08x}"))
+            line.contains(&format!("mark={combined}"))
+                || line.contains(&format!("mark=0x{combined:08x}"))
         });
         eprintln!("conntrack output:\n{}", ct_result.stdout);
         if has_mark {
@@ -254,13 +287,10 @@ async fn http_request_uses_relative_uri() {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut buf = vec![0u8; 4096];
         use tokio::io::AsyncReadExt;
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read(&mut buf),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
         String::from_utf8_lossy(&buf[..n]).to_string()
     });
 
@@ -268,10 +298,18 @@ async fn http_request_uses_relative_uri() {
 
     let _result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        http_client::http_test(Protocol::Http, "testhost.example", &local_addr.ip().to_string(), 0, 2),
-    ).await;
+        http_client::http_test(
+            Protocol::Http,
+            "testhost.example",
+            &local_addr.ip().to_string(),
+            0,
+            2,
+        ),
+    )
+    .await;
 
-    if let Ok(request_line) = tokio::time::timeout(std::time::Duration::from_secs(2), server).await {
+    if let Ok(request_line) = tokio::time::timeout(std::time::Duration::from_secs(2), server).await
+    {
         let request_line = request_line.unwrap();
         eprintln!("Captured request:\n{request_line}");
 
@@ -280,8 +318,14 @@ async fn http_request_uses_relative_uri() {
             "HTTP request should use relative URI 'GET / HTTP/1.1', got: {}",
             request_line.lines().next().unwrap_or("(empty)")
         );
-        assert!(request_line.contains("host: testhost.example"), "Request should contain Host header");
-        assert!(request_line.contains("user-agent: Mozilla"), "Request should contain User-Agent");
+        assert!(
+            request_line.contains("host: testhost.example"),
+            "Request should contain Host header"
+        );
+        assert!(
+            request_line.contains("user-agent: Mozilla"),
+            "Request should contain User-Agent"
+        );
     }
 }
 
@@ -306,9 +350,11 @@ fn worker_fwmarks_dont_collide_with_desync() {
     let slots = WorkerSlot::create_slots(512, 200);
     for slot in &slots {
         assert_eq!(
-            slot.fwmark & DESYNC_MARK, 0,
+            slot.fwmark & DESYNC_MARK,
+            0,
             "worker {} fwmark {:#010X} collides with DESYNC_MARK",
-            slot.id, slot.fwmark,
+            slot.id,
+            slot.fwmark,
         );
     }
 }

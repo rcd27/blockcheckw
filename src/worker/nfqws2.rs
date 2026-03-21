@@ -7,14 +7,8 @@ fn build_nfqws2_args(config: &CoreConfig, qnum: u16, strategy_args: &[String]) -
     let uid_arg = format!("--uid={}:{}", config.nfqws2_uid, config.nfqws2_gid);
     let qnum_arg = format!("--qnum={qnum}");
     let fwmark_arg = format!("--fwmark=0x{:08X}", crate::config::DESYNC_MARK);
-    let lua_lib = format!(
-        "--lua-init=@{}/lua/zapret-lib.lua",
-        config.zapret_base
-    );
-    let lua_antidpi = format!(
-        "--lua-init=@{}/lua/zapret-antidpi.lua",
-        config.zapret_base
-    );
+    let lua_lib = format!("--lua-init=@{}/lua/zapret-lib.lua", config.zapret_base);
+    let lua_antidpi = format!("--lua-init=@{}/lua/zapret-antidpi.lua", config.zapret_base);
 
     let mut args = vec![
         config.nfqws2_path.clone(),

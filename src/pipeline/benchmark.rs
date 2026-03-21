@@ -68,8 +68,11 @@ pub fn find_optimal(points: &[BenchmarkPoint]) -> usize {
         return points
             .iter()
             .min_by(|a, b| {
-                a.errors.cmp(&b.errors)
-                    .then(b.throughput.partial_cmp(&a.throughput).unwrap_or(std::cmp::Ordering::Equal))
+                a.errors.cmp(&b.errors).then(
+                    b.throughput
+                        .partial_cmp(&a.throughput)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
             })
             .map(|p| p.workers)
             .unwrap_or(8);
@@ -77,16 +80,16 @@ pub fn find_optimal(points: &[BenchmarkPoint]) -> usize {
 
     clean
         .iter()
-        .max_by(|a, b| a.throughput.partial_cmp(&b.throughput).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.throughput
+                .partial_cmp(&b.throughput)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|p| p.workers)
         .unwrap_or(8)
 }
 
-fn build_table_styled(
-    header: &str,
-    points: &[BenchmarkPoint],
-    base_throughput: f64,
-) -> String {
+fn build_table_styled(header: &str, points: &[BenchmarkPoint], base_throughput: f64) -> String {
     let mut lines = Vec::new();
     lines.push(format!("{}", style(header).bold().cyan()));
     lines.push(format!(
@@ -102,7 +105,14 @@ fn build_table_styled(
     ));
     lines.push(format!(
         "{:>8}  {:>10}  {:>10}  {:>7}  {:>9}  {:>8}  {:>6}  {:>8}",
-        "-------", "----------", "----------", "-------", "---------", "--------", "------", "--------"
+        "-------",
+        "----------",
+        "----------",
+        "-------",
+        "---------",
+        "--------",
+        "------",
+        "--------"
     ));
     for p in points {
         let speedup = if base_throughput > 0.0 {
@@ -130,20 +140,30 @@ fn build_table_styled(
     lines.join("\n")
 }
 
-fn build_table_text(
-    header: &str,
-    points: &[BenchmarkPoint],
-    base_throughput: f64,
-) -> String {
+fn build_table_text(header: &str, points: &[BenchmarkPoint], base_throughput: f64) -> String {
     let mut lines = Vec::new();
     lines.push(header.to_string());
     lines.push(format!(
         "{:>8}  {:>10}  {:>10}  {:>7}  {:>9}  {:>8}  {:>6}  {:>8}",
-        "Workers", "Elapsed(s)", "Throughput", "Speedup", "Completed", "Success", "Errors", "Peak RAM"
+        "Workers",
+        "Elapsed(s)",
+        "Throughput",
+        "Speedup",
+        "Completed",
+        "Success",
+        "Errors",
+        "Peak RAM"
     ));
     lines.push(format!(
         "{:>8}  {:>10}  {:>10}  {:>7}  {:>9}  {:>8}  {:>6}  {:>8}",
-        "-------", "----------", "----------", "-------", "---------", "--------", "------", "--------"
+        "-------",
+        "----------",
+        "----------",
+        "-------",
+        "---------",
+        "--------",
+        "------",
+        "--------"
     ));
     for p in points {
         let speedup = if base_throughput > 0.0 {
@@ -151,10 +171,21 @@ fn build_table_text(
         } else {
             0.0
         };
-        let ram = if p.peak_mem_mb > 0.0 { format!("{:.0}MB", p.peak_mem_mb) } else { "?".into() };
+        let ram = if p.peak_mem_mb > 0.0 {
+            format!("{:.0}MB", p.peak_mem_mb)
+        } else {
+            "?".into()
+        };
         lines.push(format!(
             "{:>8}  {:>10.2}  {:>8.1}/s  {:>6.1}x  {:>9}  {:>8}  {:>6}  {:>8}",
-            p.workers, p.elapsed_secs, p.throughput, speedup, p.completed, p.successes, p.errors, ram,
+            p.workers,
+            p.elapsed_secs,
+            p.throughput,
+            speedup,
+            p.completed,
+            p.successes,
+            p.errors,
+            ram,
         ));
     }
     lines.join("\n")
@@ -246,10 +277,17 @@ pub async fn run_benchmark(
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(time_per_level);
 
         let (_results, stats) = run_parallel_with_deadline(
-            &config, domain, protocol, &strategies, &ips,
-            Some(&multi), None, HttpTestMode::Standard,
+            &config,
+            domain,
+            protocol,
+            &strategies,
+            &ips,
+            Some(&multi),
+            None,
+            HttpTestMode::Standard,
             Some(deadline),
-        ).await;
+        )
+        .await;
 
         mem_sampler.abort();
 
@@ -305,7 +343,11 @@ pub async fn run_benchmark(
     if !raw {
         final_table.push_str(&format!(
             "\n{}",
-            style(format!("Recommended: blockcheckw -w {recommended_workers} scan")).green().bold()
+            style(format!(
+                "Recommended: blockcheckw -w {recommended_workers} scan"
+            ))
+            .green()
+            .bold()
         ));
     }
     table_bar.finish_with_message(final_table);
@@ -333,11 +375,51 @@ mod tests {
     #[test]
     fn test_find_optimal_basic() {
         let points = vec![
-            BenchmarkPoint { workers: 4, elapsed_secs: 19.5, throughput: 3.3, completed: 64, successes: 64, errors: 0, peak_mem_mb: 0.0 },
-            BenchmarkPoint { workers: 8, elapsed_secs: 10.4, throughput: 6.2, completed: 64, successes: 64, errors: 0, peak_mem_mb: 0.0 },
-            BenchmarkPoint { workers: 64, elapsed_secs: 2.4, throughput: 27.1, completed: 64, successes: 64, errors: 0, peak_mem_mb: 0.0 },
-            BenchmarkPoint { workers: 128, elapsed_secs: 2.0, throughput: 32.0, completed: 64, successes: 64, errors: 0, peak_mem_mb: 0.0 },
-            BenchmarkPoint { workers: 256, elapsed_secs: 1.8, throughput: 35.0, completed: 60, successes: 60, errors: 4, peak_mem_mb: 0.0 },
+            BenchmarkPoint {
+                workers: 4,
+                elapsed_secs: 19.5,
+                throughput: 3.3,
+                completed: 64,
+                successes: 64,
+                errors: 0,
+                peak_mem_mb: 0.0,
+            },
+            BenchmarkPoint {
+                workers: 8,
+                elapsed_secs: 10.4,
+                throughput: 6.2,
+                completed: 64,
+                successes: 64,
+                errors: 0,
+                peak_mem_mb: 0.0,
+            },
+            BenchmarkPoint {
+                workers: 64,
+                elapsed_secs: 2.4,
+                throughput: 27.1,
+                completed: 64,
+                successes: 64,
+                errors: 0,
+                peak_mem_mb: 0.0,
+            },
+            BenchmarkPoint {
+                workers: 128,
+                elapsed_secs: 2.0,
+                throughput: 32.0,
+                completed: 64,
+                successes: 64,
+                errors: 0,
+                peak_mem_mb: 0.0,
+            },
+            BenchmarkPoint {
+                workers: 256,
+                elapsed_secs: 1.8,
+                throughput: 35.0,
+                completed: 60,
+                successes: 60,
+                errors: 4,
+                peak_mem_mb: 0.0,
+            },
         ];
         assert_eq!(find_optimal(&points), 128);
     }
@@ -345,8 +427,24 @@ mod tests {
     #[test]
     fn test_find_optimal_all_errors() {
         let points = vec![
-            BenchmarkPoint { workers: 4, elapsed_secs: 5.0, throughput: 2.0, completed: 10, successes: 3, errors: 1, peak_mem_mb: 0.0 },
-            BenchmarkPoint { workers: 8, elapsed_secs: 3.0, throughput: 3.0, completed: 10, successes: 5, errors: 2, peak_mem_mb: 0.0 },
+            BenchmarkPoint {
+                workers: 4,
+                elapsed_secs: 5.0,
+                throughput: 2.0,
+                completed: 10,
+                successes: 3,
+                errors: 1,
+                peak_mem_mb: 0.0,
+            },
+            BenchmarkPoint {
+                workers: 8,
+                elapsed_secs: 3.0,
+                throughput: 3.0,
+                completed: 10,
+                successes: 5,
+                errors: 2,
+                peak_mem_mb: 0.0,
+            },
         ];
         assert_eq!(find_optimal(&points), 4);
     }
@@ -355,7 +453,10 @@ mod tests {
     fn test_worker_counts_to_test() {
         assert_eq!(worker_counts_to_test(64), vec![4, 8, 16, 32, 64]);
         assert_eq!(worker_counts_to_test(48), vec![4, 8, 16, 32, 48]);
-        assert_eq!(worker_counts_to_test(512), vec![4, 8, 16, 32, 64, 128, 256, 512]);
+        assert_eq!(
+            worker_counts_to_test(512),
+            vec![4, 8, 16, 32, 64, 128, 256, 512]
+        );
     }
 
     #[test]

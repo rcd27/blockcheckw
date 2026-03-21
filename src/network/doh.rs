@@ -14,9 +14,15 @@ const DOH_SERVERS: &[&str] = &[
 pub async fn doh_resolve(domain: &str, server_url: &str) -> Option<Vec<String>> {
     let url = format!("{server_url}?name={domain}&type=A");
     let args = vec![
-        "curl", "-4", "--noproxy", "*",
-        "-s", "--max-time", "3",
-        "-H", "Accept: application/dns-json",
+        "curl",
+        "-4",
+        "--noproxy",
+        "*",
+        "-s",
+        "--max-time",
+        "3",
+        "-H",
+        "Accept: application/dns-json",
         &url,
     ];
 
@@ -58,19 +64,21 @@ pub async fn find_working_doh_server() -> Option<&'static str> {
 
 /// Resolve domain via DoH. Finds a working server automatically, then resolves.
 pub async fn resolve_ipv4_doh(domain: &str) -> Result<Vec<String>, BlockcheckError> {
-    let server = find_working_doh_server().await.ok_or_else(|| {
-        BlockcheckError::DnsResolveFailed {
-            domain: domain.to_string(),
-            reason: "no DoH servers reachable".to_string(),
-        }
-    })?;
+    let server =
+        find_working_doh_server()
+            .await
+            .ok_or_else(|| BlockcheckError::DnsResolveFailed {
+                domain: domain.to_string(),
+                reason: "no DoH servers reachable".to_string(),
+            })?;
 
-    let ips = doh_resolve(domain, server).await.ok_or_else(|| {
-        BlockcheckError::DnsResolveFailed {
-            domain: domain.to_string(),
-            reason: format!("DoH query to {server} failed"),
-        }
-    })?;
+    let ips =
+        doh_resolve(domain, server)
+            .await
+            .ok_or_else(|| BlockcheckError::DnsResolveFailed {
+                domain: domain.to_string(),
+                reason: format!("DoH query to {server} failed"),
+            })?;
 
     if ips.is_empty() {
         return Err(BlockcheckError::DnsNoAddresses {

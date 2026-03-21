@@ -46,9 +46,14 @@ pub fn generate_strategies(protocol: Protocol) -> Vec<Strategy> {
 /// 2. Vanilla summary: `curl_test_https_tls12 ipv4 domain : nfqws2 <args>`
 ///
 /// For vanilla format, filters by protocol.
-pub fn load_strategies_from_file(path: &Path, protocol: Option<Protocol>) -> std::io::Result<Vec<Strategy>> {
+pub fn load_strategies_from_file(
+    path: &Path,
+    protocol: Option<Protocol>,
+) -> std::io::Result<Vec<Strategy>> {
     let data = std::fs::read_to_string(path)?;
-    let is_vanilla = data.lines().any(|l| l.starts_with("* SUMMARY") || l.starts_with("curl_test_"));
+    let is_vanilla = data
+        .lines()
+        .any(|l| l.starts_with("* SUMMARY") || l.starts_with("curl_test_"));
 
     if is_vanilla {
         Ok(parse_vanilla_summary(&data, protocol))
@@ -111,10 +116,11 @@ fn parse_vanilla_tagged(data: &str) -> Vec<TaggedStrategy> {
                 return None;
             };
 
-            line.split_once(": nfqws2 ").map(|(_, args)| TaggedStrategy {
-                protocol,
-                args: args.split_whitespace().map(String::from).collect(),
-            })
+            line.split_once(": nfqws2 ")
+                .map(|(_, args)| TaggedStrategy {
+                    protocol,
+                    args: args.split_whitespace().map(String::from).collect(),
+                })
         })
         .collect()
 }
@@ -166,16 +172,16 @@ mod tests {
     #[test]
     fn test_vanilla_working_strategies_present() {
         let tls12 = generate_strategies(Protocol::HttpsTls12);
-        let tls12_set: std::collections::HashSet<Vec<String>> =
-            tls12.into_iter().collect();
+        let tls12_set: std::collections::HashSet<Vec<String>> = tls12.into_iter().collect();
 
-        let parse = |s: &str| -> Strategy {
-            s.split_whitespace().map(String::from).collect()
-        };
+        let parse = |s: &str| -> Strategy { s.split_whitespace().map(String::from).collect() };
 
         // 25-fake: multisplit:blob nodrop with TTL=1 (first TTL in vanilla loop)
         let s = parse("--payload=tls_client_hello --lua-desync=multisplit:blob=fake_default_tls:ip_ttl=1:pos=2:nodrop:repeats=1 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1");
-        assert!(tls12_set.contains(&s), "missing: multisplit:blob nodrop TTL+pktmod");
+        assert!(
+            tls12_set.contains(&s),
+            "missing: multisplit:blob nodrop TTL+pktmod"
+        );
 
         // 25-fake: double fake
         let s = parse("--payload=tls_client_hello --lua-desync=fake:blob=0x00000000:tcp_seq=-3000:repeats=1 --lua-desync=fake:blob=fake_default_tls:tcp_seq=-3000:tls_mod=rnd,dupsid:repeats=1");
@@ -201,7 +207,10 @@ curl_test_https_tls13 ipv4 rutracker.org : nfqws2 --payload=tls_client_hello --l
         let tagged = parse_vanilla_tagged(data);
         assert_eq!(tagged.len(), 3);
         assert_eq!(tagged[0].protocol, Protocol::Http);
-        assert_eq!(tagged[0].args, vec!["--payload=http_req", "--lua-desync=fake:blob=0x00000000"]);
+        assert_eq!(
+            tagged[0].args,
+            vec!["--payload=http_req", "--lua-desync=fake:blob=0x00000000"]
+        );
         assert_eq!(tagged[1].protocol, Protocol::HttpsTls12);
         assert_eq!(tagged[2].protocol, Protocol::HttpsTls13);
     }

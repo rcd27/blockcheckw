@@ -7,11 +7,7 @@ use crate::system::process::run_process;
 
 const DNS_TIMEOUT_MS: u64 = 10_000;
 
-const SPOOFING_CHECK_DOMAINS: &[&str] = &[
-    "rutracker.org",
-    "pornhub.com",
-    "torproject.org",
-];
+const SPOOFING_CHECK_DOMAINS: &[&str] = &["rutracker.org", "pornhub.com", "torproject.org"];
 
 #[derive(Debug, Clone)]
 pub enum DnsSpoofResult {
@@ -32,7 +28,9 @@ pub(crate) fn is_ipv4(s: &str) -> bool {
     if parts.len() != 4 {
         return false;
     }
-    parts.iter().all(|p| !p.is_empty() && p.parse::<u8>().is_ok())
+    parts
+        .iter()
+        .all(|p| !p.is_empty() && p.parse::<u8>().is_ok())
 }
 
 async fn resolve_with_getent(domain: &str) -> Option<Vec<String>> {
@@ -154,7 +152,10 @@ pub async fn check_dns_spoofing(doh_server_url: &str) -> DnsSpoofResult {
 }
 
 /// Unified domain resolution with DNS mode support.
-pub async fn resolve_domain(domain: &str, dns_mode: DnsMode) -> Result<DnsResolution, BlockcheckError> {
+pub async fn resolve_domain(
+    domain: &str,
+    dns_mode: DnsMode,
+) -> Result<DnsResolution, BlockcheckError> {
     match dns_mode {
         DnsMode::System => {
             let ips = resolve_ipv4(domain).await?;

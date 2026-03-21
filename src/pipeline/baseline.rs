@@ -1,7 +1,5 @@
 use crate::config::Protocol;
-use crate::network::http_client::{
-    http_test, interpret_http_result, pick_random_ip, HttpVerdict,
-};
+use crate::network::http_client::{http_test, interpret_http_result, pick_random_ip, HttpVerdict};
 use crate::ui;
 
 pub struct BaselineResult {
@@ -53,9 +51,7 @@ pub fn format_baseline_verdict(result: &BaselineResult) -> String {
 pub fn format_baseline_verdict_styled(result: &BaselineResult) -> String {
     let proto = result.protocol.to_string();
     match &result.verdict {
-        HttpVerdict::Available => {
-            ui::verdict_available(&proto, "available without bypass")
-        }
+        HttpVerdict::Available => ui::verdict_available(&proto, "available without bypass"),
         HttpVerdict::SuspiciousRedirect { code, location } => {
             ui::verdict_warning(&proto, &format!("suspicious redirect {code} to {location}"))
         }
@@ -65,9 +61,10 @@ pub fn format_baseline_verdict_styled(result: &BaselineResult) -> String {
         HttpVerdict::Unavailable { reason } => {
             ui::verdict_blocked(&proto, &format!("UNAVAILABLE {reason}"))
         }
-        HttpVerdict::DataTransferFailed { size_download } => {
-            ui::verdict_warning(&proto, &format!("data transfer failed ({size_download}B downloaded)"))
-        }
+        HttpVerdict::DataTransferFailed { size_download } => ui::verdict_warning(
+            &proto,
+            &format!("data transfer failed ({size_download}B downloaded)"),
+        ),
     }
 }
 
@@ -83,7 +80,9 @@ mod tests {
     fn test_is_blocked_unavailable() {
         let r = make_result(
             Protocol::Http,
-            HttpVerdict::Unavailable { reason: "timeout".to_string() },
+            HttpVerdict::Unavailable {
+                reason: "timeout".to_string(),
+            },
         );
         assert!(r.is_blocked());
     }
@@ -116,7 +115,9 @@ mod tests {
     fn test_format_verdict_blocked() {
         let r = make_result(
             Protocol::Http,
-            HttpVerdict::Unavailable { reason: "timeout".to_string() },
+            HttpVerdict::Unavailable {
+                reason: "timeout".to_string(),
+            },
         );
         let s = format_baseline_verdict(&r);
         assert!(s.contains("BLOCKED"));

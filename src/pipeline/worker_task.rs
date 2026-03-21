@@ -2,26 +2,19 @@ use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
 use crate::error::{BlockcheckError, HttpVerdictAvailable, TaskResult};
 use crate::firewall::nftables;
 use crate::network::http_client::{
-    http_test, http_test_data, interpret_data_transfer_result,
-    interpret_http_result, pick_random_ip, HttpVerdict,
+    http_test, http_test_data, interpret_data_transfer_result, interpret_http_result,
+    pick_random_ip, HttpVerdict,
 };
 use crate::worker::nfqws2::start_nfqws2;
 use crate::worker::slot::WorkerSlot;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum HttpTestMode {
     /// Standard mode: HEAD for HTTPS, GET for HTTP
+    #[default]
     Standard,
     /// Data transfer mode: GET with size_download check
-    DataTransfer {
-        min_bytes: u64,
-    },
-}
-
-impl Default for HttpTestMode {
-    fn default() -> Self {
-        HttpTestMode::Standard
-    }
+    DataTransfer { min_bytes: u64 },
 }
 
 #[derive(Debug)]
@@ -101,7 +94,8 @@ pub async fn execute_worker_task_with_mode(
     let ip = match pick_random_ip(&task.ips) {
         Some(ip) => ip,
         None => {
-            let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle).await;
+            let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle)
+                .await;
             nfqws2_process.kill().await;
             return TaskResult::Error {
                 error: BlockcheckError::DnsNoAddresses {
@@ -130,6 +124,7 @@ pub async fn execute_worker_task_with_mode(
                 ip,
                 task.slot.fwmark,
                 config.request_timeout,
+                0, // unlimited
             )
             .await;
             interpret_data_transfer_result(&result, &task.domain, min_bytes)
@@ -202,6 +197,7 @@ pub async fn execute_worker_task_rules_ready(
                 ip,
                 task.slot.fwmark,
                 config.request_timeout,
+                0, // unlimited
             )
             .await;
             interpret_data_transfer_result(&result, &task.domain, min_bytes)

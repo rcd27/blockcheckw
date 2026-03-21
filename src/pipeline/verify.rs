@@ -120,10 +120,7 @@ pub fn tally_results(
 }
 
 /// Keep only strategies with pass_count >= min_passes.
-pub fn filter_verified(
-    tallies: &[StrategyTally],
-    min_passes: usize,
-) -> Vec<Vec<String>> {
+pub fn filter_verified(tallies: &[StrategyTally], min_passes: usize) -> Vec<Vec<String>> {
     tallies
         .iter()
         .filter(|t| t.pass_count >= min_passes)
@@ -135,10 +132,7 @@ pub fn filter_verified(
 ///
 /// Tries min_passes-1, min_passes-2, ..., 1 and returns the first threshold
 /// that produces any results. Returns None if even 1/N gives nothing.
-pub fn find_relaxed(
-    tallies: &[StrategyTally],
-    min_passes: usize,
-) -> Option<RelaxedResult> {
+pub fn find_relaxed(tallies: &[StrategyTally], min_passes: usize) -> Option<RelaxedResult> {
     for threshold in (1..min_passes).rev() {
         let strategies = filter_verified(tallies, threshold);
         if !strategies.is_empty() {
@@ -155,10 +149,7 @@ pub fn find_relaxed(
 ///
 /// For each candidate, checks if there's a matching StrategyResult with Success.
 /// Missing results default to false.
-fn extract_outcomes(
-    candidates: &[Vec<String>],
-    results: &[StrategyResult],
-) -> Vec<bool> {
+fn extract_outcomes(candidates: &[Vec<String>], results: &[StrategyResult]) -> Vec<bool> {
     candidates
         .iter()
         .map(|args| {
@@ -344,11 +335,7 @@ mod tests {
     #[test]
     fn tally_all_pass() {
         let candidates = vec![args("--a"), args("--b")];
-        let outcomes = vec![
-            vec![true, true],
-            vec![true, true],
-            vec![true, true],
-        ];
+        let outcomes = vec![vec![true, true], vec![true, true], vec![true, true]];
         let tallies = tally_results(&candidates, &outcomes);
         assert_eq!(tallies.len(), 2);
         assert_eq!(tallies[0].pass_count, 3);
@@ -366,19 +353,36 @@ mod tests {
             vec![true, true, false],
         ];
         let tallies = tally_results(&candidates, &outcomes);
-        assert_eq!(tallies[0], StrategyTally { strategy_args: args("--a"), pass_count: 3, fail_count: 0 });
-        assert_eq!(tallies[1], StrategyTally { strategy_args: args("--b"), pass_count: 2, fail_count: 1 });
-        assert_eq!(tallies[2], StrategyTally { strategy_args: args("--c"), pass_count: 1, fail_count: 2 });
+        assert_eq!(
+            tallies[0],
+            StrategyTally {
+                strategy_args: args("--a"),
+                pass_count: 3,
+                fail_count: 0
+            }
+        );
+        assert_eq!(
+            tallies[1],
+            StrategyTally {
+                strategy_args: args("--b"),
+                pass_count: 2,
+                fail_count: 1
+            }
+        );
+        assert_eq!(
+            tallies[2],
+            StrategyTally {
+                strategy_args: args("--c"),
+                pass_count: 1,
+                fail_count: 2
+            }
+        );
     }
 
     #[test]
     fn tally_all_fail() {
         let candidates = vec![args("--a")];
-        let outcomes = vec![
-            vec![false],
-            vec![false],
-            vec![false],
-        ];
+        let outcomes = vec![vec![false], vec![false], vec![false]];
         let tallies = tally_results(&candidates, &outcomes);
         assert_eq!(tallies[0].pass_count, 0);
         assert_eq!(tallies[0].fail_count, 3);
@@ -408,9 +412,21 @@ mod tests {
     #[test]
     fn filter_strict_3_of_3() {
         let tallies = vec![
-            StrategyTally { strategy_args: args("--a"), pass_count: 3, fail_count: 0 },
-            StrategyTally { strategy_args: args("--b"), pass_count: 2, fail_count: 1 },
-            StrategyTally { strategy_args: args("--c"), pass_count: 3, fail_count: 0 },
+            StrategyTally {
+                strategy_args: args("--a"),
+                pass_count: 3,
+                fail_count: 0,
+            },
+            StrategyTally {
+                strategy_args: args("--b"),
+                pass_count: 2,
+                fail_count: 1,
+            },
+            StrategyTally {
+                strategy_args: args("--c"),
+                pass_count: 3,
+                fail_count: 0,
+            },
         ];
         let verified = filter_verified(&tallies, 3);
         assert_eq!(verified.len(), 2);
@@ -421,9 +437,21 @@ mod tests {
     #[test]
     fn filter_relaxed_2_of_3() {
         let tallies = vec![
-            StrategyTally { strategy_args: args("--a"), pass_count: 3, fail_count: 0 },
-            StrategyTally { strategy_args: args("--b"), pass_count: 2, fail_count: 1 },
-            StrategyTally { strategy_args: args("--c"), pass_count: 1, fail_count: 2 },
+            StrategyTally {
+                strategy_args: args("--a"),
+                pass_count: 3,
+                fail_count: 0,
+            },
+            StrategyTally {
+                strategy_args: args("--b"),
+                pass_count: 2,
+                fail_count: 1,
+            },
+            StrategyTally {
+                strategy_args: args("--c"),
+                pass_count: 1,
+                fail_count: 2,
+            },
         ];
         let verified = filter_verified(&tallies, 2);
         assert_eq!(verified.len(), 2);
@@ -433,18 +461,22 @@ mod tests {
 
     #[test]
     fn filter_none_pass() {
-        let tallies = vec![
-            StrategyTally { strategy_args: args("--a"), pass_count: 1, fail_count: 2 },
-        ];
+        let tallies = vec![StrategyTally {
+            strategy_args: args("--a"),
+            pass_count: 1,
+            fail_count: 2,
+        }];
         let verified = filter_verified(&tallies, 3);
         assert!(verified.is_empty());
     }
 
     #[test]
     fn filter_zero_threshold() {
-        let tallies = vec![
-            StrategyTally { strategy_args: args("--a"), pass_count: 0, fail_count: 3 },
-        ];
+        let tallies = vec![StrategyTally {
+            strategy_args: args("--a"),
+            pass_count: 0,
+            fail_count: 3,
+        }];
         let verified = filter_verified(&tallies, 0);
         assert_eq!(verified.len(), 1);
         assert_eq!(verified[0], args("--a"));
@@ -473,7 +505,9 @@ mod tests {
             StrategyResult {
                 strategy_args: args("--b"),
                 result: TaskResult::Failed {
-                    verdict: crate::network::http_client::HttpVerdict::Unavailable { reason: "connection refused".to_string() },
+                    verdict: crate::network::http_client::HttpVerdict::Unavailable {
+                        reason: "connection refused".to_string(),
+                    },
                 },
             },
         ];
@@ -505,8 +539,16 @@ mod tests {
     fn relaxed_finds_best_threshold() {
         // strict=3, но --a набрала 2/3, --b 1/3
         let tallies = vec![
-            StrategyTally { strategy_args: args("--a"), pass_count: 2, fail_count: 1 },
-            StrategyTally { strategy_args: args("--b"), pass_count: 1, fail_count: 2 },
+            StrategyTally {
+                strategy_args: args("--a"),
+                pass_count: 2,
+                fail_count: 1,
+            },
+            StrategyTally {
+                strategy_args: args("--b"),
+                pass_count: 1,
+                fail_count: 2,
+            },
         ];
         let result = find_relaxed(&tallies, 3).unwrap();
         assert_eq!(result.actual_min, 2);
@@ -516,18 +558,22 @@ mod tests {
     #[test]
     fn relaxed_all_zero() {
         // все 0/3 — даже relaxed не поможет
-        let tallies = vec![
-            StrategyTally { strategy_args: args("--a"), pass_count: 0, fail_count: 3 },
-        ];
+        let tallies = vec![StrategyTally {
+            strategy_args: args("--a"),
+            pass_count: 0,
+            fail_count: 3,
+        }];
         assert!(find_relaxed(&tallies, 3).is_none());
     }
 
     #[test]
     fn relaxed_falls_to_one() {
         // только 1/3 — порог опустится до 1
-        let tallies = vec![
-            StrategyTally { strategy_args: args("--a"), pass_count: 1, fail_count: 2 },
-        ];
+        let tallies = vec![StrategyTally {
+            strategy_args: args("--a"),
+            pass_count: 1,
+            fail_count: 2,
+        }];
         let result = find_relaxed(&tallies, 3).unwrap();
         assert_eq!(result.actual_min, 1);
         assert_eq!(result.strategies, vec![args("--a")]);
@@ -536,9 +582,11 @@ mod tests {
     #[test]
     fn relaxed_not_needed_when_min_is_one() {
         // min_passes=1 — relaxed не вызывается (нечего понижать)
-        let tallies = vec![
-            StrategyTally { strategy_args: args("--a"), pass_count: 0, fail_count: 3 },
-        ];
+        let tallies = vec![StrategyTally {
+            strategy_args: args("--a"),
+            pass_count: 0,
+            fail_count: 3,
+        }];
         assert!(find_relaxed(&tallies, 1).is_none());
     }
 }

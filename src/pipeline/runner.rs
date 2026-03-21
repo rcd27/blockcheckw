@@ -44,6 +44,7 @@ impl RunStats {
 /// nftables rules are added once per batch (not per strategy), drastically
 /// reducing nft fork+exec overhead. Only nfqws2 start/kill and HTTP tests
 /// happen per strategy.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_parallel(
     config: &CoreConfig,
     domain: &str,
@@ -54,12 +55,24 @@ pub async fn run_parallel(
     external_pb: Option<&ProgressBar>,
     mode: HttpTestMode,
 ) -> (Vec<StrategyResult>, RunStats) {
-    run_parallel_with_deadline(config, domain, protocol, strategies, ips, multi, external_pb, mode, None).await
+    run_parallel_with_deadline(
+        config,
+        domain,
+        protocol,
+        strategies,
+        ips,
+        multi,
+        external_pb,
+        mode,
+        None,
+    )
+    .await
 }
 
 /// Run strategies in parallel batches with optional deadline.
 /// If `deadline` is set, stops processing new batches after the deadline
 /// and returns partial results.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_parallel_with_deadline(
     config: &CoreConfig,
     domain: &str,
@@ -141,13 +154,9 @@ pub async fn run_parallel_with_deadline(
         let batch_slots: Vec<WorkerSlot> = slots.iter().take(batch.len()).cloned().collect();
 
         // Add all nftables vmap elements + dispatch rules for this batch
-        if let Err(e) = nftables::add_all_worker_rules(
-            &config.nft_table,
-            &batch_slots,
-            protocol.port(),
-            ips,
-        )
-        .await
+        if let Err(e) =
+            nftables::add_all_worker_rules(&config.nft_table, &batch_slots, protocol.port(), ips)
+                .await
         {
             // All strategies in this batch fail
             for strategy_args in batch {

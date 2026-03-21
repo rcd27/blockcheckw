@@ -46,7 +46,11 @@ mod tests {
         let slots = WorkerSlot::create_slots(255, 200);
         let desync_mark = crate::config::DESYNC_MARK;
         for slot in &slots {
-            assert_eq!(slot.fwmark & desync_mark, 0, "worker fwmark must not overlap DESYNC_MARK");
+            assert_eq!(
+                slot.fwmark & desync_mark,
+                0,
+                "worker fwmark must not overlap DESYNC_MARK"
+            );
         }
     }
 }

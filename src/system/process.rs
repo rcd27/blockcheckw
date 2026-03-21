@@ -13,13 +13,12 @@ pub struct ProcessResult {
 
 /// Run a command synchronously (blocking), capturing stdout/stderr.
 /// Used for short-lived commands like nft, curl.
-pub async fn run_process(
-    args: &[&str],
-    timeout_ms: u64,
-) -> Result<ProcessResult, BlockcheckError> {
-    let (program, cmd_args) = args.split_first().ok_or_else(|| BlockcheckError::ProcessSpawn {
-        reason: "empty command".to_string(),
-    })?;
+pub async fn run_process(args: &[&str], timeout_ms: u64) -> Result<ProcessResult, BlockcheckError> {
+    let (program, cmd_args) = args
+        .split_first()
+        .ok_or_else(|| BlockcheckError::ProcessSpawn {
+            reason: "empty command".to_string(),
+        })?;
 
     let fut = Command::new(program)
         .args(cmd_args)
@@ -49,9 +48,11 @@ pub async fn run_process_stdin(
 ) -> Result<ProcessResult, BlockcheckError> {
     use tokio::io::AsyncWriteExt;
 
-    let (program, cmd_args) = args.split_first().ok_or_else(|| BlockcheckError::ProcessSpawn {
-        reason: "empty command".to_string(),
-    })?;
+    let (program, cmd_args) = args
+        .split_first()
+        .ok_or_else(|| BlockcheckError::ProcessSpawn {
+            reason: "empty command".to_string(),
+        })?;
 
     let mut child = Command::new(program)
         .args(cmd_args)
@@ -92,9 +93,11 @@ pub struct BackgroundProcess {
 impl BackgroundProcess {
     /// Spawn a background process with stdout/stderr → /dev/null.
     pub fn spawn(args: &[&str]) -> Result<Self, BlockcheckError> {
-        let (program, cmd_args) = args.split_first().ok_or_else(|| BlockcheckError::ProcessSpawn {
-            reason: "empty command".to_string(),
-        })?;
+        let (program, cmd_args) =
+            args.split_first()
+                .ok_or_else(|| BlockcheckError::ProcessSpawn {
+                    reason: "empty command".to_string(),
+                })?;
 
         let child = Command::new(program)
             .args(cmd_args)

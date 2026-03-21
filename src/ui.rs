@@ -58,7 +58,9 @@ pub fn summary_found(protocol: &str, count: usize) -> String {
         "  {}{}: {}",
         CHECKMARK,
         style(protocol).green().bold(),
-        style(format!("{count} working strategies found")).green().bold()
+        style(format!("{count} working strategies found"))
+            .green()
+            .bold()
     )
 }
 
@@ -68,7 +70,9 @@ pub fn summary_found_unstable(protocol: &str, count: usize) -> String {
         "  {}{}: {}",
         WARN,
         style(protocol).yellow().bold(),
-        style(format!("{count} unstable strategies found")).yellow().bold()
+        style(format!("{count} unstable strategies found"))
+            .yellow()
+            .bold()
     )
 }
 
@@ -122,7 +126,12 @@ pub fn stats_line(
 }
 
 /// Relaxed summary header: "  no strategies passed 3/3, showing best at 2/3 (unstable):"
-pub fn verify_relaxed_header(required: usize, passes: usize, actual_min: usize, count: usize) -> String {
+pub fn verify_relaxed_header(
+    required: usize,
+    passes: usize,
+    actual_min: usize,
+    count: usize,
+) -> String {
     format!(
         "  {} {}/{}, showing {} best at {}/{} ({}):",
         style("no strategies passed").yellow(),
@@ -136,7 +145,12 @@ pub fn verify_relaxed_header(required: usize, passes: usize, actual_min: usize, 
 }
 
 /// Verification summary: "  verified: 8/12 strategies (3/3 passes each)"
-pub fn verify_summary_line(verified: usize, total: usize, required: usize, passes: usize) -> String {
+pub fn verify_summary_line(
+    verified: usize,
+    total: usize,
+    required: usize,
+    passes: usize,
+) -> String {
     format!(
         "  {}: {}/{} strategies ({}/{} passes each)",
         style("verified").bold(),
@@ -148,7 +162,10 @@ pub fn verify_summary_line(verified: usize, total: usize, required: usize, passe
 }
 
 /// Per-strategy tally: "    ✓ nfqws2 --args: 3/3" or "    ✗ nfqws2 --args: 1/3"
-pub fn verify_tally_line(tally: &crate::pipeline::verify::StrategyTally, required: usize) -> String {
+pub fn verify_tally_line(
+    tally: &crate::pipeline::verify::StrategyTally,
+    required: usize,
+) -> String {
     let args_str = tally.strategy_args.join(" ");
     let total = tally.pass_count + tally.fail_count;
     let ratio = format!("{}/{}", tally.pass_count, total);
@@ -180,7 +197,9 @@ pub fn dns_info_line(
     let spoof_status = match spoof_result {
         Some(crate::network::dns::DnsSpoofResult::Clean) => format!("{CHECKMARK}clean"),
         Some(crate::network::dns::DnsSpoofResult::Spoofed { .. }) => format!("{WARN}spoofed!"),
-        Some(crate::network::dns::DnsSpoofResult::CheckFailed { .. }) => format!("{WARN}check failed"),
+        Some(crate::network::dns::DnsSpoofResult::CheckFailed { .. }) => {
+            format!("{WARN}check failed")
+        }
         None => "n/a".to_string(),
     };
     format!(
@@ -197,9 +216,11 @@ pub fn dns_info_line(
 pub fn top_strategies_header(protocol: &str, count: usize, total: usize) -> String {
     format!(
         "{}",
-        style(format!("=== Top strategies for {protocol} ({count} of {total}) ==="))
-            .bold()
-            .cyan()
+        style(format!(
+            "=== Top strategies for {protocol} ({count} of {total}) ==="
+        ))
+        .bold()
+        .cyan()
     )
 }
 

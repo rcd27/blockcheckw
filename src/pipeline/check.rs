@@ -5,10 +5,7 @@ use serde::Serialize;
 
 use crate::config::{CoreConfig, NFQWS2_INIT_DELAY_MS};
 use crate::firewall::nftables;
-use crate::network::http_client::{
-    http_test_data, interpret_data_transfer_result, pick_random_ip, DATA_TRANSFER_MIN_BYTES,
-    HttpVerdict,
-};
+use crate::network::http_client::{http_test_data, pick_random_ip, HttpResult};
 use crate::pipeline::test_runner::{compute_stats, PassResult, StabilityVerdict};
 use crate::strategy::generator::TaggedStrategy;
 use crate::strategy::rank;
@@ -73,7 +70,10 @@ pub async fn run_check(
     screen: &ui::ScanScreen,
 ) -> CheckReport {
     let start = Instant::now();
-    let slot = WorkerSlot::create_slots(1, config.base_qnum).into_iter().next().unwrap();
+    let slot = WorkerSlot::create_slots(1, config.base_qnum)
+        .into_iter()
+        .next()
+        .unwrap();
 
     // Prepare nftables table
     nftables::drop_table(&config.nft_table).await;
@@ -132,11 +132,7 @@ pub async fn run_check(
             )
         } else {
             let reason = checked.error.as_deref().unwrap_or("failed");
-            format!(
-                "    {} {}",
-                style("FAIL").red().bold(),
-                style(reason).red(),
-            )
+            format!("    {} {}", style("FAIL").red().bold(), style(reason).red(),)
         };
         screen.println(&status);
 
@@ -162,9 +158,12 @@ pub async fn run_check(
         screen.newline();
         screen.println(&format!(
             "  {}",
-            style(format!("Phase 2: verifying {} strategies ({passes} passes each)", working_tagged.len()))
-                .bold()
-                .underlined(),
+            style(format!(
+                "Phase 2: verifying {} strategies ({passes} passes each)",
+                working_tagged.len()
+            ))
+            .bold()
+            .underlined(),
         ));
 
         let mut verified: Vec<VerifiedStrategy> = Vec::new();
@@ -338,9 +337,8 @@ async fn check_single_strategy(
     let ip = match pick_random_ip(ips) {
         Some(ip) => ip,
         None => {
-            let _ =
-                nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle)
-                    .await;
+            let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle)
+                .await;
             nfqws2_process.kill().await;
             return make_failed("no IP addresses".to_string());
         }
@@ -353,45 +351,75 @@ async fn check_single_strategy(
         ip,
         slot.fwmark,
         config.request_timeout,
+        0, // unlimited — we just need any response
     )
     .await;
     let latency_ms = test_start.elapsed().as_millis() as u64;
 
     // 6. Cleanup: remove rules first, then kill nfqws2
-    let _ =
-        nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle).await;
+    let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle).await;
     nfqws2_process.kill().await;
 
-    // 7. Interpret — require actual data transfer (≥ 1KB).
-    //    Same-domain redirects are followed by http_test_inner, so we get the final response.
-    let verdict = interpret_data_transfer_result(&result, domain, DATA_TRANSFER_MIN_BYTES);
+    // 7. Interpret for check: got an HTTP status code = strategy works.
+    //    DPI blocks manifest as timeouts/connection resets — never as HTTP responses.
+    let (working, error) = interpret_check_result(&result, domain);
     let bytes_downloaded = result.size_download.unwrap_or(0);
-    let speed_kbps = if latency_ms > 0 {
+    let speed_kbps = if working && latency_ms > 0 {
         (bytes_downloaded as f64 / 1024.0) / (latency_ms as f64 / 1000.0)
     } else {
         0.0
     };
 
-    match verdict {
-        HttpVerdict::Available => CheckedStrategy {
-            protocol: protocol.to_string(),
-            args: args_str,
-            working: true,
-            bytes_downloaded,
-            latency_ms,
-            speed_kbps,
-            error: None,
-        },
-        other => CheckedStrategy {
-            protocol: protocol.to_string(),
-            args: args_str,
-            working: false,
-            bytes_downloaded,
-            latency_ms,
-            speed_kbps: 0.0,
-            error: Some(format!("{other}")),
-        },
+    CheckedStrategy {
+        protocol: protocol.to_string(),
+        args: args_str,
+        working,
+        bytes_downloaded,
+        latency_ms,
+        speed_kbps,
+        error,
     }
+}
+
+/// Check-specific interpretation of HTTP results.
+///
+/// Unlike scan's `interpret_http_result`, this is simple and permissive:
+/// - Error (timeout, reset) → FAIL (DPI blocked us)
+/// - HTTP 400 → FAIL (server received our fakes — broken strategy)
+/// - Redirect to a different domain → FAIL (ISP captive portal / block page)
+/// - Any other HTTP response → OK (strategy works)
+fn interpret_check_result(result: &HttpResult, domain: &str) -> (bool, Option<String>) {
+    if let Some(err) = &result.error {
+        return (false, Some(err.clone()));
+    }
+
+    match result.status_code {
+        Some(400) => (false, Some("server received fakes (HTTP 400)".to_string())),
+        Some(code @ (301 | 302 | 307 | 308)) => {
+            let location = extract_redirect_location(&result.headers);
+            if location.to_lowercase().contains(&domain.to_lowercase()) {
+                (true, None)
+            } else {
+                (
+                    false,
+                    Some(format!(
+                        "redirect to foreign domain: {location} (HTTP {code})"
+                    )),
+                )
+            }
+        }
+        Some(_) => (true, None),
+        None => (false, Some("no response".to_string())),
+    }
+}
+
+/// Extract Location header value from raw headers string.
+fn extract_redirect_location(headers: &str) -> String {
+    headers
+        .lines()
+        .find(|line| line.to_lowercase().starts_with("location:"))
+        .and_then(|line| line.split_once(':').map(|(_, v)| v.trim().to_string()))
+        .unwrap_or_default()
 }
 
 fn timestamp_iso() -> String {
@@ -546,5 +574,4 @@ mod tests {
         assert!(json.contains("\"success_rate\":0.67"));
         assert!(json.contains("\"rank_score\":75"));
     }
-
 }

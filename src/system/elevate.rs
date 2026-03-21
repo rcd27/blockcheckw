@@ -23,11 +23,7 @@ pub fn require_root() {
     // Try sudo
     if has_command("sudo") {
         eprintln!("elevating with sudo");
-        let err = Command::new("sudo")
-            .arg("-E")
-            .arg(&exe)
-            .args(&args)
-            .exec();
+        let err = Command::new("sudo").arg("-E").arg(&exe).args(&args).exec();
         eprintln!("exec sudo failed: {err}");
         std::process::exit(2);
     }
@@ -112,7 +108,9 @@ fn has_command(name: &str) -> bool {
 }
 
 fn shell_escape(s: &str) -> String {
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:".contains(c)) {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_./=:".contains(c))
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))

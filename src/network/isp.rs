@@ -32,12 +32,9 @@ fn extract_field(json: &str, field: &str) -> Option<String> {
 /// Detect ISP info via `curl -s ipinfo.io`.
 /// Returns `None` on any error (timeout, parse failure, etc).
 pub async fn detect_ip_info() -> Option<IpInfo> {
-    let result = run_process(
-        &["curl", "-s", "--max-time", "3", "ipinfo.io"],
-        6000,
-    )
-    .await
-    .ok()?;
+    let result = run_process(&["curl", "-s", "--max-time", "3", "ipinfo.io"], 6000)
+        .await
+        .ok()?;
 
     if result.exit_code != 0 {
         return None;

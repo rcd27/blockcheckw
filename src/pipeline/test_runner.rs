@@ -6,9 +6,7 @@ use serde::Serialize;
 use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
 use crate::error::BlockcheckError;
 use crate::firewall::nftables;
-use crate::network::http_client::{
-    http_test, interpret_http_result, pick_random_ip, HttpVerdict,
-};
+use crate::network::http_client::{http_test, interpret_http_result, pick_random_ip, HttpVerdict};
 use crate::ui;
 use crate::worker::nfqws2::start_nfqws2;
 use crate::worker::slot::WorkerSlot;
@@ -302,20 +300,12 @@ pub async fn run_strategy_tests(
 
     // Baseline (if enabled)
     if test_config.with_baseline {
-        screen.println(&format!(
-            "\n{}",
-            ui::section("Baseline (no bypass)")
-        ));
+        screen.println(&format!("\n{}", ui::section("Baseline (no bypass)")));
 
         let mut pass_results = Vec::new();
         for i in 0..test_config.passes {
-            let mut result = execute_baseline_pass(
-                domain,
-                protocol,
-                ips,
-                test_config.request_timeout,
-            )
-            .await;
+            let mut result =
+                execute_baseline_pass(domain, protocol, ips, test_config.request_timeout).await;
             result.pass_index = i + 1;
             screen.println(&format!(
                 "  Pass {:>2}: {}  {}ms",
@@ -344,10 +334,7 @@ pub async fn run_strategy_tests(
             "\n{}",
             ui::section(&format!("Strategy #{}", idx + 1))
         ));
-        screen.println(&format!(
-            "  nfqws2 {}",
-            strategy.join(" ")
-        ));
+        screen.println(&format!("  nfqws2 {}", strategy.join(" ")));
 
         let mut pass_results = Vec::new();
         for i in 0..test_config.passes {
@@ -471,14 +458,20 @@ mod tests {
         let content = "# Comment\n\n--payload=tls_client_hello --lua-desync=fake:blob=0x1603:ip_ttl=6\n--payload=tls_client_hello --lua-desync=multisplit:pos=1\n";
         let result = parse_strategies_file(content).unwrap();
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0], vec![
-            "--payload=tls_client_hello",
-            "--lua-desync=fake:blob=0x1603:ip_ttl=6",
-        ]);
-        assert_eq!(result[1], vec![
-            "--payload=tls_client_hello",
-            "--lua-desync=multisplit:pos=1",
-        ]);
+        assert_eq!(
+            result[0],
+            vec![
+                "--payload=tls_client_hello",
+                "--lua-desync=fake:blob=0x1603:ip_ttl=6",
+            ]
+        );
+        assert_eq!(
+            result[1],
+            vec![
+                "--payload=tls_client_hello",
+                "--lua-desync=multisplit:pos=1",
+            ]
+        );
     }
 
     #[test]
@@ -519,9 +512,27 @@ mod tests {
     #[test]
     fn test_compute_stats_all_success() {
         let results = vec![
-            PassResult { pass_index: 1, success: true, verdict: "Available".into(), latency_ms: 100, timestamp: 0 },
-            PassResult { pass_index: 2, success: true, verdict: "Available".into(), latency_ms: 200, timestamp: 0 },
-            PassResult { pass_index: 3, success: true, verdict: "Available".into(), latency_ms: 150, timestamp: 0 },
+            PassResult {
+                pass_index: 1,
+                success: true,
+                verdict: "Available".into(),
+                latency_ms: 100,
+                timestamp: 0,
+            },
+            PassResult {
+                pass_index: 2,
+                success: true,
+                verdict: "Available".into(),
+                latency_ms: 200,
+                timestamp: 0,
+            },
+            PassResult {
+                pass_index: 3,
+                success: true,
+                verdict: "Available".into(),
+                latency_ms: 150,
+                timestamp: 0,
+            },
         ];
         let stats = compute_stats(&results);
         assert_eq!(stats.total_passes, 3);
@@ -538,9 +549,27 @@ mod tests {
     #[test]
     fn test_compute_stats_mixed() {
         let results = vec![
-            PassResult { pass_index: 1, success: true, verdict: "Available".into(), latency_ms: 100, timestamp: 0 },
-            PassResult { pass_index: 2, success: false, verdict: "UNAVAILABLE code=28".into(), latency_ms: 3000, timestamp: 0 },
-            PassResult { pass_index: 3, success: true, verdict: "Available".into(), latency_ms: 200, timestamp: 0 },
+            PassResult {
+                pass_index: 1,
+                success: true,
+                verdict: "Available".into(),
+                latency_ms: 100,
+                timestamp: 0,
+            },
+            PassResult {
+                pass_index: 2,
+                success: false,
+                verdict: "UNAVAILABLE code=28".into(),
+                latency_ms: 3000,
+                timestamp: 0,
+            },
+            PassResult {
+                pass_index: 3,
+                success: true,
+                verdict: "Available".into(),
+                latency_ms: 200,
+                timestamp: 0,
+            },
         ];
         let stats = compute_stats(&results);
         assert_eq!(stats.successes, 2);
@@ -553,8 +582,20 @@ mod tests {
     #[test]
     fn test_compute_stats_all_failed() {
         let results = vec![
-            PassResult { pass_index: 1, success: false, verdict: "UNAVAILABLE code=28".into(), latency_ms: 3000, timestamp: 0 },
-            PassResult { pass_index: 2, success: false, verdict: "UNAVAILABLE code=28".into(), latency_ms: 3000, timestamp: 0 },
+            PassResult {
+                pass_index: 1,
+                success: false,
+                verdict: "UNAVAILABLE code=28".into(),
+                latency_ms: 3000,
+                timestamp: 0,
+            },
+            PassResult {
+                pass_index: 2,
+                success: false,
+                verdict: "UNAVAILABLE code=28".into(),
+                latency_ms: 3000,
+                timestamp: 0,
+            },
         ];
         let stats = compute_stats(&results);
         assert_eq!(stats.stability, StabilityVerdict::Broken);
@@ -599,8 +640,14 @@ mod tests {
         assert_eq!(StabilityVerdict::from_rate(0.8), StabilityVerdict::Reliable);
         assert_eq!(StabilityVerdict::from_rate(0.79), StabilityVerdict::Flaky);
         assert_eq!(StabilityVerdict::from_rate(0.5), StabilityVerdict::Flaky);
-        assert_eq!(StabilityVerdict::from_rate(0.49), StabilityVerdict::Unreliable);
-        assert_eq!(StabilityVerdict::from_rate(0.01), StabilityVerdict::Unreliable);
+        assert_eq!(
+            StabilityVerdict::from_rate(0.49),
+            StabilityVerdict::Unreliable
+        );
+        assert_eq!(
+            StabilityVerdict::from_rate(0.01),
+            StabilityVerdict::Unreliable
+        );
         assert_eq!(StabilityVerdict::from_rate(0.0), StabilityVerdict::Broken);
     }
 }

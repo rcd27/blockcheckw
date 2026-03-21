@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/rcd27/blockcheckw/compare/v0.2.1...v0.2.2) (2026-03-21)
+
+
+### Bug Fixes
+
+* **ci-cd:** прикрепление бинарей к релизу ([0f39318](https://github.com/rcd27/blockcheckw/commit/0f393184d4096518fde3f44c54b93c0167014445))
+* **multiplatform:** AtomicU64 -&gt; AtomicUSize для поддержки 32-битных платформ ([c86204f](https://github.com/rcd27/blockcheckw/commit/c86204f450e3092bea6845f8e1a34ddcf77e3c4c))
+
 ## [0.2.1](https://github.com/rcd27/blockcheckw/compare/v0.2.0...v0.2.1) (2026-03-21)
 
 

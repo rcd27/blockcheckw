@@ -191,6 +191,8 @@ async fn main() {
     blockcheckw::system::elevate::tune_tcp();
     blockcheckw::system::elevate::raise_nofile_limit();
 
+    cmd::check_prerequisites();
+
     // Init tracing for all subcommands (warn level)
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))

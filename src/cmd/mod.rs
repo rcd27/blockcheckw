@@ -370,6 +370,85 @@ pub async fn restore_service(mgr: &ServiceManager) {
     }
 }
 
+// ── Prerequisites check ─────────────────────────────────────────────────────
+
+/// Check that required binaries and kernel features are available.
+/// Exits with code 6 (matching vanilla blockcheck2) if something is missing.
+pub fn check_prerequisites() {
+    use blockcheckw::config::CoreConfig;
+
+    eprintln!("{}", style("=== Checking prerequisites ===").bold().cyan());
+
+    let config = CoreConfig::default();
+    let mut ok = true;
+
+    // nfqws2 binary
+    if std::path::Path::new(&config.nfqws2_path).is_file() {
+        eprintln!(
+            "  {} nfqws2: {}",
+            style("OK").green().bold(),
+            style(&config.nfqws2_path).dim(),
+        );
+    } else {
+        eprintln!(
+            "  {} nfqws2 not found at {}",
+            style("FAIL").red().bold(),
+            style(&config.nfqws2_path).cyan(),
+        );
+        eprintln!(
+            "       run \"{}/install_bin.sh\" or check ZAPRET_BASE path",
+            config.zapret_base,
+        );
+        ok = false;
+    }
+
+    // nft binary
+    if which("nft") {
+        eprintln!("  {} nft", style("OK").green().bold());
+    } else {
+        eprintln!("  {} nft not found in PATH", style("FAIL").red().bold(),);
+        eprintln!("       install nftables: apt install nftables / opkg install nftables");
+        ok = false;
+    }
+
+    // nft queue support (try creating a table with queue rule)
+    if ok {
+        if nft_has_queue_support() {
+            eprintln!("  {} nft queue support", style("OK").green().bold());
+        } else {
+            eprintln!(
+                "  {} nftables queue support not available",
+                style("FAIL").red().bold(),
+            );
+            eprintln!("       install kernel module: modprobe nfnetlink_queue");
+            ok = false;
+        }
+    }
+
+    if !ok {
+        std::process::exit(6);
+    }
+}
+
+fn which(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn nft_has_queue_support() -> bool {
+    // Try to list ruleset — if nft works and kernel has nf_tables, this succeeds
+    std::process::Command::new("nft")
+        .args(["list", "ruleset"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Generate a local-time prefix for report filenames: "2026-03-20_18-30"
 pub fn chrono_local_prefix() -> String {
     use std::process::Command;

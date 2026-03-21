@@ -263,12 +263,12 @@ pub async fn run_benchmark(
 
         // Measure memory: sample MemAvailable before and during the run
         let mem_before = mem_available_kb();
-        let min_mem = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let min_mem = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
         let min_mem_clone = min_mem.clone();
         let mem_sampler = tokio::spawn(async move {
             loop {
                 if let Some(avail) = mem_available_kb() {
-                    min_mem_clone.fetch_min(avail, std::sync::atomic::Ordering::Relaxed);
+                    min_mem_clone.fetch_min(avail as usize, std::sync::atomic::Ordering::Relaxed);
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
@@ -293,7 +293,7 @@ pub async fn run_benchmark(
 
         let peak_mem_mb = match mem_before {
             Some(before) => {
-                let min_during = min_mem.load(std::sync::atomic::Ordering::Relaxed);
+                let min_during = min_mem.load(std::sync::atomic::Ordering::Relaxed) as u64;
                 if min_during < before {
                     (before - min_during) as f64 / 1024.0
                 } else {

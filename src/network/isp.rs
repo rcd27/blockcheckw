@@ -20,13 +20,19 @@ impl fmt::Display for IpInfo {
     }
 }
 
-// TODO: use std::sync::LazyLock or precompile a single regex instead of
-// compiling a new Regex for each field on every call
+/// Extract a string field from simple JSON without regex.
+/// Matches `"field": "value"` or `"field":"value"`.
 fn extract_field(json: &str, field: &str) -> Option<String> {
-    let pattern = format!(r#""{field}"\s*:\s*"([^"]+)""#);
-    let re = regex::Regex::new(&pattern).ok()?;
-    re.captures(json)
-        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+    let key = format!("\"{field}\"");
+    let key_pos = json.find(&key)?;
+    let after_key = &json[key_pos + key.len()..];
+    // Skip optional whitespace and colon
+    let after_colon = after_key.trim_start().strip_prefix(':')?;
+    let after_ws = after_colon.trim_start();
+    // Extract quoted value
+    let value_start = after_ws.strip_prefix('"')?;
+    let end = value_start.find('"')?;
+    Some(value_start[..end].to_string())
 }
 
 /// Detect ISP info via `curl -s ipinfo.io`.

@@ -36,8 +36,9 @@ pub async fn doh_resolve(domain: &str, server_url: &str) -> Option<Vec<String>> 
 
 /// Parse DoH JSON response, extract IPv4 addresses from "data" fields.
 fn parse_doh_response(json: &str) -> Vec<String> {
-    // TODO: use std::sync::LazyLock to compile regex once instead of on every call
-    let re = regex::Regex::new(r#""data"\s*:\s*"([^"]+)""#).unwrap();
+    static RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#""data"\s*:\s*"([^"]+)""#).unwrap());
+    let re = &*RE;
     re.captures_iter(json)
         .filter_map(|cap| {
             let value = cap.get(1)?.as_str();

@@ -304,8 +304,23 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
 
     let handler_state = state.clone();
     tokio::spawn(async move {
+        // First Ctrl+C: graceful cleanup
         if tokio::signal::ctrl_c().await.is_ok() {
             eprintln!("\n{}", style("=== Ctrl+C — cleaning up ===").bold().cyan());
+
+            // Spawn force-quit listener + delayed hint
+            tokio::spawn(async {
+                // Show hint only if cleanup takes more than 1 second
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                eprintln!("  {} press Ctrl+C again to force quit", style("→").dim());
+            });
+            tokio::spawn(async {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    eprintln!("\n  force quit");
+                    std::process::exit(137);
+                }
+            });
+
             let info = handler_state.lock().await;
             blockcheckw::firewall::nftables::drop_table(&info.nft_table).await;
             eprintln!(

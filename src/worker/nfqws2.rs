@@ -55,7 +55,9 @@ mod tests {
         let config = CoreConfig::default();
         let args = build_nfqws2_args(&config, 200, &[]);
         let uid_arg = args.iter().find(|a| a.starts_with("--uid=")).unwrap();
-        assert_eq!(uid_arg, "--uid=1:3003");
+        // Auto-detected from "nobody" user — format: --uid=<uid>:<gid>
+        assert!(uid_arg.starts_with("--uid="));
+        assert!(uid_arg.contains(':'));
     }
 
     #[test]

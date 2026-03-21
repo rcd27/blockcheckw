@@ -54,10 +54,8 @@ impl Default for CoreConfig {
             request_timeout: 2,
             // FIXME: zapret_base is hardcoded; add CLI option to override
             zapret_base: "/opt/zapret2".to_string(),
-            // FIXME: nfqws2_uid/gid are hardcoded (uid=1 is daemon, gid=3003 is OpenWrt-specific);
-            // these should be configurable or auto-detected per platform
-            nfqws2_uid: 1,
-            nfqws2_gid: 3003,
+            nfqws2_uid: detect_nobody_uid(),
+            nfqws2_gid: detect_nobody_gid(),
         }
     }
 }
@@ -96,6 +94,33 @@ impl fmt::Display for Protocol {
             Protocol::Http => write!(f, "HTTP"),
             Protocol::HttpsTls12 => write!(f, "HTTPS/TLS1.2"),
             Protocol::HttpsTls13 => write!(f, "HTTPS/TLS1.3"),
+        }
+    }
+}
+
+/// Detect uid for "nobody" user. Falls back to 65534 (standard on most Linux distros).
+fn detect_nobody_uid() -> u32 {
+    // Safety: getpwnam is safe with a valid C string, returns null if user not found
+    unsafe {
+        let name = c"nobody".as_ptr();
+        let pw = libc::getpwnam(name);
+        if pw.is_null() {
+            65534
+        } else {
+            (*pw).pw_uid
+        }
+    }
+}
+
+/// Detect gid for "nobody" user. Falls back to 65534.
+fn detect_nobody_gid() -> u32 {
+    unsafe {
+        let name = c"nobody".as_ptr();
+        let pw = libc::getpwnam(name);
+        if pw.is_null() {
+            65534
+        } else {
+            (*pw).pw_gid
         }
     }
 }

@@ -92,6 +92,7 @@ pub async fn execute_worker_task_with_mode(
     {
         Ok(h) => h,
         Err(e) => {
+            // best-effort cleanup
             let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
             nfqws2_process.kill().await;
             return TaskResult::Error { error: e };
@@ -102,6 +103,7 @@ pub async fn execute_worker_task_with_mode(
     let ip = match pick_random_ip(&task.ips) {
         Some(ip) => ip,
         None => {
+            // best-effort cleanup
             let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle)
                 .await;
             nfqws2_process.kill().await;
@@ -148,6 +150,7 @@ pub async fn execute_worker_task_with_mode(
     };
 
     // Step 7: Cleanup — remove rules FIRST (stop intercepting), then kill nfqws2
+    // best-effort cleanup
     let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle).await;
     nfqws2_process.kill().await;
 

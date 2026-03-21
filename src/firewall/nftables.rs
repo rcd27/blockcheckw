@@ -96,58 +96,41 @@ pub async fn add_all_worker_rules(
     let desync_mark = format!("0x{:08X}", crate::config::DESYNC_MARK);
     let worker_base = format!("0x{:08X}", crate::config::WORKER_MARK_BASE);
 
-    let mut batch = String::new();
+    // 1. Per-worker chains + vmap elements
+    let worker_rules: String = slots
+        .iter()
+        .flat_map(|slot| {
+            let worker_mark = format!("0x{:08X}", slot.fwmark);
+            let ct_value = format!("0x{:08X}", crate::config::DESYNC_MARK | slot.fwmark);
+            let pc = format!("wp_{}", slot.qnum);
+            let ic = format!("wi_{}", slot.qnum);
+            [
+                format!("add chain inet {table} {pc}"),
+                format!(
+                    "add rule inet {table} {pc} ct mark set ct mark or {ct_value} queue num {}",
+                    slot.qnum
+                ),
+                format!("add chain inet {table} {ic}"),
+                format!("add rule inet {table} {ic} queue num {}", slot.qnum),
+                format!("add element inet {table} {POSTNAT_VMAP} {{ {worker_mark} : jump {pc} }}"),
+                format!("add element inet {table} {PRENAT_VMAP} {{ {ct_value} : jump {ic} }}"),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    // 1. Create per-worker chains + vmap elements
-    for slot in slots {
-        let worker_mark = format!("0x{:08X}", slot.fwmark);
-        let ct_value = format!("0x{:08X}", crate::config::DESYNC_MARK | slot.fwmark);
-        let postnat_chain = format!("wp_{}", slot.qnum);
-        let prenat_chain = format!("wi_{}", slot.qnum);
-
-        // Postnat worker chain: set ct mark + queue
-        batch.push_str(&format!("add chain inet {table} {postnat_chain}\n"));
-        batch.push_str(&format!(
-            "add rule inet {table} {postnat_chain} ct mark set ct mark or {ct_value} queue num {}\n",
-            slot.qnum,
-        ));
-
-        // Prenat worker chain: just queue (for autottl SYN/ACK)
-        batch.push_str(&format!("add chain inet {table} {prenat_chain}\n"));
-        batch.push_str(&format!(
-            "add rule inet {table} {prenat_chain} queue num {}\n",
-            slot.qnum,
-        ));
-
-        // Vmap elements
-        batch.push_str(&format!(
-            "add element inet {table} {POSTNAT_VMAP} {{ {worker_mark} : jump {postnat_chain} }}\n"
-        ));
-        batch.push_str(&format!(
-            "add element inet {table} {PRENAT_VMAP} {{ {ct_value} : jump {prenat_chain} }}\n"
-        ));
-    }
-
-    // 2. Postnat dispatch rule
-    batch.push_str(&format!(
-        "add rule inet {table} {CHAIN_POSTNAT} \
-         meta nfproto ipv4 \
-         tcp dport {dport} \
-         mark and {desync_mark} == 0 \
-         mark and {worker_base} != 0 \
-         ip daddr {{ {ip_set} }} \
-         mark vmap @{POSTNAT_VMAP}\n"
-    ));
-
-    // 3. Prenat dispatch rule
-    batch.push_str(&format!(
-        "add rule inet {table} {CHAIN_PRENAT} \
-         meta nfproto ipv4 \
-         tcp flags & (syn | ack) == (syn | ack) \
+    // 2. Dispatch rules
+    let batch = format!(
+        "{worker_rules}\n\
+         add rule inet {table} {CHAIN_POSTNAT} \
+         meta nfproto ipv4 tcp dport {dport} \
+         mark and {desync_mark} == 0 mark and {worker_base} != 0 \
+         ip daddr {{ {ip_set} }} mark vmap @{POSTNAT_VMAP}\n\
+         add rule inet {table} {CHAIN_PRENAT} \
+         meta nfproto ipv4 tcp flags & (syn | ack) == (syn | ack) \
          ct mark and {worker_base} != 0 \
-         ip saddr {{ {ip_set} }} \
-         ct mark vmap @{PRENAT_VMAP}\n"
-    ));
+         ip saddr {{ {ip_set} }} ct mark vmap @{PRENAT_VMAP}\n"
+    );
 
     let result = run_process_stdin(&["nft", "-f", "-"], &batch, NFT_TIMEOUT_MS).await?;
     if result.exit_code != 0 {
@@ -165,37 +148,50 @@ pub async fn add_all_worker_rules(
 pub async fn remove_all_worker_rules(table: &str, slots: &[crate::worker::slot::WorkerSlot]) {
     let desync_mark = format!("0x{:08X}", crate::config::DESYNC_MARK);
 
-    let mut batch = String::new();
-
     // Flush vmaps and hook chains
-    batch.push_str(&format!("flush map inet {table} {POSTNAT_VMAP}\n"));
-    batch.push_str(&format!("flush map inet {table} {PRENAT_VMAP}\n"));
-    batch.push_str(&format!("flush chain inet {table} {CHAIN_POSTNAT}\n"));
-    batch.push_str(&format!("flush chain inet {table} {CHAIN_PRENAT}\n"));
+    let flush = [
+        format!("flush map inet {table} {POSTNAT_VMAP}"),
+        format!("flush map inet {table} {PRENAT_VMAP}"),
+        format!("flush chain inet {table} {CHAIN_POSTNAT}"),
+        format!("flush chain inet {table} {CHAIN_PRENAT}"),
+    ];
 
     // Delete per-worker chains
-    for slot in slots {
-        let postnat_chain = format!("wp_{}", slot.qnum);
-        let prenat_chain = format!("wi_{}", slot.qnum);
-        batch.push_str(&format!("flush chain inet {table} {postnat_chain}\n"));
-        batch.push_str(&format!("delete chain inet {table} {postnat_chain}\n"));
-        batch.push_str(&format!("flush chain inet {table} {prenat_chain}\n"));
-        batch.push_str(&format!("delete chain inet {table} {prenat_chain}\n"));
-    }
+    let worker_cleanup: Vec<String> = slots
+        .iter()
+        .flat_map(|slot| {
+            let pc = format!("wp_{}", slot.qnum);
+            let ic = format!("wi_{}", slot.qnum);
+            [
+                format!("flush chain inet {table} {pc}"),
+                format!("delete chain inet {table} {pc}"),
+                format!("flush chain inet {table} {ic}"),
+                format!("delete chain inet {table} {ic}"),
+            ]
+        })
+        .collect();
 
     // Re-add static ICMP drop rules in prenat
-    batch.push_str(&format!(
-        "add rule inet {table} {CHAIN_PRENAT} icmp type time-exceeded ct mark and {desync_mark} != 0 drop\n"
-    ));
-    batch.push_str(&format!(
-        "add rule inet {table} {CHAIN_PRENAT} icmp type time-exceeded ct state invalid drop\n"
-    ));
+    let icmp = [
+        format!("add rule inet {table} {CHAIN_PRENAT} icmp type time-exceeded ct mark and {desync_mark} != 0 drop"),
+        format!("add rule inet {table} {CHAIN_PRENAT} icmp type time-exceeded ct state invalid drop"),
+    ];
 
+    let batch = flush
+        .iter()
+        .chain(&worker_cleanup)
+        .chain(&icmp)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // best-effort cleanup — errors are not actionable
     let _ = run_process_stdin(&["nft", "-f", "-"], &batch, NFT_TIMEOUT_MS).await;
 }
 
 /// Drop the entire nftables table. Ignores errors (cleanup).
 pub async fn drop_table(table: &str) {
+    // best-effort cleanup — table may not exist
     let _ = run_nft(&["delete", "table", "inet", table]).await;
 }
 
@@ -271,6 +267,7 @@ pub async fn remove_worker_rules(
     );
     let result = run_process_stdin(&["nft", "-f", "-"], &batch, NFT_TIMEOUT_MS).await?;
     if result.exit_code != 0 {
+        // best-effort fallback: try removing rules individually
         let _ = remove_rule(table, postnat_handle).await;
         let _ = remove_prenat_rule(table, prenat_handle).await;
     }

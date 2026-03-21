@@ -67,6 +67,7 @@ pub async fn run_process_stdin(
     let mut stdin = child.stdin.take().expect("stdin piped");
     let data = stdin_data.to_string();
     tokio::spawn(async move {
+        // best-effort — pipe may be broken if process exited early
         let _ = stdin.write_all(data.as_bytes()).await;
         drop(stdin);
     });
@@ -114,7 +115,7 @@ impl BackgroundProcess {
 
     /// Kill the process (SIGKILL) and wait to reap the zombie.
     pub async fn kill(&mut self) {
-        // kill() sends SIGKILL on Unix and waits for the process to exit
+        // best-effort — process may have already exited
         let _ = self.child.kill().await;
     }
 

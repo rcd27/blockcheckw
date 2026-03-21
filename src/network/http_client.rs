@@ -336,11 +336,12 @@ where
         let _ = conn.await;
     });
 
+    // infallible: static headers + empty body
     let req = Request::get("/")
         .header("Host", domain)
         .header("User-Agent", "Mozilla")
         .body(Empty::<Bytes>::new())
-        .unwrap();
+        .expect("static request build");
 
     send_and_parse(sender.send_request(req).await, max_bytes).await
 }
@@ -368,13 +369,14 @@ where
     });
 
     let method = if max_bytes > 0 { "GET" } else { "HEAD" };
+    // infallible: static headers + empty body
     let req = Request::builder()
         .method(method)
         .uri("/")
         .header("Host", domain)
         .header("User-Agent", "Mozilla")
         .body(Empty::<Bytes>::new())
-        .unwrap();
+        .expect("static request build");
 
     send_and_parse(sender.send_request(req).await, max_bytes).await
 }

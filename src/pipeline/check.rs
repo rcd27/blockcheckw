@@ -329,6 +329,7 @@ async fn check_single_strategy(
     {
         Ok(h) => h,
         Err(e) => {
+            // best-effort cleanup
             let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
             nfqws2_process.kill().await;
             return make_failed(format!("nftables prenat: {e}"));
@@ -339,6 +340,7 @@ async fn check_single_strategy(
     let ip = match pick_random_ip(ips) {
         Some(ip) => ip,
         None => {
+            // best-effort cleanup
             let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle)
                 .await;
             nfqws2_process.kill().await;
@@ -358,7 +360,7 @@ async fn check_single_strategy(
     .await;
     let latency_ms = test_start.elapsed().as_millis() as u64;
 
-    // 6. Cleanup: remove rules first, then kill nfqws2
+    // 6. Cleanup: remove rules first, then kill nfqws2 (best-effort)
     let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle).await;
     nfqws2_process.kill().await;
 

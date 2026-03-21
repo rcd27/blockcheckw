@@ -218,6 +218,7 @@ async fn execute_timed_test(
     {
         Ok(h) => h,
         Err(e) => {
+            // best-effort cleanup
             let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
             nfqws2_process.kill().await;
             return PassResult {
@@ -240,7 +241,7 @@ async fn execute_timed_test(
     let verdict_str = format!("{verdict}");
     let latency_ms = test_start.elapsed().as_millis() as u64;
 
-    // Cleanup
+    // best-effort cleanup
     let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
     let _ = nftables::remove_prenat_rule(&config.nft_table, prenat_handle).await;
     nfqws2_process.kill().await;

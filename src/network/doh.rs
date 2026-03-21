@@ -12,6 +12,13 @@ const DOH_SERVERS: &[&str] = &[
 
 /// Resolve a domain to IPv4 addresses via DoH (DNS-over-HTTPS) JSON API.
 pub async fn doh_resolve(domain: &str, server_url: &str) -> Option<Vec<String>> {
+    // Validate domain contains only safe URL characters (DNS names are ASCII)
+    if !domain
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return None;
+    }
     let url = format!("{server_url}?name={domain}&type=A");
     let args = vec![
         "curl",

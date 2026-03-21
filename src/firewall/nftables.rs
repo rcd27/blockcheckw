@@ -1,5 +1,19 @@
 use crate::error::BlockcheckError;
+use crate::network::dns::is_ipv4;
 use crate::system::process::{run_process, run_process_stdin};
+
+/// Validate and join IPs for nftables set. Rejects malformed IPs to prevent nft injection.
+fn validate_ip_set(ips: &[String]) -> Result<String, BlockcheckError> {
+    for ip in ips {
+        if !is_ipv4(ip) {
+            return Err(BlockcheckError::Nftables {
+                command: "validate ip set".to_string(),
+                stderr: format!("invalid IPv4 address: {ip}"),
+            });
+        }
+    }
+    Ok(ips.join(", "))
+}
 
 const CHAIN_POSTNAT: &str = "postnat";
 const CHAIN_PREDEFRAG: &str = "predefrag";
@@ -78,7 +92,7 @@ pub async fn add_all_worker_rules(
         return Ok(());
     }
 
-    let ip_set = ips.join(", ");
+    let ip_set = validate_ip_set(ips)?;
     let desync_mark = format!("0x{:08X}", crate::config::DESYNC_MARK);
     let worker_base = format!("0x{:08X}", crate::config::WORKER_MARK_BASE);
 
@@ -194,7 +208,7 @@ pub async fn add_worker_rule(
     qnum: u16,
     ips: &[String],
 ) -> Result<RuleHandle, BlockcheckError> {
-    let ip_set = ips.join(", ");
+    let ip_set = validate_ip_set(ips)?;
     let desync_mark = format!("0x{:08X}", crate::config::DESYNC_MARK);
     let worker_mark_str = format!("0x{:08X}", worker_fwmark);
     let ct_mark_value = format!("0x{:08X}", crate::config::DESYNC_MARK | worker_fwmark);
@@ -219,7 +233,7 @@ pub async fn add_incoming_rule(
     qnum: u16,
     ips: &[String],
 ) -> Result<RuleHandle, BlockcheckError> {
-    let ip_set = ips.join(", ");
+    let ip_set = validate_ip_set(ips)?;
     let worker_mark_str = format!("0x{:08X}", worker_fwmark);
     let rule = format!(
         "add rule inet {table} {CHAIN_PRENAT} \

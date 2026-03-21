@@ -31,13 +31,7 @@ pub struct DnsResolution {
 }
 
 pub(crate) fn is_ipv4(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
-        return false;
-    }
-    parts
-        .iter()
-        .all(|p| !p.is_empty() && p.parse::<u8>().is_ok())
+    s.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
 async fn resolve_with_getent(domain: &str) -> Option<Vec<String>> {

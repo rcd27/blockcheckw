@@ -177,6 +177,23 @@ opkg install nftables
 **Скан зависает** — попробуйте уменьшить число воркеров (`-w 16`) или использовать DNS over
 HTTPS (`--dns doh`).
 
+**Пакеты дропаются / стратегии ложно проваливаются при большом числе воркеров** — ядро
+может не справляться с нагрузкой на NFQUEUE и conntrack. Проверьте и увеличьте лимиты:
+
+```bash
+# Длина очереди NFQUEUE (по умолчанию 1024 — мало для 256+ воркеров)
+sysctl -w net.netfilter.nf_conntrack_max=131072
+sysctl -w net.netfilter.nf_queue_maxlen=65536
+```
+
+Чтобы сохранить после перезагрузки:
+
+```bash
+echo "net.netfilter.nf_conntrack_max=131072" >> /etc/sysctl.conf
+echo "net.netfilter.nf_queue_maxlen=65536" >> /etc/sysctl.conf
+sysctl -p
+```
+
 ## Ссылки
 
 - [zapret2](https://github.com/bol-van/zapret2) — оригинальный проект

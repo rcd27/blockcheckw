@@ -1,7 +1,7 @@
 use blockcheckw::config::CoreConfig;
 use blockcheckw::pipeline::benchmark;
 
-use super::handle_bypass_conflicts;
+use super::{handle_bypass_conflicts, restore_service};
 
 pub async fn run_benchmark_cmd(
     time: u64,
@@ -19,10 +19,16 @@ pub async fn run_benchmark_cmd(
     };
 
     let config = CoreConfig::default();
-    if !handle_bypass_conflicts(&config.nft_table).await {
-        std::process::exit(1);
-    }
+    let stopped_service = match handle_bypass_conflicts(&config.nft_table).await {
+        Ok(svc) => svc,
+        Err(()) => std::process::exit(1),
+    };
 
     let max = max_workers.unwrap_or_else(benchmark::default_max_workers);
     benchmark::run_benchmark(time, max, raw, domain, protocol).await;
+
+    // Restore zapret2 if we stopped it
+    if let Some(ref mgr) = stopped_service {
+        restore_service(mgr).await;
+    }
 }

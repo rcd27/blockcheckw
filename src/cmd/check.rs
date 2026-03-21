@@ -1,16 +1,14 @@
 use std::sync::Arc;
 
 use console::style;
-use tokio::signal;
 
 use blockcheckw::config::{CoreConfig, DnsMode};
-use blockcheckw::firewall::nftables;
 use blockcheckw::network::{dns, isp};
 use blockcheckw::pipeline::check;
 use blockcheckw::strategy::generator;
 use blockcheckw::ui;
 
-use super::handle_bypass_conflicts;
+use super::{handle_bypass_conflicts, restore_service, set_stopped_service, spawn_cleanup_handler};
 
 pub async fn run_check_cmd(
     domain: &str,
@@ -27,15 +25,7 @@ pub async fn run_check_cmd(
         ..CoreConfig::default()
     });
 
-    // Signal handler: cleanup nftables on Ctrl+C
-    let cleanup_config = config.clone();
-    tokio::spawn(async move {
-        if signal::ctrl_c().await.is_ok() {
-            eprintln!("\nCtrl+C received, cleaning up...");
-            nftables::drop_table(&cleanup_config.nft_table).await;
-            std::process::exit(130);
-        }
-    });
+    let cleanup = spawn_cleanup_handler(&config.nft_table);
 
     let mut screen = ui::ScanScreen::new();
 
@@ -96,8 +86,12 @@ pub async fn run_check_cmd(
     };
 
     // Check for conflicts
-    if !handle_bypass_conflicts(&config.nft_table).await {
-        std::process::exit(1);
+    let stopped_service = match handle_bypass_conflicts(&config.nft_table).await {
+        Ok(svc) => svc,
+        Err(()) => std::process::exit(1),
+    };
+    if let Some(ref mgr) = stopped_service {
+        set_stopped_service(&cleanup, mgr.clone()).await;
     }
 
     // Run check
@@ -148,5 +142,10 @@ pub async fn run_check_cmd(
     } else {
         screen.finish_info();
         println!("{json}");
+    }
+
+    // Restore zapret2 if we stopped it
+    if let Some(ref mgr) = stopped_service {
+        restore_service(mgr).await;
     }
 }

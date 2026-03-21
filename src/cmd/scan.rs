@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use console::style;
-use tokio::signal;
 
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
 use blockcheckw::error::TaskResult;
@@ -16,7 +15,8 @@ use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
 
 use super::{
-    chrono_local_prefix, detect_bypass_conflicts, handle_bypass_conflicts, resolve_bypass_conflicts,
+    chrono_local_prefix, handle_bypass_conflicts, resolve_bypass_conflicts_if_any, restore_service,
+    set_stopped_service, spawn_cleanup_handler,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -35,17 +35,7 @@ pub async fn run_scan(
         ..CoreConfig::default()
     });
 
-    // Signal handler: cleanup nftables on Ctrl+C
-    // FIXME: handler fires only once; a second Ctrl+C won't be caught.
-    // Also, process::exit(130) may skip Drop impls for running nfqws2 processes.
-    let cleanup_config = config.clone();
-    tokio::spawn(async move {
-        if signal::ctrl_c().await.is_ok() {
-            eprintln!("\nCtrl+C received, cleaning up...");
-            nftables::drop_table(&cleanup_config.nft_table).await;
-            std::process::exit(130);
-        }
-    });
+    let cleanup = spawn_cleanup_handler(&config.nft_table);
 
     let mut screen = ui::ScanScreen::new();
 
@@ -115,8 +105,12 @@ pub async fn run_scan(
     };
 
     // 1b. Check for conflicting DPI bypass processes
-    if !handle_bypass_conflicts(&config.nft_table).await {
-        std::process::exit(1);
+    let stopped_service = match handle_bypass_conflicts(&config.nft_table).await {
+        Ok(svc) => svc,
+        Err(()) => std::process::exit(1),
+    };
+    if let Some(ref mgr) = stopped_service {
+        set_stopped_service(&cleanup, mgr.clone()).await;
     }
 
     // 2. Baseline per protocol
@@ -154,15 +148,7 @@ pub async fn run_scan(
     let scan_future = async {
         for &protocol in &blocked_protocols {
             // Re-check for conflicts before each protocol scan
-            let conflicts = detect_bypass_conflicts(&config.nft_table).await;
-            if !conflicts.is_empty() {
-                screen.println(&format!(
-                    "  {} {}",
-                    style("!").yellow().bold(),
-                    style("conflicting DPI bypass restarted, killing again...").yellow(),
-                ));
-                resolve_bypass_conflicts(&conflicts).await;
-            }
+            resolve_bypass_conflicts_if_any(&config.nft_table).await;
 
             screen.newline();
             screen.println(&ui::section(&format!("Scanning {protocol}")));
@@ -372,6 +358,11 @@ pub async fn run_scan(
     }
 
     screen.finish_info();
+
+    // Restore zapret2 if we stopped it
+    if let Some(ref mgr) = stopped_service {
+        restore_service(mgr).await;
+    }
 }
 
 /// Write ranked report with scores and stars.

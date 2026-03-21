@@ -142,12 +142,27 @@ enum Command {
 #[tokio::main]
 async fn main() {
     // Panic hook: cleanup nftables table on panic (async runtime may be dead, use sync Command)
-    // FIXME: if nft hangs, the process will hang forever (no timeout on sync Command)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = std::process::Command::new("nft")
+        if let Ok(mut child) = std::process::Command::new("nft")
             .args(["delete", "table", "inet", "zapret"])
-            .output();
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            const TIMEOUT_MS: u64 = 3000;
+            const POLL_INTERVAL_MS: u64 = 100;
+            for _ in 0..(TIMEOUT_MS / POLL_INTERVAL_MS) {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS))
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = child.kill();
+        }
         default_hook(info);
     }));
 

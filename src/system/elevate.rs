@@ -52,7 +52,9 @@ pub fn require_root() {
 /// With fwmark-based routing (no fixed port ranges), TIME_WAIT is less of an issue,
 /// but this still helps ephemeral port recycling under heavy load.
 pub fn tune_tcp() {
-    let _ = std::fs::write("/proc/sys/net/ipv4/tcp_tw_reuse", "1");
+    if let Err(e) = std::fs::write("/proc/sys/net/ipv4/tcp_tw_reuse", "1") {
+        tracing::warn!("failed to set tcp_tw_reuse: {e} (SELinux/AppArmor?)");
+    }
 }
 
 /// Raise RLIMIT_NOFILE so that many parallel workers don't hit "Too many open files".
@@ -64,8 +66,16 @@ pub fn raise_nofile_limit() {
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
             let target = rlim.rlim_max.min(1_048_576); // cap at 1M, use hard limit
             if rlim.rlim_cur < target {
+                let old = rlim.rlim_cur;
                 rlim.rlim_cur = target;
-                libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) != 0 {
+                    tracing::warn!(
+                        "failed to raise RLIMIT_NOFILE from {} to {}: {}",
+                        old,
+                        target,
+                        std::io::Error::last_os_error(),
+                    );
+                }
             }
         }
     }
@@ -93,7 +103,12 @@ pub fn chown_to_caller(path: &str) {
         Err(_) => return,
     };
     unsafe {
-        libc::chown(c_path.as_ptr(), uid, gid);
+        if libc::chown(c_path.as_ptr(), uid, gid) != 0 {
+            tracing::warn!(
+                "failed to chown {path} to {uid}:{gid}: {}",
+                std::io::Error::last_os_error(),
+            );
+        }
     }
 }
 

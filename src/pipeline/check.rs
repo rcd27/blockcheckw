@@ -295,8 +295,10 @@ async fn check_single_strategy(
         Err(e) => return make_failed(format!("nfqws2: {e}")),
     };
 
-    // 2. Wait for nfqws2 to bind
-    tokio::time::sleep(std::time::Duration::from_millis(NFQWS2_INIT_DELAY_MS)).await;
+    // 2. Wait for nfqws2 to bind, verify it didn't crash
+    if let Err(code) = nfqws2_process.wait_for_ready(NFQWS2_INIT_DELAY_MS).await {
+        return make_failed(format!("nfqws2 exited immediately (code {code})"));
+    }
 
     // 3. Add outgoing nftables rule
     let postnat_handle = match nftables::add_worker_rule(

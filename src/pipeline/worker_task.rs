@@ -52,8 +52,14 @@ pub async fn execute_worker_task_with_mode(
         }
     };
 
-    // Step 2: Wait for nfqws2 to bind to NFQUEUE
-    tokio::time::sleep(std::time::Duration::from_millis(NFQWS2_INIT_DELAY_MS)).await;
+    // Step 2: Wait for nfqws2 to bind to NFQUEUE, verify it didn't crash
+    if let Err(code) = nfqws2_process.wait_for_ready(NFQWS2_INIT_DELAY_MS).await {
+        return TaskResult::Error {
+            error: BlockcheckError::Nfqws2Start {
+                reason: format!("nfqws2 exited immediately (code {code})"),
+            },
+        };
+    }
 
     // Step 3: Add outgoing nftables rule (postnat)
     let postnat_handle = match nftables::add_worker_rule(
@@ -162,8 +168,14 @@ pub async fn execute_worker_task_rules_ready(
         }
     };
 
-    // Wait for nfqws2 to bind to NFQUEUE
-    tokio::time::sleep(std::time::Duration::from_millis(NFQWS2_INIT_DELAY_MS)).await;
+    // Wait for nfqws2 to bind to NFQUEUE, verify it didn't crash
+    if let Err(code) = nfqws2_process.wait_for_ready(NFQWS2_INIT_DELAY_MS).await {
+        return TaskResult::Error {
+            error: BlockcheckError::Nfqws2Start {
+                reason: format!("nfqws2 exited immediately (code {code})"),
+            },
+        };
+    }
 
     // HTTP test with marked socket
     let ip = match pick_random_ip(&task.ips) {

@@ -172,8 +172,16 @@ async fn execute_timed_test(
         }
     };
 
-    // Wait for nfqws2 to bind
-    tokio::time::sleep(std::time::Duration::from_millis(NFQWS2_INIT_DELAY_MS)).await;
+    // Wait for nfqws2 to bind, verify it didn't crash
+    if let Err(code) = nfqws2_process.wait_for_ready(NFQWS2_INIT_DELAY_MS).await {
+        return PassResult {
+            pass_index: 0,
+            success: false,
+            verdict: format!("ERROR: nfqws2 exited immediately (code {code})"),
+            latency_ms: start.elapsed().as_millis() as u64,
+            timestamp,
+        };
+    }
 
     // Add outgoing rule
     let postnat_handle = match nftables::add_worker_rule(

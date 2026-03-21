@@ -125,4 +125,14 @@ impl BackgroundProcess {
             _ => None,
         }
     }
+
+    /// Wait for the process to become ready (init delay), then verify it's still alive.
+    /// Returns `Ok(())` if alive after delay, `Err(exit_code)` if it exited early.
+    pub async fn wait_for_ready(&mut self, delay_ms: u64) -> Result<(), i32> {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        match self.try_wait() {
+            Some(code) => Err(code),
+            None => Ok(()),
+        }
+    }
 }

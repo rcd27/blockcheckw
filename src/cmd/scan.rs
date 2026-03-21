@@ -297,64 +297,53 @@ pub async fn run_scan(
 
     // 5. Write strategies to file
     if let Some(path) = output {
-        match write_strategies_file(path, domain, &summary) {
-            Ok(count) => {
-                blockcheckw::system::elevate::chown_to_caller(path);
-                screen.println(&format!(
-                    "\n  {} {} strategies written to {}",
-                    style("OK").green().bold(),
-                    count,
-                    style(path).cyan(),
-                ));
-            }
-            Err(e) => {
-                screen.println(&format!(
-                    "\n  {} failed to write {}: {e}",
-                    style("ERROR:").red().bold(),
-                    style(path).cyan(),
-                ));
-            }
+        let (content, count) = format_strategies_file(domain, &summary);
+        match write_report(path, &content) {
+            Ok(()) => screen.println(&format!(
+                "\n  {} {} strategies written to {}",
+                style("OK").green().bold(),
+                count,
+                style(path).cyan(),
+            )),
+            Err(e) => screen.println(&format!(
+                "\n  {} failed to write {}: {e}",
+                style("ERROR:").red().bold(),
+                style(path).cyan(),
+            )),
         }
     }
 
     // 6. Write reports (always)
     let now = chrono_local_prefix();
+
+    let (content, count) = format_vanilla_report(domain, &summary);
     let vanilla_path = format!("{now}_report_vanilla.txt");
-    match write_vanilla_report(&vanilla_path, domain, &summary) {
-        Ok(count) => {
-            blockcheckw::system::elevate::chown_to_caller(&vanilla_path);
-            screen.println(&format!(
-                "  {} vanilla report: {} strategies → {}",
-                style("OK").green().bold(),
-                count,
-                style(&vanilla_path).cyan(),
-            ));
-        }
-        Err(e) => {
-            screen.println(&format!(
-                "  {} failed to write vanilla report: {e}",
-                style("ERROR:").red().bold(),
-            ));
-        }
+    match write_report(&vanilla_path, &content) {
+        Ok(()) => screen.println(&format!(
+            "  {} vanilla report: {} strategies → {}",
+            style("OK").green().bold(),
+            count,
+            style(&vanilla_path).cyan(),
+        )),
+        Err(e) => screen.println(&format!(
+            "  {} failed to write vanilla report: {e}",
+            style("ERROR:").red().bold(),
+        )),
     }
 
+    let (content, count) = format_ranked_report(domain, &summary);
     let ranked_path = format!("{now}_report.txt");
-    match write_ranked_report(&ranked_path, domain, &summary) {
-        Ok(count) => {
-            blockcheckw::system::elevate::chown_to_caller(&ranked_path);
-            screen.println(&format!(
-                "  {} ranked report: {} strategies → {}",
-                style("OK").green().bold(),
-                count,
-                style(&ranked_path).cyan(),
-            ));
-        }
-        Err(e) => {
-            screen.println(&format!(
-                "  {} failed to write ranked report: {e}",
-                style("ERROR:").red().bold(),
-            ));
-        }
+    match write_report(&ranked_path, &content) {
+        Ok(()) => screen.println(&format!(
+            "  {} ranked report: {} strategies → {}",
+            style("OK").green().bold(),
+            count,
+            style(&ranked_path).cyan(),
+        )),
+        Err(e) => screen.println(&format!(
+            "  {} failed to write ranked report: {e}",
+            style("ERROR:").red().bold(),
+        )),
     }
 
     screen.finish_info();
@@ -365,12 +354,10 @@ pub async fn run_scan(
     }
 }
 
-/// Write ranked report with scores and stars.
-fn write_ranked_report(
-    path: &str,
-    domain: &str,
-    summary: &[ProtocolSummary],
-) -> std::io::Result<usize> {
+// ── Report formatting (pure) ────────────────────────────────────────────────
+
+/// Format ranked report with scores and stars. Returns (content, strategy_count).
+fn format_ranked_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
     use std::fmt::Write as _;
 
     let mut buf = String::new();
@@ -407,17 +394,12 @@ fn write_ranked_report(
         }
     }
 
-    std::fs::write(path, buf)?;
-    Ok(total)
+    (buf, total)
 }
 
-/// Write a vanilla blockcheck2-compatible report.
+/// Format vanilla blockcheck2-compatible report. Returns (content, strategy_count).
 /// Format: `curl_test_<proto> ipv4 <domain> : nfqws2 <args>`
-fn write_vanilla_report(
-    path: &str,
-    domain: &str,
-    summary: &[ProtocolSummary],
-) -> std::io::Result<usize> {
+fn format_vanilla_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
     use std::fmt::Write as _;
 
     let mut buf = String::new();
@@ -437,20 +419,16 @@ fn write_vanilla_report(
         }
     }
 
-    std::fs::write(path, buf)?;
-    Ok(total)
+    (buf, total)
 }
 
-fn write_strategies_file(
-    path: &str,
-    domain: &str,
-    summary: &[ProtocolSummary],
-) -> std::io::Result<usize> {
+/// Format strategies file (ranked, args only). Returns (content, strategy_count).
+fn format_strategies_file(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
     use std::fmt::Write as _;
 
     let timestamp = test_report::chrono_like_timestamp();
     let mut buf = String::new();
-    let mut total_count = 0;
+    let mut total = 0;
 
     writeln!(buf, "# blockcheckw scan results for {domain}").unwrap();
     writeln!(buf, "# {timestamp}").unwrap();
@@ -466,9 +444,16 @@ fn write_strategies_file(
         for score in &ranked {
             writeln!(buf, "{}", score.strategy_args.join(" ")).unwrap();
         }
-        total_count += ranked.len();
+        total += ranked.len();
     }
 
-    std::fs::write(path, buf)?;
-    Ok(total_count)
+    (buf, total)
+}
+
+// ── Report I/O ──────────────────────────────────────────────────────────────
+
+fn write_report(path: &str, content: &str) -> std::io::Result<()> {
+    std::fs::write(path, content)?;
+    blockcheckw::system::elevate::chown_to_caller(path);
+    Ok(())
 }

@@ -19,6 +19,12 @@ use super::{
     set_stopped_service, spawn_cleanup_handler,
 };
 
+/// Per-protocol scan results.
+struct ProtocolSummary {
+    protocol: Protocol,
+    strategies: Vec<Vec<String>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_scan(
     workers: usize,
@@ -140,9 +146,7 @@ pub async fn run_scan(
     screen.println(&ui::blocked_list(&blocked_names.join(", ")));
 
     // 3. Scan each blocked protocol
-    //                       protocol, strategies,    success, fail,  err,   elapsed
-    #[allow(clippy::type_complexity)]
-    let mut summary: Vec<(Protocol, Vec<Vec<String>>, usize, usize, usize, f64)> = Vec::new();
+    let mut summary: Vec<ProtocolSummary> = Vec::new();
     let mut timed_out = false;
 
     let scan_future = async {
@@ -219,14 +223,10 @@ pub async fn run_scan(
                 stats.throughput(),
             ));
 
-            summary.push((
+            summary.push(ProtocolSummary {
                 protocol,
-                working,
-                stats.successes,
-                stats.failures,
-                stats.errors,
-                stats.elapsed.as_secs_f64(),
-            ));
+                strategies: working,
+            });
         }
     };
 
@@ -266,12 +266,12 @@ pub async fn run_scan(
     }
 
     // Blocked protocols results (ranked)
-    for (protocol, strategies, _successes, _failures, _errors, _elapsed) in &summary {
-        let proto = protocol.to_string();
-        if strategies.is_empty() {
+    for entry in &summary {
+        let proto = entry.protocol.to_string();
+        if entry.strategies.is_empty() {
             screen.println(&ui::summary_no_strategies(&proto));
         } else {
-            let ranked = rank::rank_strategies(strategies);
+            let ranked = rank::rank_strategies(&entry.strategies);
             let total = ranked.len();
             let show = if top_n == 0 || top_n >= total {
                 total
@@ -366,11 +366,10 @@ pub async fn run_scan(
 }
 
 /// Write ranked report with scores and stars.
-#[allow(clippy::type_complexity)]
 fn write_ranked_report(
     path: &str,
     domain: &str,
-    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64)],
+    summary: &[ProtocolSummary],
 ) -> std::io::Result<usize> {
     use std::fmt::Write as _;
 
@@ -379,13 +378,13 @@ fn write_ranked_report(
 
     writeln!(buf, "# blockcheckw ranked report for {domain}").unwrap();
 
-    for (protocol, strategies, _, _, _, _) in summary {
-        if strategies.is_empty() {
+    for entry in summary {
+        if entry.strategies.is_empty() {
             continue;
         }
-        let ranked = rank::rank_strategies(strategies);
+        let ranked = rank::rank_strategies(&entry.strategies);
         writeln!(buf).unwrap();
-        writeln!(buf, "# {protocol} — {} strategies", ranked.len()).unwrap();
+        writeln!(buf, "# {} — {} strategies", entry.protocol, ranked.len()).unwrap();
 
         for (i, score) in ranked.iter().enumerate() {
             let stars = match score.stars {
@@ -414,11 +413,10 @@ fn write_ranked_report(
 
 /// Write a vanilla blockcheck2-compatible report.
 /// Format: `curl_test_<proto> ipv4 <domain> : nfqws2 <args>`
-#[allow(clippy::type_complexity)]
 fn write_vanilla_report(
     path: &str,
     domain: &str,
-    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64)],
+    summary: &[ProtocolSummary],
 ) -> std::io::Result<usize> {
     use std::fmt::Write as _;
 
@@ -427,13 +425,13 @@ fn write_vanilla_report(
 
     writeln!(buf, "* SUMMARY").unwrap();
 
-    for (protocol, strategies, _, _, _, _) in summary {
-        let test_name = match protocol {
+    for entry in summary {
+        let test_name = match entry.protocol {
             Protocol::Http => "curl_test_http",
             Protocol::HttpsTls12 => "curl_test_https_tls12",
             Protocol::HttpsTls13 => "curl_test_https_tls13",
         };
-        for s in strategies {
+        for s in &entry.strategies {
             writeln!(buf, "{test_name} ipv4 {domain} : nfqws2 {}", s.join(" ")).unwrap();
             total += 1;
         }
@@ -443,11 +441,10 @@ fn write_vanilla_report(
     Ok(total)
 }
 
-#[allow(clippy::type_complexity)]
 fn write_strategies_file(
     path: &str,
     domain: &str,
-    summary: &[(Protocol, Vec<Vec<String>>, usize, usize, usize, f64)],
+    summary: &[ProtocolSummary],
 ) -> std::io::Result<usize> {
     use std::fmt::Write as _;
 
@@ -458,13 +455,13 @@ fn write_strategies_file(
     writeln!(buf, "# blockcheckw scan results for {domain}").unwrap();
     writeln!(buf, "# {timestamp}").unwrap();
 
-    for (protocol, strategies, _, _, _, _) in summary {
-        if strategies.is_empty() {
+    for entry in summary {
+        if entry.strategies.is_empty() {
             continue;
         }
-        let ranked = rank::rank_strategies(strategies);
+        let ranked = rank::rank_strategies(&entry.strategies);
         writeln!(buf).unwrap();
-        writeln!(buf, "# {} — {} strategies", protocol, ranked.len()).unwrap();
+        writeln!(buf, "# {} — {} strategies", entry.protocol, ranked.len()).unwrap();
 
         for score in &ranked {
             writeln!(buf, "{}", score.strategy_args.join(" ")).unwrap();

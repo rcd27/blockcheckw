@@ -148,7 +148,7 @@ jobs:
           if-no-files-found: error
 
   upload-assets:
-    if: needs.release-please.outputs.release_created == 'true'
+    if: always() && needs.release-please.outputs.release_created == 'true'
     needs: [release-please, build-stable, build-nightly, build-musl-cross]
     runs-on: ubuntu-latest
     steps:

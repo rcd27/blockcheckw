@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
 use crate::error::{BlockcheckError, HttpVerdictAvailable, TaskResult};
 use crate::firewall::nftables;
@@ -20,10 +22,10 @@ pub enum HttpTestMode {
 #[derive(Debug)]
 pub struct WorkerTask {
     pub slot: WorkerSlot,
-    pub domain: String,
+    pub domain: Arc<str>,
     pub strategy_args: Vec<String>,
     pub protocol: Protocol,
-    pub ips: Vec<String>,
+    pub ips: Arc<[String]>,
 }
 
 /// Execute a full worker task cycle with standard mode.
@@ -105,7 +107,7 @@ pub async fn execute_worker_task_with_mode(
             nfqws2_process.kill().await;
             return TaskResult::Error {
                 error: BlockcheckError::DnsNoAddresses {
-                    domain: task.domain.clone(),
+                    domain: task.domain.to_string(),
                 },
             };
         }
@@ -184,7 +186,7 @@ pub async fn execute_worker_task_rules_ready(
             nfqws2_process.kill().await;
             return TaskResult::Error {
                 error: BlockcheckError::DnsNoAddresses {
-                    domain: task.domain.clone(),
+                    domain: task.domain.to_string(),
                 },
             };
         }

@@ -1,6 +1,6 @@
-use std::time::Instant;
-
 use std::fmt::Write;
+use std::sync::Arc;
+use std::time::Instant;
 
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
@@ -140,6 +140,9 @@ pub async fn run_parallel_with_deadline(
     let mut failures = 0usize;
     let mut errors = 0usize;
 
+    let domain: Arc<str> = Arc::from(domain);
+    let ips: Arc<[String]> = Arc::from(ips);
+
     let batches: Vec<&[Vec<String>]> = strategies.chunks(config.worker_count).collect();
 
     for batch in batches {
@@ -155,7 +158,7 @@ pub async fn run_parallel_with_deadline(
 
         // Add all nftables vmap elements + dispatch rules for this batch
         if let Err(e) =
-            nftables::add_all_worker_rules(&config.nft_table, &batch_slots, protocol.port(), ips)
+            nftables::add_all_worker_rules(&config.nft_table, &batch_slots, protocol.port(), &ips)
                 .await
         {
             // All strategies in this batch fail
@@ -184,10 +187,10 @@ pub async fn run_parallel_with_deadline(
             let config = config.clone();
             let task = WorkerTask {
                 slot,
-                domain: domain.to_string(),
+                domain: domain.clone(),
                 strategy_args: strategy_args.clone(),
                 protocol,
-                ips: ips.to_vec(),
+                ips: ips.clone(),
             };
 
             join_set.spawn(async move {

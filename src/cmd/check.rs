@@ -5,7 +5,7 @@ use console::style;
 use blockcheckw::config::{CoreConfig, DnsMode};
 use blockcheckw::network::{dns, isp};
 use blockcheckw::pipeline::check;
-use blockcheckw::strategy::generator;
+use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
 
 use super::{
@@ -32,8 +32,8 @@ pub async fn run_check_cmd(
 
     let mut screen = ui::ScanScreen::new();
 
-    // Load strategies from vanilla file
-    let strategies = match generator::load_tagged_strategies(std::path::Path::new(from_file)) {
+    // Load strategies from vanilla file and sort by structural simplicity
+    let mut strategies = match generator::load_tagged_strategies(std::path::Path::new(from_file)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -44,6 +44,7 @@ pub async fn run_check_cmd(
             std::process::exit(1);
         }
     };
+    rank::sort_by_simplicity(&mut strategies);
 
     let mut flags = String::new();
     if take > 0 {
@@ -107,21 +108,7 @@ pub async fn run_check_cmd(
     screen.println(&ui::section("Checking strategies (data transfer)"));
     screen.println(&format!(
         "  {}",
-        style("This is slower than scan — each strategy is tested with real data transfer")
-            .yellow()
-    ));
-    if passes >= 2 {
-        screen.println(&format!(
-            "  {}",
-            style(format!(
-                "Each working strategy will be verified {passes} times"
-            ))
-            .yellow()
-        ));
-    }
-    screen.println(&format!(
-        "  {}",
-        style("Tip: use --take 10 to stop after 10 working per protocol").yellow()
+        style("Tip: use --take 10 to stop after 10 verified per protocol").yellow()
     ));
 
     let report = check::run_check(
@@ -144,14 +131,6 @@ pub async fn run_check_cmd(
         style(report.working).green().bold(),
         report.elapsed_secs,
     ));
-    if let Some(ref best) = report.best {
-        screen.println(&format!(
-            "  {} {} nfqws2 {}",
-            style("BEST:").green().bold(),
-            style(&best.protocol).bold(),
-            style(&best.args).cyan().bold(),
-        ));
-    }
 
     // Output JSON — always save to file
     let json = serde_json::to_string_pretty(&report).unwrap();
@@ -177,23 +156,6 @@ pub async fn run_check_cmd(
                 style(&path).cyan(),
             ));
         }
-    }
-
-    // Next step hint
-    if let Some(ref best) = report.best {
-        screen.newline();
-        screen.println(&format!(
-            "  {}",
-            style(">>> Next step: add the best strategy to your zapret2 config <<<")
-                .yellow()
-                .bold(),
-        ));
-        screen.println("  Edit /opt/zapret2/config and add to NFQWS_OPT_DESYNC:");
-        screen.println(&format!("    {}", style(&best.args).cyan().bold(),));
-        screen.println(&format!(
-            "  Then restart: {}",
-            style("sudo systemctl restart zapret2").cyan(),
-        ));
     }
 
     // Restore zapret2 if we stopped it

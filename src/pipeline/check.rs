@@ -3,10 +3,9 @@ use std::time::Instant;
 use console::style;
 use serde::Serialize;
 
-use crate::config::{CoreConfig, NFQWS2_INIT_DELAY_MS};
+use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
 use crate::firewall::nftables;
 use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, HttpResult};
-use crate::pipeline::test_runner::{compute_stats, PassResult};
 use crate::strategy::generator::TaggedStrategy;
 use crate::ui;
 use crate::worker::nfqws2::start_nfqws2;
@@ -25,7 +24,7 @@ pub struct CheckedStrategy {
     pub error: Option<String>,
 }
 
-/// A strategy that passed Phase 2 verification with factual metrics.
+/// A strategy that passed verification with factual metrics.
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifiedStrategy {
     pub protocol: String,
@@ -45,20 +44,14 @@ pub struct CheckReport {
     pub total: usize,
     pub working: usize,
     pub elapsed_secs: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub best: Option<VerifiedStrategy>,
-    pub strategies: Vec<CheckedStrategy>,
+    pub strategies: Vec<VerifiedStrategy>,
 }
 
-/// Run two-phase check to find the best strategy.
+/// Verify strategies from a vanilla report with real data transfer.
 ///
-/// **Phase 1 (screening):** sequential single-pass check of all strategies.
-/// `take` controls early stop: 0 = check all, N > 0 = stop after N working strategies found.
-///
-/// **Phase 2 (verification):** each working strategy is re-tested `passes` times.
-/// Stability and rank scores are combined to pick the best one.
-///
-/// If `passes` is 0 or 1, Phase 2 is skipped (single-pass mode, backward compatible).
+/// Each strategy is tested `passes` times. If the first pass fails, the strategy
+/// is dropped immediately (early-exit). `--take N` stops after finding N strategies
+/// with 100% success rate per protocol.
 pub async fn run_check(
     config: &CoreConfig,
     domain: &str,
@@ -87,68 +80,42 @@ pub async fn run_check(
             total: strategies.len(),
             working: 0,
             elapsed_secs: start.elapsed().as_secs_f64(),
-            best: None,
             strategies: vec![],
         };
     }
 
-    // ── Phase 1: screening ──
     screen.println(&format!(
         "  {}",
-        style("Phase 1: screening").bold().underlined(),
+        style(format!(
+            "Verifying {} strategies ({passes} passes, early-exit on first fail)",
+            strategies.len()
+        ))
+        .bold()
+        .underlined(),
     ));
 
-    let mut results = Vec::with_capacity(strategies.len());
-    let mut working_tagged: Vec<&TaggedStrategy> = Vec::new();
-    let mut working_count: usize = 0;
+    let mut verified: Vec<VerifiedStrategy> = Vec::new();
     let mut checked_count: usize = 0;
-    // Per-protocol working counters for --take (take N per protocol, not globally)
-    let mut working_per_proto: std::collections::HashMap<String, usize> =
+    // --take: count perfect (all passes OK) strategies per protocol
+    let mut perfect_per_proto: std::collections::HashMap<Protocol, usize> =
         std::collections::HashMap::new();
-    // Ordered list of unique protocols for progress display
-    let proto_order: Vec<String> =
-        strategies
-            .iter()
-            .map(|s| s.protocol.to_string())
-            .fold(Vec::new(), |mut acc, p| {
-                if !acc.contains(&p) {
-                    acc.push(p);
-                }
-                acc
-            });
-
-    // Sticky tally line at the bottom (like ISP in scan)
-    let build_tally = |working_per_proto: &std::collections::HashMap<String, usize>| -> String {
-        proto_order
-            .iter()
-            .map(|p| {
-                let count = working_per_proto.get(p).copied().unwrap_or(0);
-                if count > 0 {
-                    format!("{}: {}", p, style(format!("{count} \u{2713}")).green())
-                } else {
-                    format!("{}: {}", p, style("\u{2014}").dim())
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" | ")
-    };
-    screen.add_info_line(&format!("  {}", build_tally(&working_per_proto)));
 
     for (idx, tagged) in strategies.iter().enumerate() {
-        // Skip this protocol if we already have enough working strategies
+        // Skip this protocol if we already have enough perfect strategies
         if take > 0 {
-            let proto_key = tagged.protocol.to_string();
-            let proto_working = working_per_proto.get(&proto_key).copied().unwrap_or(0);
-            if proto_working >= take {
+            let perfect = perfect_per_proto
+                .get(&tagged.protocol)
+                .copied()
+                .unwrap_or(0);
+            if perfect >= take {
                 continue;
             }
         }
 
+        let args_str = tagged.args.join(" ");
         if checked_count > 0 {
             screen.println(&format!("  {}", style("─".repeat(60)).dim()));
         }
-
-        let args_str = tagged.args.join(" ");
         screen.println(&format!(
             "  [{}/{}] {} nfqws2 {}",
             idx + 1,
@@ -157,165 +124,90 @@ pub async fn run_check(
             style(&args_str).cyan(),
         ));
 
-        let checked = check_single_strategy(config, &slot, domain, tagged, ips).await;
         checked_count += 1;
 
-        let status = if checked.working {
-            working_count += 1;
-            *working_per_proto
-                .entry(tagged.protocol.to_string())
-                .or_insert(0) += 1;
-            format!(
-                "    {} {}B, {}ms, {:.1} KB/s",
+        // Run passes with early-exit: if first pass fails, skip remaining
+        let mut ok_count: usize = 0;
+        let mut total_run: usize = 0;
+        let mut speeds: Vec<f64> = Vec::with_capacity(passes);
+        let mut latencies: Vec<u64> = Vec::with_capacity(passes);
+        let mut last_error: Option<String> = None;
+
+        for pass_idx in 0..passes {
+            let checked = check_single_strategy(config, &slot, domain, tagged, ips).await;
+            total_run = pass_idx + 1;
+
+            if checked.working {
+                ok_count += 1;
+                speeds.push(checked.speed_kbps);
+                latencies.push(checked.latency_ms);
+            } else {
+                last_error = checked.error;
+                // Early-exit: first fail → drop this strategy
+                break;
+            }
+        }
+
+        if ok_count == total_run && ok_count == passes {
+            // All passes OK
+            speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            latencies.sort();
+            let median_speed = speeds[speeds.len() / 2];
+            let median_latency = latencies[latencies.len() / 2];
+
+            screen.println(&format!(
+                "    {} median {}ms, {:.1} KB/s",
                 style("OK").green().bold(),
-                checked.bytes_downloaded,
-                checked.latency_ms,
-                checked.speed_kbps,
-            )
+                median_latency,
+                median_speed,
+            ));
+
+            *perfect_per_proto.entry(tagged.protocol).or_insert(0) += 1;
+
+            verified.push(VerifiedStrategy {
+                protocol: tagged.protocol.to_string(),
+                args: args_str,
+                success_rate: 1.0,
+                median_latency_ms: median_latency,
+                median_speed_kbps: median_speed,
+                passes_ok: ok_count,
+                passes_total: passes,
+            });
         } else {
-            let reason = checked.error.as_deref().unwrap_or("failed");
-            format!("    {} {}", style("FAIL").red().bold(), style(reason).red(),)
-        };
-        screen.println(&status);
-
-        // Update sticky tally
-        screen.update_info_line(&format!("  {}", build_tally(&working_per_proto)));
-
-        if checked.working {
-            working_tagged.push(tagged);
-            results.push(checked);
+            let reason = last_error.as_deref().unwrap_or("failed");
+            screen.println(&format!(
+                "    {} {}/{} {}",
+                style("FAIL").red().bold(),
+                ok_count,
+                total_run,
+                style(reason).red(),
+            ));
         }
 
         // Check if all protocols have reached the take limit
         if take > 0 {
-            let all_protocols: std::collections::HashSet<String> =
-                strategies.iter().map(|s| s.protocol.to_string()).collect();
-            let all_satisfied = all_protocols
+            let all_protos: std::collections::HashSet<Protocol> =
+                strategies.iter().map(|s| s.protocol).collect();
+            let all_satisfied = all_protos
                 .iter()
-                .all(|p| working_per_proto.get(p).copied().unwrap_or(0) >= take);
+                .all(|p| perfect_per_proto.get(p).copied().unwrap_or(0) >= take);
             if all_satisfied {
                 screen.println(&format!(
-                    "  {} found {} working strategies per protocol, stopping early ({} of {} checked)",
+                    "  {} found {} verified strategies per protocol, stopping",
                     style("--take").bold(),
                     take,
-                    checked_count,
-                    strategies.len(),
                 ));
                 break;
             }
         }
     }
 
-    // Remove sticky tally before Phase 2
-    screen.finish_info();
-
-    // ── Phase 2: verification ──
-    let best = if passes >= 2 && !working_tagged.is_empty() {
-        screen.newline();
-        screen.println(&format!(
-            "  {}",
-            style(format!(
-                "Phase 2: verifying {} strategies ({passes} passes each)",
-                working_tagged.len()
-            ))
-            .bold()
-            .underlined(),
-        ));
-
-        let mut verified: Vec<VerifiedStrategy> = Vec::new();
-
-        for (idx, tagged) in working_tagged.iter().enumerate() {
-            let args_str = tagged.args.join(" ");
-            screen.println(&format!("  {}", style("─".repeat(60)).dim(),));
-            screen.println(&format!(
-                "  [{}/{}] {} nfqws2 {}",
-                idx + 1,
-                working_tagged.len(),
-                style(tagged.protocol.to_string()).bold(),
-                style(&args_str).cyan(),
-            ));
-
-            // Run K passes, collect PassResults + speeds
-            let mut pass_results = Vec::with_capacity(passes);
-            let mut pass_speeds: Vec<f64> = Vec::with_capacity(passes);
-            for pass_idx in 0..passes {
-                let checked = check_single_strategy(config, &slot, domain, tagged, ips).await;
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                if checked.working {
-                    pass_speeds.push(checked.speed_kbps);
-                }
-                pass_results.push(PassResult {
-                    pass_index: pass_idx + 1,
-                    success: checked.working,
-                    verdict: if checked.working {
-                        "OK".to_string()
-                    } else {
-                        checked.error.unwrap_or_else(|| "FAIL".to_string())
-                    },
-                    latency_ms: checked.latency_ms,
-                    timestamp,
-                });
-            }
-
-            let stats = compute_stats(&pass_results);
-
-            // Median speed from successful passes
-            pass_speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let median_speed_kbps = if pass_speeds.is_empty() {
-                0.0
-            } else {
-                pass_speeds[pass_speeds.len() / 2]
-            };
-
-            let rate_styled = if stats.success_rate >= 1.0 {
-                style(format!("{}/{} OK", stats.successes, stats.total_passes))
-                    .green()
-                    .bold()
-            } else if stats.success_rate >= 0.5 {
-                style(format!("{}/{} OK", stats.successes, stats.total_passes))
-                    .yellow()
-                    .bold()
-            } else {
-                style(format!("{}/{} OK", stats.successes, stats.total_passes))
-                    .red()
-                    .bold()
-            };
-
-            screen.println(&format!(
-                "    {}, median {}ms, {:.1} KB/s",
-                rate_styled, stats.latency_median_ms, median_speed_kbps,
-            ));
-
-            verified.push(VerifiedStrategy {
-                protocol: tagged.protocol.to_string(),
-                args: args_str,
-                success_rate: stats.success_rate,
-                median_latency_ms: stats.latency_median_ms,
-                median_speed_kbps,
-                passes_ok: stats.successes,
-                passes_total: stats.total_passes,
-            });
-        }
-
-        // Sort by success_rate descending, then by speed descending
-        verified.sort_by(|a, b| {
-            b.success_rate
-                .partial_cmp(&a.success_rate)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    b.median_speed_kbps
-                        .partial_cmp(&a.median_speed_kbps)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
-
-        verified.into_iter().next()
-    } else {
-        None
-    };
+    // Sort by speed descending (all are 100% success rate due to early-exit)
+    verified.sort_by(|a, b| {
+        b.median_speed_kbps
+            .partial_cmp(&a.median_speed_kbps)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Cleanup
     nftables::drop_table(&config.nft_table).await;
@@ -324,10 +216,9 @@ pub async fn run_check(
         domain: domain.to_string(),
         timestamp: timestamp_iso(),
         total: checked_count,
-        working: working_count,
+        working: verified.len(),
         elapsed_secs: start.elapsed().as_secs_f64(),
-        best,
-        strategies: results,
+        strategies: verified,
     }
 }
 
@@ -559,34 +450,11 @@ mod tests {
             total: 2,
             working: 1,
             elapsed_secs: 5.3,
-            best: None,
-            strategies: vec![
-                CheckedStrategy {
-                    protocol: "HTTP".to_string(),
-                    args: "--payload=http_req".to_string(),
-                    working: true,
-                    bytes_downloaded: 10240,
-                    latency_ms: 500,
-                    speed_kbps: 20.0,
-                    error: None,
-                },
-                CheckedStrategy {
-                    protocol: "HTTPS/TLS1.2".to_string(),
-                    args: "--payload=tls_client_hello".to_string(),
-                    working: false,
-                    bytes_downloaded: 0,
-                    latency_ms: 2000,
-                    speed_kbps: 0.0,
-                    error: Some("timeout".to_string()),
-                },
-            ],
+            strategies: vec![],
         };
         let json = serde_json::to_string_pretty(&report).unwrap();
         assert!(json.contains("\"domain\": \"rutracker.org\""));
         assert!(json.contains("\"working\": 1"));
-        assert!(json.contains("\"error\": \"timeout\""));
-        // best is None, so "best" should not appear in JSON
-        assert!(!json.contains("\"best\""));
     }
 
     #[test]
@@ -606,11 +474,9 @@ mod tests {
             total: 5,
             working: 3,
             elapsed_secs: 10.0,
-            best: Some(best),
-            strategies: vec![],
+            strategies: vec![best],
         };
         let json = serde_json::to_string_pretty(&report).unwrap();
-        assert!(json.contains("\"best\""));
         assert!(json.contains("\"success_rate\": 1.0"));
     }
 

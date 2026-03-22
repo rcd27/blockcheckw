@@ -106,7 +106,8 @@ sudo blockcheckw -w 256 scan -d rutracker.org -o report.txt
 
 ### 3. Проверка стратегий (check)
 
-Двухфазная проверка стратегий из vanilla-отчёта с реальным data transfer.
+Верификация стратегий из vanilla-отчёта с реальным data transfer.
+Стратегии автоматически сортируются по структурной простоте (меньше desync actions → меньше repeats → single-stage перед multi-stage).
 
 ```bash
 # Базовый запуск (все стратегии, 3 прохода верификации):
@@ -114,23 +115,21 @@ sudo blockcheckw check --from-file report_vanilla.txt -d rutracker.org
 ```
 
 ```bash
-# Early stop после 10 рабочих на каждый протокол, 5 проходов верификации, JSON в файл:
+# Остановиться после 10 верифицированных на протокол, 5 проходов, JSON в файл:
 sudo blockcheckw check --from-file report_vanilla.txt --take 10 --passes 5 -o result.json
 ```
 
 ```bash
-# Без верификации (одиночный проход, как scan):
+# Одиночный проход (без повторной верификации):
 sudo blockcheckw check --from-file report_vanilla.txt --passes 1
 ```
 
 **Как работает check:**
 
-- **Фаза 1 (отсев):** GET-запрос на каждую стратегию. HTTP-ответ = стратегия работает
-  (timeout/reset = DPI блокирует, HTTP 400 = fakes дошли до сервера, redirect на чужой
-  домен = заглушка провайдера).
-- **Фаза 2 (верификация):** каждая рабочая стратегия проверяется `--passes` раз.
-  Считается `success_rate`, медианная латентность, stability verdict. Финальный ранг:
-  `stability × 0.6 + rank_score × 0.4`. Лучшая стратегия выводится как **BEST**.
+Каждая стратегия проверяется `--passes` раз с реальным GET-запросом (data transfer).
+Если первый проход FAIL — стратегия сразу отбрасывается (early-exit).
+Только стратегии с 100% success rate попадают в результат.
+`--take N` останавливает проверку после N верифицированных стратегий на протокол.
 
 ## Если zapret2 уже запущен
 

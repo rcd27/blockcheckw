@@ -1,32 +1,21 @@
-// Strategy ranking — no subjective scoring.
+// Strategy ranking by structural simplicity.
 //
-// Strategies are sorted by structural simplicity (fewer actions, fewer
-// repeats, no multi-stage). This is a deterministic ordering, not a
-// quality judgement — actual quality assessment is deferred to the
-// AI strategy selector (see TICKET-ai-strategy-selector.md).
+// Strategies are sorted by: fewer desync actions → fewer repeats →
+// single-stage before multi-stage. Simpler strategies are tried first
+// because they have fewer points of failure.
 
-pub struct StrategyScore {
-    pub strategy_args: Vec<String>,
-}
+use super::generator::TaggedStrategy;
 
-/// Sort strategies by structural simplicity: fewer desync actions first,
-/// then fewer repeats, then no multi-stage before multi-stage.
-pub fn rank_strategies(strategies: &[Vec<String>]) -> Vec<StrategyScore> {
-    let mut indexed: Vec<(usize, &Vec<String>)> = strategies.iter().enumerate().collect();
-    indexed.sort_by(|(_, a), (_, b)| {
-        let aj = a.join(" ");
-        let bj = b.join(" ");
+/// Sort tagged strategies by structural simplicity (in-place).
+pub fn sort_by_simplicity(strategies: &mut [TaggedStrategy]) {
+    strategies.sort_by(|a, b| {
+        let aj = a.args.join(" ");
+        let bj = b.args.join(" ");
         sort_key(&aj).cmp(&sort_key(&bj))
     });
-    indexed
-        .into_iter()
-        .map(|(_, s)| StrategyScore {
-            strategy_args: s.clone(),
-        })
-        .collect()
 }
 
-/// Sort key: (action_count, repeats, is_multi_stage). Lower = simpler.
+/// Sort key: (action_count, max_repeats, is_multi_stage). Lower = simpler.
 fn sort_key(joined: &str) -> (usize, u32, bool) {
     (
         count_desync_actions(joined),
@@ -40,15 +29,12 @@ fn count_desync_actions(joined: &str) -> usize {
 }
 
 fn parse_max_repeats(joined: &str) -> u32 {
-    let mut max_repeats = 0u32;
-    for part in joined.split(':') {
-        if let Some(val) = part.strip_prefix("repeats=") {
-            if let Ok(n) = val.parse::<u32>() {
-                max_repeats = max_repeats.max(n);
-            }
-        }
-    }
-    max_repeats
+    joined
+        .split(':')
+        .filter_map(|part| part.strip_prefix("repeats="))
+        .filter_map(|val| val.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
 }
 
 fn is_multi_stage(joined: &str) -> bool {
@@ -58,38 +44,56 @@ fn is_multi_stage(joined: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Protocol;
 
-    fn args(s: &str) -> Vec<String> {
-        s.split_whitespace().map(String::from).collect()
+    fn tagged(s: &str) -> TaggedStrategy {
+        TaggedStrategy {
+            protocol: Protocol::HttpsTls12,
+            args: s.split_whitespace().map(String::from).collect(),
+        }
     }
 
     #[test]
-    fn ranking_simple_before_complex() {
-        let strategies = vec![
+    fn simple_before_complex() {
+        let mut strategies = vec![
             // Complex: 3 actions + multi-stage
-            args("--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:ip_ttl=5:repeats=1 --lua-desync=fakedsplit:pos=midsld:ip_ttl=5:repeats=1 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1"),
+            tagged("--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:ip_ttl=5:repeats=1 --lua-desync=fakedsplit:pos=midsld:ip_ttl=5:repeats=1 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1"),
             // Simple: 1 action, no repeats
-            args("--payload=tls_client_hello --lua-desync=fakedsplit:pos=sniext+4:tcp_ts=-1000"),
+            tagged("--payload=tls_client_hello --lua-desync=fakedsplit:pos=sniext+4:tcp_ts=-1000"),
         ];
 
-        let ranked = rank_strategies(&strategies);
-        assert_eq!(
-            ranked[0].strategy_args, strategies[1],
+        sort_by_simplicity(&mut strategies);
+        assert!(
+            strategies[0].args.join(" ").contains("tcp_ts=-1000"),
             "simple should come first"
         );
     }
 
     #[test]
-    fn ranking_low_repeats_before_high() {
-        let strategies = vec![
-            args("--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=260"),
-            args("--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1"),
+    fn low_repeats_before_high() {
+        let mut strategies = vec![
+            tagged("--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=260"),
+            tagged("--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1"),
         ];
 
-        let ranked = rank_strategies(&strategies);
-        assert_eq!(
-            ranked[0].strategy_args, strategies[1],
+        sort_by_simplicity(&mut strategies);
+        assert!(
+            strategies[0].args.join(" ").contains("repeats=1"),
             "low repeats should come first"
+        );
+    }
+
+    #[test]
+    fn single_stage_before_multi_stage() {
+        let mut strategies = vec![
+            tagged("--payload=tls_client_hello --lua-desync=fake:repeats=1 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1"),
+            tagged("--payload=tls_client_hello --lua-desync=fake:repeats=1"),
+        ];
+
+        sort_by_simplicity(&mut strategies);
+        assert!(
+            !strategies[0].args.join(" ").contains("--payload=empty"),
+            "single-stage should come first"
         );
     }
 }

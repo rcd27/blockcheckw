@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/rcd27/blockcheckw/compare/v0.4.0...v0.5.0) (2026-03-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **check:** радикальное упрощение фичи. Без сканов. early-exit
+
+### Features
+
+* **check:** радикальное упрощение фичи. Без сканов. early-exit ([a9dd5ab](https://github.com/rcd27/blockcheckw/commit/a9dd5ab7344aa7e1744eb5dd7058b7342c649f0b))
+* **ux:** сохранение/восстановление nft таблиц между прогонами blockcheckw ([370aacf](https://github.com/rcd27/blockcheckw/commit/370aacf3df32a25391e60da30184f3762b97fd86))
+
+
+### Bug Fixes
+
+* **scan:** форматированный отчёт после SCAN ([09d5735](https://github.com/rcd27/blockcheckw/commit/09d573599c1524066f7c86e4b6f4f6d0679fcfd1))
+* **zapret2:** перезапуск сервиса при panic! ([9e92b56](https://github.com/rcd27/blockcheckw/commit/9e92b56744f616acf0e0d19fe00dd3c7cb0bf997))
+
 ## [0.4.0](https://github.com/rcd27/blockcheckw/compare/v0.3.2...v0.4.0) (2026-03-22)
 
 

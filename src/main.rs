@@ -138,6 +138,29 @@ enum Command {
         #[arg(long)]
         from_file: Option<String>,
     },
+
+    /// Find universal strategies that work across multiple blocked domains
+    Universal {
+        /// Path to file with blocked domains (one per line)
+        #[arg(long)]
+        domain_list: String,
+
+        /// Protocols to test (comma-separated: http,tls12,tls13)
+        #[arg(short, long, default_value = "tls12")]
+        protocols: String,
+
+        /// DNS resolution mode: auto, system, doh
+        #[arg(long, default_value = "auto")]
+        dns: String,
+
+        /// Number of domains to sample from the list
+        #[arg(long, default_value_t = 10)]
+        sample: usize,
+
+        /// Save report to file
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -275,6 +298,37 @@ async fn main() {
                 top,
                 output.as_deref(),
                 from_file.as_deref(),
+            )
+            .await;
+        }
+        Some(Command::Universal {
+            domain_list,
+            protocols,
+            dns,
+            sample,
+            output,
+        }) => {
+            let protocols = match blockcheckw::config::parse_protocols(&protocols) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("ERROR: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let dns_mode = match blockcheckw::config::parse_dns_mode(&dns) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("ERROR: {e}");
+                    std::process::exit(1);
+                }
+            };
+            cmd::universal::run_universal(
+                cli.workers as usize,
+                &domain_list,
+                &protocols,
+                dns_mode,
+                sample,
+                output.as_deref(),
             )
             .await;
         }

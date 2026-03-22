@@ -1,22 +1,29 @@
-// Strategy ranking by structural simplicity.
+// Strategy ranking.
 //
-// Strategies are sorted by: fewer desync actions → fewer repeats →
-// single-stage before multi-stage. Simpler strategies are tried first
-// because they have fewer points of failure.
+// If coverage metadata is present (from universal scan), strategies are sorted
+// by coverage descending first — a strategy that works on 9/10 domains is more
+// valuable than a simpler one that works on 1/10.
+//
+// Within the same coverage (or without coverage), strategies are sorted by
+// structural simplicity: fewer desync actions → fewer repeats →
+// single-stage before multi-stage.
 
 use super::generator::TaggedStrategy;
 
-/// Sort tagged strategies by structural simplicity (in-place).
+/// Sort tagged strategies: coverage descending, then simplicity ascending.
 pub fn sort_by_simplicity(strategies: &mut [TaggedStrategy]) {
     strategies.sort_by(|a, b| {
-        let aj = a.args.join(" ");
-        let bj = b.args.join(" ");
-        sort_key(&aj).cmp(&sort_key(&bj))
+        // Higher coverage first
+        b.coverage.cmp(&a.coverage).then_with(|| {
+            let aj = a.args.join(" ");
+            let bj = b.args.join(" ");
+            simplicity_key(&aj).cmp(&simplicity_key(&bj))
+        })
     });
 }
 
 /// Sort key: (action_count, max_repeats, is_multi_stage). Lower = simpler.
-fn sort_key(joined: &str) -> (usize, u32, bool) {
+fn simplicity_key(joined: &str) -> (usize, u32, bool) {
     (
         count_desync_actions(joined),
         parse_max_repeats(joined),
@@ -50,6 +57,7 @@ mod tests {
         TaggedStrategy {
             protocol: Protocol::HttpsTls12,
             args: s.split_whitespace().map(String::from).collect(),
+            coverage: 1,
         }
     }
 

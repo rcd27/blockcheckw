@@ -29,6 +29,7 @@ pub struct CheckedStrategy {
 pub struct VerifiedStrategy {
     pub protocol: String,
     pub args: String,
+    pub coverage: usize,
     pub success_rate: f64,
     pub median_latency_ms: u64,
     pub median_speed_kbps: f64,
@@ -167,6 +168,7 @@ pub async fn run_check(
             verified.push(VerifiedStrategy {
                 protocol: tagged.protocol.to_string(),
                 args: args_str,
+                coverage: tagged.coverage,
                 success_rate: 1.0,
                 median_latency_ms: median_latency,
                 median_speed_kbps: median_speed,
@@ -462,6 +464,7 @@ mod tests {
         let best = VerifiedStrategy {
             protocol: "HTTPS/TLS1.2".to_string(),
             args: "--payload=tls_client_hello --lua-desync=fake".to_string(),
+            coverage: 1,
             success_rate: 1.0,
             median_latency_ms: 320,
             median_speed_kbps: 5.5,
@@ -485,6 +488,7 @@ mod tests {
         let vs = VerifiedStrategy {
             protocol: "HTTP".to_string(),
             args: "--payload=http_req --lua-desync=fake".to_string(),
+            coverage: 1,
             success_rate: 0.67,
             median_latency_ms: 450,
             median_speed_kbps: 2.5,

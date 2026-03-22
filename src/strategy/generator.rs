@@ -11,11 +11,13 @@ use std::path::Path;
 
 type Strategy = Vec<String>;
 
-/// A strategy paired with its protocol, parsed from vanilla format.
+/// A strategy paired with its protocol and optional metadata.
 #[derive(Debug, Clone)]
 pub struct TaggedStrategy {
     pub protocol: Protocol,
     pub args: Vec<String>,
+    /// Domain coverage: 1 for scan/vanilla, N for universal.
+    pub coverage: usize,
 }
 
 /// Strategy files baked into the binary at compile time.
@@ -88,18 +90,62 @@ fn parse_vanilla_summary(data: &str, protocol: Option<Protocol>) -> Vec<Strategy
         .collect()
 }
 
-/// Load strategies from a vanilla file, preserving protocol from each line.
-/// Returns error if file is not in vanilla format or has no strategies.
+/// Load strategies from a file. Auto-detects format:
+/// - JSON with `strategies` field → parse as scan/universal report
+/// - Text with `curl_test_*` lines → parse as vanilla blockcheck2 report
 pub fn load_tagged_strategies(path: &Path) -> std::io::Result<Vec<TaggedStrategy>> {
     let data = std::fs::read_to_string(path)?;
+
+    // Try JSON first
+    if data.trim_start().starts_with('{') {
+        if let Ok(strategies) = parse_json_strategies(&data) {
+            if !strategies.is_empty() {
+                return Ok(strategies);
+            }
+        }
+    }
+
+    // Fall back to vanilla format
     let strategies = parse_vanilla_tagged(&data);
     if strategies.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "no strategies found in vanilla file (expected curl_test_* lines)",
+            "no strategies found (expected JSON with 'strategies' field or vanilla curl_test_* lines)",
         ));
     }
     Ok(strategies)
+}
+
+/// Parse JSON report containing flat `strategies` array with `{protocol, args}` entries.
+fn parse_json_strategies(data: &str) -> Result<Vec<TaggedStrategy>, String> {
+    use crate::pipeline::scan_report::StrategyEntry;
+
+    #[derive(serde::Deserialize)]
+    struct Report {
+        strategies: Vec<StrategyEntry>,
+    }
+
+    let report: Report = serde_json::from_str(data).map_err(|e| e.to_string())?;
+
+    let tagged = report
+        .strategies
+        .into_iter()
+        .filter_map(|entry| {
+            let protocol = match entry.protocol.as_str() {
+                "HTTP" => Protocol::Http,
+                "HTTPS/TLS1.2" => Protocol::HttpsTls12,
+                "HTTPS/TLS1.3" => Protocol::HttpsTls13,
+                _ => return None,
+            };
+            Some(TaggedStrategy {
+                protocol,
+                args: entry.args.split_whitespace().map(String::from).collect(),
+                coverage: entry.coverage,
+            })
+        })
+        .collect();
+
+    Ok(tagged)
 }
 
 /// Parse vanilla summary, returning each strategy tagged with its protocol.
@@ -120,6 +166,7 @@ fn parse_vanilla_tagged(data: &str) -> Vec<TaggedStrategy> {
                 .map(|(_, args)| TaggedStrategy {
                     protocol,
                     args: args.split_whitespace().map(String::from).collect(),
+                    coverage: 1,
                 })
         })
         .collect()

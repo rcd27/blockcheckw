@@ -2,6 +2,7 @@ pub mod benchmark;
 pub mod check;
 pub mod completions;
 pub mod scan;
+pub mod universal;
 
 use std::sync::Arc;
 

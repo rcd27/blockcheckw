@@ -9,7 +9,7 @@ use blockcheckw::network::dns::DnsSpoofResult;
 use blockcheckw::network::{dns, isp};
 use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::runner::run_parallel;
-use blockcheckw::pipeline::scan_report::{ScanProtocolResult, ScanReport};
+use blockcheckw::pipeline::scan_report::{ScanProtocolResult, ScanReport, StrategyEntry};
 use blockcheckw::pipeline::test_report;
 use blockcheckw::pipeline::worker_task::HttpTestMode;
 use blockcheckw::strategy::generator;
@@ -399,12 +399,25 @@ fn format_scan_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usi
         })
         .collect();
 
+    let strategies: Vec<StrategyEntry> = summary
+        .iter()
+        .filter(|entry| !entry.strategies.is_empty())
+        .flat_map(|entry| {
+            entry.strategies.iter().map(|args| StrategyEntry {
+                protocol: entry.protocol.to_string(),
+                args: args.join(" "),
+                coverage: 1,
+            })
+        })
+        .collect();
+
     let report = ScanReport {
         domain: domain.to_string(),
         timestamp,
         total,
         working: total,
         protocols,
+        strategies,
     };
 
     let json = serde_json::to_string_pretty(&report).unwrap();

@@ -4,12 +4,21 @@ pub mod completions;
 pub mod scan;
 pub mod universal;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use console::style;
 use tokio::sync::Mutex;
 
 use blockcheckw::ui::WARN;
+
+/// Global flag: auto-confirm all prompts (set by --yes / -y).
+static AUTO_YES: AtomicBool = AtomicBool::new(false);
+
+/// Set auto-confirm mode (called from main).
+pub fn set_auto_yes(yes: bool) {
+    AUTO_YES.store(yes, Ordering::Relaxed);
+}
 
 // ── Zapret2 service management ──────────────────────────────────────────────
 
@@ -284,6 +293,15 @@ pub async fn resolve_bypass_conflicts_if_any(own_table: &str) {
 }
 
 fn prompt_yes_no() -> bool {
+    if AUTO_YES.load(Ordering::Relaxed) {
+        eprintln!("(auto-confirmed by --auto)");
+        return true;
+    }
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        eprintln!("  non-interactive mode: use --auto to confirm automatically");
+        return false;
+    }
     let mut input = String::new();
     if std::io::stdin().read_line(&mut input).is_err() {
         return false;
@@ -537,17 +555,22 @@ pub fn acquire_instance_lock() -> std::fs::File {
 
     use std::os::unix::io::AsRawFd;
     let fd = file.as_raw_fd();
+
+    // Try non-blocking first
     let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if ret != 0 {
-        // Read PID from lock file for a helpful error message
+        // Lock held by another instance — wait (supports pipe: universal | check)
         let held_pid = std::fs::read_to_string(LOCK_PATH).unwrap_or_default();
         let held_pid = held_pid.trim();
         eprintln!(
-            "  {} another blockcheckw instance is already running (PID {held_pid})",
-            style("ERROR:").red().bold(),
+            "  {} waiting for another blockcheckw instance (PID {held_pid}) to finish...",
+            style("WAIT:").yellow().bold(),
         );
-        eprintln!("  To stop it: sudo kill {held_pid}");
-        std::process::exit(1);
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret != 0 {
+            eprintln!("  {} failed to acquire lock", style("ERROR:").red().bold(),);
+            std::process::exit(1);
+        }
     }
 
     // Write PID for diagnostics (truncate after locking, not before)

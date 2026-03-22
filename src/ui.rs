@@ -242,6 +242,9 @@ pub struct ScanScreen {
     pb: Option<ProgressBar>,
     info_bars: Vec<ProgressBar>,
     is_tty: bool,
+    /// Non-TTY: track current phase label and total for completion message.
+    phase_label: Option<String>,
+    phase_total: u64,
 }
 
 impl Default for ScanScreen {
@@ -264,6 +267,8 @@ impl ScanScreen {
             pb: None,
             info_bars: Vec::new(),
             is_tty,
+            phase_label: None,
+            phase_total: 0,
         }
     }
 
@@ -272,7 +277,7 @@ impl ScanScreen {
         if self.is_tty {
             let _ = self.multi.println(msg);
         } else {
-            println!("{msg}");
+            eprintln!("{msg}");
         }
     }
 
@@ -281,7 +286,7 @@ impl ScanScreen {
         if self.is_tty {
             let _ = self.multi.println("");
         } else {
-            println!();
+            eprintln!();
         }
     }
 
@@ -289,6 +294,10 @@ impl ScanScreen {
     /// Multiple lines can be added (ISP, DNS, etc).
     /// A divider is automatically inserted before the first info line.
     pub fn add_info_line(&mut self, msg: &str) {
+        if !self.is_tty {
+            eprintln!("{msg}");
+            return;
+        }
         if self.info_bars.is_empty() {
             let width = Term::stdout().size().1 as usize;
             let divider = self.multi.add(ProgressBar::new(0));
@@ -306,6 +315,10 @@ impl ScanScreen {
 
     /// Update the last info line in-place (for tally counters, etc).
     pub fn update_info_line(&self, msg: &str) {
+        if !self.is_tty {
+            eprintln!("{msg}");
+            return;
+        }
         if let Some(bar) = self.info_bars.last() {
             bar.set_message(msg.to_string());
             bar.tick();
@@ -314,6 +327,9 @@ impl ScanScreen {
 
     /// Clear and remove all info bars.
     pub fn finish_info(&mut self) {
+        if !self.is_tty {
+            return;
+        }
         for bar in self.info_bars.drain(..) {
             bar.finish_and_clear();
         }
@@ -327,6 +343,16 @@ impl ScanScreen {
 
     /// Create divider + progress bar with a prefix label (e.g. "Verify HTTP [2/3]").
     pub fn begin_progress_with_prefix(&mut self, total: u64, prefix: &str) {
+        if !self.is_tty {
+            let label = if prefix.is_empty() {
+                format!("{total} items")
+            } else {
+                format!("{prefix}: {total} items")
+            };
+            eprintln!("[START] {label}");
+            self.phase_label = Some(label);
+            self.phase_total = total;
+        }
         let width = Term::stdout().size().1 as usize;
 
         let divider = ProgressBar::new(0);
@@ -379,6 +405,11 @@ impl ScanScreen {
     /// Finish and clear both the progress bar and the divider.
     /// The info_bar remains visible.
     pub fn finish_progress(&mut self) {
+        if !self.is_tty {
+            if let Some(label) = self.phase_label.take() {
+                eprintln!("[DONE] {label}");
+            }
+        }
         if let Some(pb) = self.pb.take() {
             pb.finish_and_clear();
         }

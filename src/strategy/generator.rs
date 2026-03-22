@@ -52,7 +52,11 @@ pub fn load_strategies_from_file(
     path: &Path,
     protocol: Option<Protocol>,
 ) -> std::io::Result<Vec<Strategy>> {
-    let data = std::fs::read_to_string(path)?;
+    let data = if path.as_os_str() == "-" {
+        std::io::read_to_string(std::io::stdin())?
+    } else {
+        std::fs::read_to_string(path)?
+    };
     let is_vanilla = data
         .lines()
         .any(|l| l.starts_with("* SUMMARY") || l.starts_with("curl_test_"));
@@ -94,7 +98,11 @@ fn parse_vanilla_summary(data: &str, protocol: Option<Protocol>) -> Vec<Strategy
 /// - JSON with `strategies` field → parse as scan/universal report
 /// - Text with `curl_test_*` lines → parse as vanilla blockcheck2 report
 pub fn load_tagged_strategies(path: &Path) -> std::io::Result<Vec<TaggedStrategy>> {
-    let data = std::fs::read_to_string(path)?;
+    let data = if path.as_os_str() == "-" {
+        std::io::read_to_string(std::io::stdin())?
+    } else {
+        std::fs::read_to_string(path)?
+    };
 
     // Try JSON first
     if data.trim_start().starts_with('{') {

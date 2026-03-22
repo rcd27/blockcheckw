@@ -2,6 +2,7 @@ pub mod config;
 pub mod error;
 pub mod firewall;
 pub mod network;
+pub mod persist;
 pub mod pipeline;
 pub mod strategy;
 pub mod system;

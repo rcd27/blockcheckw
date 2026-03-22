@@ -132,8 +132,10 @@ pub async fn run_check_cmd(
         report.elapsed_secs,
     ));
 
-    // Output JSON — always save to file
+    // Output JSON — stdout (for pipe support) + file
     let json = serde_json::to_string_pretty(&report).unwrap();
+    println!("{json}");
+    screen.newline();
 
     let path = output.map(String::from).unwrap_or_else(|| {
         let prefix = super::chrono_local_prefix();

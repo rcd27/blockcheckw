@@ -349,6 +349,25 @@ pub async fn run_benchmark(
     let mut base_throughput: Option<f64> = None;
 
     for (level_idx, &wc) in worker_counts.iter().enumerate() {
+        // OOM guard: check if enough RAM for this worker count
+        let ram_needed_mb = wc as u64 * RAM_PER_WORKER_MB;
+        if let Some(avail_kb) = mem_available_kb() {
+            let avail_mb = avail_kb / 1024;
+            // Keep 20% safety margin
+            let safe_mb = avail_mb * 80 / 100;
+            if ram_needed_mb > safe_mb {
+                let msg = format!(
+                    "stopping: {wc} workers need ~{ram_needed_mb}MB, only {avail_mb}MB available"
+                );
+                if raw {
+                    level_pb.println(msg);
+                } else {
+                    level_pb.println(format!("\n  {}", style(&msg).yellow().bold()));
+                }
+                break;
+            }
+        }
+
         let config = CoreConfig {
             worker_count: wc,
             ..CoreConfig::default()
@@ -442,6 +461,9 @@ pub async fn run_benchmark(
         final_table.push_str(&format!("\n\n{recommendation}"));
     }
     table_bar.finish_with_message(final_table);
+
+    // stdout: recommended workers (for pipe: benchmark | xargs -I{} blockcheckw -w {} scan)
+    println!("{recommended_workers}");
 
     Some(BenchmarkResult {
         points,

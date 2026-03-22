@@ -1,5 +1,30 @@
 # Quickstart: blockcheckw
 
+## TL;DR
+// FIXME
+```bash
+# Всё в одну строку: benchmark → scan → check
+blockcheckw benchmark | xargs -I{} blockcheckw -w {} scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
+```
+
+Или по шагам:
+
+```bash
+# 1. Найти оптимальное число воркеров
+blockcheckw benchmark
+
+# 2. Сканировать (подставить число из benchmark)
+blockcheckw -w 1024 scan -d rutracker.org
+
+# 3. Проверить найденные стратегии (pipe из scan)
+blockcheckw -w 1024 scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
+```
+
+Pipe работает между любыми командами: `scan`, `universal`, `check`.
+Все параметры (`-w`, `-d`, `-p`, `--dns`) запоминаются между запусками — достаточно указать один раз.
+
+---
+
 ## Требования
 
 - Linux (x86_64, arm64, роутеры на mips/mipsel/arm/ppc/riscv64 — тоже поддерживаются)
@@ -55,73 +80,65 @@ blockcheckw --version
 
 ## Использование
 
-> Все команды нужно запускать от **root** (`sudo`).
+> blockcheckw автоматически поднимает привилегии (sudo) при запуске.
 
 ### 1. Подбор числа воркеров (benchmark)
 
 Первым делом узнайте, сколько воркеров тянет ваша система:
 
 ```bash
-sudo blockcheckw benchmark
+blockcheckw benchmark
 ```
 
 Быстрый прогон (15 секунд на уровень вместо 30):
 
 ```bash
-sudo blockcheckw benchmark -t 15
+blockcheckw benchmark -t 15
 ```
 
 На роутере с ограниченной памятью:
 
 ```bash
-sudo blockcheckw benchmark -t 20 -M 64
+blockcheckw benchmark -t 20 -M 64
 ```
 
-Запомните рекомендованное число — используйте его в `-w` при скане.
+Benchmark автоматически остановится, если памяти не хватает на следующий уровень.
+Рекомендованное число запоминается — при следующем запуске `-w` подхватится автоматически.
 
 ### 2. Сканирование — найти рабочие стратегии
 
 ```bash
-sudo blockcheckw -w <N> scan -d rutracker.org
+blockcheckw -w 256 scan -d rutracker.org
 ```
 
-Где `<N>` — число воркеров из benchmark. Это запустит поиск по всем протоколам
-(HTTP, TLS 1.2, TLS 1.3).
-
-Примеры:
+Это запустит поиск по всем протоколам (HTTP, TLS 1.2, TLS 1.3).
 
 ```bash
-# С рекомендованным числом воркеров:
-sudo blockcheckw -w 256 scan -d rutracker.org
-
 # Только TLS 1.2:
-sudo blockcheckw -w 256 scan -d rutracker.org -p tls12
+blockcheckw -w 256 scan -d rutracker.org -p tls12
 ```
 
-Сохранить результат в файл:
+Pipe в check (scan → проверка с data transfer):
 
 ```bash
-sudo blockcheckw -w 256 scan -d rutracker.org -o report.txt
+blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
 ```
+
+Результат всегда сохраняется в файл (JSON + vanilla report), даже при pipe.
 
 ### 3. Проверка стратегий (check)
 
-Верификация стратегий из vanilla-отчёта с реальным data transfer.
-Стратегии автоматически сортируются по структурной простоте (меньше desync actions → меньше repeats → single-stage перед multi-stage).
+Верификация с реальным data transfer. Стратегии сортируются по простоте автоматически.
 
 ```bash
-# Базовый запуск (все стратегии, 3 прохода верификации):
-sudo blockcheckw check --from-file report_vanilla.txt -d rutracker.org
-```
+# Из pipe (рекомендуется):
+blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
 
-```bash
-# Остановиться после 10 верифицированных на протокол, 5 проходов, JSON в файл:
-sudo blockcheckw check --from-file report_vanilla.txt --take 10 --passes 5 -o result.json
-```
+# Из файла:
+blockcheckw check --from-file report_vanilla.txt -d rutracker.org
 
-```bash
-# Одиночный проход (без повторной верификации):
-sudo blockcheckw check --from-file report_vanilla.txt --passes 1
+# 5 проходов верификации:
+blockcheckw check --from-file report_vanilla.txt --take 10 --passes 5
 ```
 
 **Как работает check:**
@@ -130,6 +147,14 @@ sudo blockcheckw check --from-file report_vanilla.txt --passes 1
 Если первый проход FAIL — стратегия сразу отбрасывается (early-exit).
 Только стратегии с 100% success rate попадают в результат.
 `--take N` останавливает проверку после N верифицированных стратегий на протокол.
+
+### 4. Универсальные стратегии (universal)
+
+Найти стратегии, работающие на нескольких доменах:
+
+```bash
+blockcheckw -w 1024 universal --domain-list blocked.txt --sample 5 | blockcheckw check -d rutracker.org --take 10
+```
 
 ## Если zapret2 уже запущен
 
@@ -160,15 +185,7 @@ blockcheckw completions bash >> ~/.bashrc
 
 ## Решение проблем
 
-**`another blockcheckw instance is already running`** — blockcheckw уже запущен
-(например, benchmark или scan в другом терминале). Дождитесь завершения или остановите:
-
-```bash
-# PID указан в сообщении об ошибке
-sudo kill <PID>
-```
-
-**`Permission denied` / `Operation not permitted`** — запускайте через `sudo`.
+**`Permission denied`** — запустите через `sudo`.
 
 **`nfqws2 not found`** — убедитесь, что zapret2 установлен и `nfqws2` доступен
 (по умолчанию `/opt/zapret2/nfqws2`).

@@ -1,4 +1,5 @@
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod cmd;
 
@@ -36,6 +37,10 @@ struct Cli {
     /// Number of parallel workers
     #[arg(short, long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=2048))]
     workers: u16,
+
+    /// Auto-confirm all prompts (non-interactive mode)
+    #[arg(long, global = true)]
+    auto: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -79,9 +84,9 @@ enum Command {
 
     /// Check strategies from a vanilla report with real data transfer
     Check {
-        /// Path to vanilla report file (curl_test_* format)
+        /// Path to report file (reads from stdin if omitted and pipe detected)
         #[arg(long)]
-        from_file: String,
+        from_file: Option<String>,
 
         /// Target domain to check
         #[arg(short, long, default_value = "rutracker.org")]
@@ -163,6 +168,50 @@ enum Command {
     },
 }
 
+/// Return true if a named arg was explicitly provided on the command line.
+fn is_explicit(matches: &clap::ArgMatches, id: &str) -> bool {
+    matches.value_source(id) == Some(ValueSource::CommandLine)
+}
+
+/// Pick the effective value: CLI-explicit wins, then config, then clap default.
+/// Returns owned String to avoid borrow conflicts with persisted config mutation.
+fn resolve_str(
+    matches: &clap::ArgMatches,
+    id: &str,
+    cli_val: &str,
+    persisted: &Option<String>,
+) -> String {
+    if is_explicit(matches, id) {
+        cli_val.to_string()
+    } else {
+        persisted.as_deref().unwrap_or(cli_val).to_string()
+    }
+}
+
+/// For protocols: stored as Vec, CLI as comma-separated string.
+fn resolve_protocols(
+    matches: &clap::ArgMatches,
+    cli_val: &str,
+    persisted: &Option<Vec<String>>,
+) -> String {
+    if is_explicit(matches, "protocols") {
+        cli_val.to_string()
+    } else {
+        persisted
+            .as_ref()
+            .map(|v| v.join(","))
+            .unwrap_or_else(|| cli_val.to_string())
+    }
+}
+
+fn resolve_u16(matches: &clap::ArgMatches, id: &str, cli_val: u16, persisted: Option<u16>) -> u16 {
+    if is_explicit(matches, id) {
+        cli_val
+    } else {
+        persisted.unwrap_or(cli_val)
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Panic hook: cleanup nftables table on panic (async runtime may be dead, use sync Command)
@@ -190,7 +239,9 @@ async fn main() {
         default_hook(info);
     }));
 
-    let cli = Cli::parse();
+    // Parse CLI: get both typed struct and raw matches (for value_source detection)
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     // Completions don't need root — handle before elevation
     if let Some(Command::Completions { shell, install }) = &cli.command {
@@ -211,9 +262,22 @@ async fn main() {
         return;
     }
 
+    cmd::set_auto_yes(cli.auto);
+
     blockcheckw::system::elevate::require_root();
     blockcheckw::system::elevate::tune_tcp();
     blockcheckw::system::elevate::raise_nofile_limit();
+
+    // Pre-read stdin for check in pipe mode (before acquiring lock,
+    // so the upstream pipe command can finish and release its lock first)
+    let stdin_data = {
+        use std::io::IsTerminal;
+        if matches!(cli.command, Some(Command::Check { .. })) && !std::io::stdin().is_terminal() {
+            Some(std::io::read_to_string(std::io::stdin()).unwrap_or_default())
+        } else {
+            None
+        }
+    };
 
     // Prevent parallel execution — keep _lock alive until process exits
     let _lock = cmd::acquire_instance_lock();
@@ -228,6 +292,15 @@ async fn main() {
         )
         .init();
 
+    // Load persisted config
+    let mut persisted = blockcheckw::persist::load();
+
+    // Resolve effective workers (top-level arg)
+    let eff_workers = resolve_u16(&matches, "workers", cli.workers, persisted.workers);
+    if is_explicit(&matches, "workers") {
+        persisted.workers = Some(cli.workers);
+    }
+
     match cli.command {
         Some(Command::Benchmark {
             time,
@@ -236,7 +309,15 @@ async fn main() {
             protocol,
             raw,
         }) => {
-            cmd::benchmark::run_benchmark_cmd(time, max_workers, &domain, &protocol, raw).await;
+            let sub = matches.subcommand_matches("benchmark").unwrap();
+            let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
+
+            if is_explicit(sub, "domain") {
+                persisted.domain = Some(domain.clone());
+            }
+            blockcheckw::persist::save(&persisted);
+
+            cmd::benchmark::run_benchmark_cmd(time, max_workers, &eff_domain, &protocol, raw).await;
         }
         Some(Command::Check {
             from_file,
@@ -247,7 +328,36 @@ async fn main() {
             passes,
             output,
         }) => {
-            let dns_mode = match blockcheckw::config::parse_dns_mode(&dns) {
+            let sub = matches.subcommand_matches("check").unwrap();
+
+            let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
+            let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
+
+            if is_explicit(sub, "domain") {
+                persisted.domain = Some(domain.clone());
+            }
+            if is_explicit(sub, "dns") {
+                persisted.dns = Some(dns.clone());
+            }
+            blockcheckw::persist::save(&persisted);
+
+            // Determine input source: --from-file, pre-read stdin pipe, or error
+            let (source, stdin_tmp) = if let Some(path) = from_file {
+                (path, None)
+            } else if let Some(ref data) = stdin_data {
+                // Write pre-read stdin to temp file for load_tagged_strategies
+                let tmp = std::env::temp_dir().join("blockcheckw_stdin.json");
+                if let Err(e) = std::fs::write(&tmp, data) {
+                    eprintln!("ERROR: cannot write temp file: {e}");
+                    std::process::exit(1);
+                }
+                (tmp.to_string_lossy().into_owned(), Some(tmp))
+            } else {
+                eprintln!("ERROR: no input — provide --from-file or pipe data to stdin");
+                std::process::exit(1);
+            };
+
+            let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("ERROR: {e}");
@@ -256,8 +366,8 @@ async fn main() {
             };
 
             cmd::check::run_check_cmd(
-                &domain,
-                &from_file,
+                &eff_domain,
+                &source,
                 dns_mode,
                 timeout,
                 take,
@@ -265,6 +375,11 @@ async fn main() {
                 output.as_deref(),
             )
             .await;
+
+            // Clean up temp file from stdin pipe
+            if let Some(tmp) = stdin_tmp {
+                let _ = std::fs::remove_file(tmp);
+            }
         }
         Some(Command::Scan {
             domain,
@@ -275,14 +390,32 @@ async fn main() {
             output,
             from_file,
         }) => {
-            let protocols = match blockcheckw::config::parse_protocols(&protocols) {
+            let sub = matches.subcommand_matches("scan").unwrap();
+
+            let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
+            let eff_protocols = resolve_protocols(sub, &protocols, &persisted.protocols);
+            let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
+
+            if is_explicit(sub, "domain") {
+                persisted.domain = Some(domain.clone());
+            }
+            if is_explicit(sub, "protocols") {
+                persisted.protocols =
+                    Some(protocols.split(',').map(|s| s.trim().to_string()).collect());
+            }
+            if is_explicit(sub, "dns") {
+                persisted.dns = Some(dns.clone());
+            }
+            blockcheckw::persist::save(&persisted);
+
+            let protocols = match blockcheckw::config::parse_protocols(&eff_protocols) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("ERROR: {e}");
                     std::process::exit(1);
                 }
             };
-            let dns_mode = match blockcheckw::config::parse_dns_mode(&dns) {
+            let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("ERROR: {e}");
@@ -290,8 +423,8 @@ async fn main() {
                 }
             };
             cmd::scan::run_scan(
-                cli.workers as usize,
-                &domain,
+                eff_workers as usize,
+                &eff_domain,
                 &protocols,
                 dns_mode,
                 timeout,
@@ -308,14 +441,31 @@ async fn main() {
             sample,
             output,
         }) => {
-            let protocols = match blockcheckw::config::parse_protocols(&protocols) {
+            let sub = matches.subcommand_matches("universal").unwrap();
+
+            let eff_protocols = resolve_protocols(sub, &protocols, &persisted.protocols);
+            let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
+
+            if is_explicit(sub, "domain_list") {
+                persisted.domain_list = Some(domain_list.clone());
+            }
+            if is_explicit(sub, "protocols") {
+                persisted.protocols =
+                    Some(protocols.split(',').map(|s| s.trim().to_string()).collect());
+            }
+            if is_explicit(sub, "dns") {
+                persisted.dns = Some(dns.clone());
+            }
+            blockcheckw::persist::save(&persisted);
+
+            let protocols = match blockcheckw::config::parse_protocols(&eff_protocols) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("ERROR: {e}");
                     std::process::exit(1);
                 }
             };
-            let dns_mode = match blockcheckw::config::parse_dns_mode(&dns) {
+            let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("ERROR: {e}");
@@ -323,7 +473,7 @@ async fn main() {
                 }
             };
             cmd::universal::run_universal(
-                cli.workers as usize,
+                eff_workers as usize,
                 &domain_list,
                 &protocols,
                 dns_mode,

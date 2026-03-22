@@ -322,7 +322,12 @@ pub async fn run_scan(
         }
     }
 
-    // 6. Write reports (always)
+    // 6. JSON to stdout (for pipe support)
+    let (scan_json, _) = format_scan_report(domain, &summary);
+    println!("{scan_json}");
+    screen.newline();
+
+    // 7. Write reports (always)
     let now = chrono_local_prefix();
 
     let (content, count) = format_vanilla_report(domain, &summary);
@@ -357,7 +362,7 @@ pub async fn run_scan(
 
     if count > 0 {
         screen.println(&format!(
-            "\n{}",
+            "\n{}\n",
             style(format!(
                 ">>> Next step: sudo blockcheckw -w {workers} check --from-file {vanilla_path} -d {domain} <<<"
             ))

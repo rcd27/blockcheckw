@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0](https://github.com/rcd27/blockcheckw/compare/v0.6.0...v0.7.0) (2026-03-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ux:** pipe/TTL режим для всего приложения
+
+### Features
+
+* **ux:** pipe/TTL режим для всего приложения ([3a38d58](https://github.com/rcd27/blockcheckw/commit/3a38d58fda236473f3b3e294a2a24cd332486e17))
+
+
+### Bug Fixes
+
+* **build:** недостающие файлы ([97ee04d](https://github.com/rcd27/blockcheckw/commit/97ee04d4c6dbf30994e927750b8f921e37582933))
+
 ## [0.6.0](https://github.com/rcd27/blockcheckw/compare/v0.5.0...v0.6.0) (2026-03-22)
 
 

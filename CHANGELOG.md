@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/rcd27/blockcheckw/compare/v0.5.0...v0.6.0) (2026-03-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **universal:** новый брут-форс для N доменов
+
+### Bug Fixes
+
+* **universal:** новый брут-форс для N доменов ([18f0267](https://github.com/rcd27/blockcheckw/commit/18f02678b191d0f35c08ce4bf55e83fb3c19cb82))
+
 ## [0.5.0](https://github.com/rcd27/blockcheckw/compare/v0.4.0...v0.5.0) (2026-03-22)
 
 

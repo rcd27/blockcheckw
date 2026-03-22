@@ -224,31 +224,13 @@ pub fn top_strategies_header(protocol: &str, count: usize, total: usize) -> Stri
     )
 }
 
-/// Ranked strategy line with stars and tags.
+/// Ranked strategy line (no subjective scoring).
 /// ```text
-///   #1 ★★★ nfqws2 args
-///          (universal, minimal overhead)
+///   #1 nfqws2 args
 /// ```
 pub fn ranked_strategy_line(rank: usize, score: &crate::strategy::rank::StrategyScore) -> String {
-    let stars = match score.stars {
-        3 => "★★★",
-        2 => "★★☆",
-        _ => "★☆☆",
-    };
-
-    let star_styled = match score.stars {
-        3 => style(stars).green().bold().to_string(),
-        2 => style(stars).yellow().bold().to_string(),
-        _ => style(stars).red().bold().to_string(),
-    };
-
     let args_str = score.strategy_args.join(" ");
-    format!(
-        "  #{:<2} {} nfqws2 {}",
-        rank,
-        star_styled,
-        style(&args_str).cyan(),
-    )
+    format!("  #{:<2} nfqws2 {}", rank, style(&args_str).cyan(),)
 }
 
 /// Layout manager for scan output. Ensures all text goes through `MultiProgress`

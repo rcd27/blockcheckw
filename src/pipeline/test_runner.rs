@@ -1,4 +1,3 @@
-use std::fmt;
 use std::time::Instant;
 
 use serde::Serialize;
@@ -47,45 +46,6 @@ pub struct StrategyStats {
     pub latency_min_ms: u64,
     pub latency_max_ms: u64,
     pub error_distribution: Vec<(String, usize)>,
-    pub stability: StabilityVerdict,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum StabilityVerdict {
-    Stable,
-    Reliable,
-    Flaky,
-    Unreliable,
-    Broken,
-}
-
-impl fmt::Display for StabilityVerdict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StabilityVerdict::Stable => write!(f, "STABLE"),
-            StabilityVerdict::Reliable => write!(f, "RELIABLE"),
-            StabilityVerdict::Flaky => write!(f, "FLAKY"),
-            StabilityVerdict::Unreliable => write!(f, "UNRELIABLE"),
-            StabilityVerdict::Broken => write!(f, "BROKEN"),
-        }
-    }
-}
-
-impl StabilityVerdict {
-    pub fn from_rate(rate: f64) -> Self {
-        if rate >= 1.0 {
-            StabilityVerdict::Stable
-        } else if rate >= 0.8 {
-            StabilityVerdict::Reliable
-        } else if rate >= 0.5 {
-            StabilityVerdict::Flaky
-        } else if rate > 0.0 {
-            StabilityVerdict::Unreliable
-        } else {
-            StabilityVerdict::Broken
-        }
-    }
 }
 
 /// Parse a strategies file: one strategy per line, comments (#) and empty lines skipped.
@@ -443,7 +403,6 @@ pub fn compute_stats(pass_results: &[PassResult]) -> StrategyStats {
         latency_min_ms: min,
         latency_max_ms: max,
         error_distribution,
-        stability: StabilityVerdict::from_rate(success_rate),
     }
 }
 
@@ -549,7 +508,6 @@ mod tests {
         assert_eq!(stats.failures, 0);
         assert_eq!(stats.errors, 0);
         assert!((stats.success_rate - 1.0).abs() < f64::EPSILON);
-        assert_eq!(stats.stability, StabilityVerdict::Stable);
         assert_eq!(stats.latency_min_ms, 100);
         assert_eq!(stats.latency_max_ms, 200);
         assert_eq!(stats.latency_median_ms, 150);
@@ -583,7 +541,6 @@ mod tests {
         let stats = compute_stats(&results);
         assert_eq!(stats.successes, 2);
         assert_eq!(stats.failures, 1);
-        assert_eq!(stats.stability, StabilityVerdict::Flaky);
         assert_eq!(stats.error_distribution.len(), 1);
         assert_eq!(stats.error_distribution[0].0, "UNAVAILABLE code=28");
     }
@@ -607,7 +564,6 @@ mod tests {
             },
         ];
         let stats = compute_stats(&results);
-        assert_eq!(stats.stability, StabilityVerdict::Broken);
         assert_eq!(stats.latency_median_ms, 0);
     }
 
@@ -617,7 +573,6 @@ mod tests {
         let stats = compute_stats(&results);
         assert_eq!(stats.total_passes, 0);
         assert!((stats.success_rate - 0.0).abs() < f64::EPSILON);
-        assert_eq!(stats.stability, StabilityVerdict::Broken);
     }
 
     #[test]
@@ -641,22 +596,5 @@ mod tests {
     #[test]
     fn test_percentile_empty() {
         assert_eq!(percentile(&[], 50), 0);
-    }
-
-    #[test]
-    fn test_stability_verdict_thresholds() {
-        assert_eq!(StabilityVerdict::from_rate(1.0), StabilityVerdict::Stable);
-        assert_eq!(StabilityVerdict::from_rate(0.8), StabilityVerdict::Reliable);
-        assert_eq!(StabilityVerdict::from_rate(0.79), StabilityVerdict::Flaky);
-        assert_eq!(StabilityVerdict::from_rate(0.5), StabilityVerdict::Flaky);
-        assert_eq!(
-            StabilityVerdict::from_rate(0.49),
-            StabilityVerdict::Unreliable
-        );
-        assert_eq!(
-            StabilityVerdict::from_rate(0.01),
-            StabilityVerdict::Unreliable
-        );
-        assert_eq!(StabilityVerdict::from_rate(0.0), StabilityVerdict::Broken);
     }
 }

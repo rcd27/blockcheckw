@@ -4,7 +4,7 @@ use console::style;
 use serde::Serialize;
 
 use crate::config::Protocol;
-use crate::pipeline::test_runner::{StabilityVerdict, StrategyTestResult};
+use crate::pipeline::test_runner::StrategyTestResult;
 use crate::ui;
 
 /// Render full terminal report for test results.
@@ -67,19 +67,16 @@ pub fn render_terminal_report(
         }
 
         let stats = &result.stats;
-        let rate_str = format!("{:.1}%", stats.success_rate * 100.0);
-        let rate_styled = match stats.stability {
-            StabilityVerdict::Stable | StabilityVerdict::Reliable => {
-                style(rate_str).green().bold().to_string()
-            }
-            StabilityVerdict::Flaky => style(rate_str).yellow().bold().to_string(),
-            _ => style(rate_str).red().bold().to_string(),
+        let rate_str = format!("{}/{} OK", stats.successes, stats.total_passes);
+        let rate_styled = if stats.success_rate >= 1.0 {
+            style(rate_str).green().bold().to_string()
+        } else if stats.success_rate >= 0.5 {
+            style(rate_str).yellow().bold().to_string()
+        } else {
+            style(rate_str).red().bold().to_string()
         };
 
-        screen.println(&format!(
-            "\n  Passes:   {}/{} SUCCESS ({})",
-            stats.successes, stats.total_passes, rate_styled,
-        ));
+        screen.println(&format!("\n  Passes:   {}", rate_styled));
 
         if stats.successes > 0 {
             screen.println(&format!(
@@ -91,15 +88,6 @@ pub fn render_terminal_report(
                 stats.latency_max_ms,
             ));
         }
-
-        let verdict_styled = match stats.stability {
-            StabilityVerdict::Stable => style(stats.stability.to_string()).green().bold(),
-            StabilityVerdict::Reliable => style(stats.stability.to_string()).green(),
-            StabilityVerdict::Flaky => style(stats.stability.to_string()).yellow().bold(),
-            StabilityVerdict::Unreliable => style(stats.stability.to_string()).red(),
-            StabilityVerdict::Broken => style(stats.stability.to_string()).red().bold(),
-        };
-        screen.println(&format!("  Verdict:  {verdict_styled}"));
 
         if !stats.error_distribution.is_empty() && stats.successes < stats.total_passes {
             let errors: Vec<String> = stats
@@ -122,8 +110,8 @@ fn render_comparison_table(results: &[StrategyTestResult], screen: &ui::ScanScre
     screen.println(&format!("\n{}", ui::section("Comparison")));
 
     screen.println(&format!(
-        "  {:<4} {:<40} {:>8} {:>11} {:>8} {:>8}",
-        "#", "Strategy (short)", "Success", "Verdict", "Median", "p95"
+        "  {:<4} {:<40} {:>8} {:>8} {:>8}",
+        "#", "Strategy (short)", "Success", "Median", "p95"
     ));
 
     for (idx, result) in results.iter().enumerate() {
@@ -135,8 +123,7 @@ fn render_comparison_table(results: &[StrategyTestResult], screen: &ui::ScanScre
             truncate_strategy(&result.strategy_args.join(" "), 38)
         };
 
-        let rate = format!("{:.1}%", result.stats.success_rate * 100.0);
-        let verdict = result.stats.stability.to_string();
+        let rate = format!("{}/{}", result.stats.successes, result.stats.total_passes);
         let median = if result.stats.successes > 0 {
             format!("{}ms", result.stats.latency_median_ms)
         } else {
@@ -149,11 +136,10 @@ fn render_comparison_table(results: &[StrategyTestResult], screen: &ui::ScanScre
         };
 
         screen.println(&format!(
-            "  {:<4} {:<40} {:>8} {:>11} {:>8} {:>8}",
+            "  {:<4} {:<40} {:>8} {:>8} {:>8}",
             idx + 1,
             label,
             rate,
-            verdict,
             median,
             p95,
         ));
@@ -218,7 +204,6 @@ struct JsonMeta {
 struct JsonStrategy {
     args: String,
     success_rate: f64,
-    stability: String,
     latency: JsonLatency,
     error_distribution: std::collections::HashMap<String, usize>,
     passes: Vec<JsonPass>,
@@ -267,7 +252,6 @@ pub fn write_json(
                 result.strategy_args.join(" ")
             },
             success_rate: result.stats.success_rate,
-            stability: result.stats.stability.to_string().to_lowercase(),
             latency: JsonLatency {
                 median_ms: result.stats.latency_median_ms,
                 p95_ms: result.stats.latency_p95_ms,
@@ -357,7 +341,7 @@ fn days_to_date(days_since_epoch: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::test_runner::{PassResult, StrategyStats, StrategyTestResult};
+    use crate::pipeline::test_runner::{PassResult, StrategyStats};
 
     fn make_test_result(
         args: Vec<String>,
@@ -392,7 +376,6 @@ mod tests {
                 latency_min_ms: 100,
                 latency_max_ms: 300,
                 error_distribution: vec![],
-                stability: StabilityVerdict::from_rate(success_rate),
             },
         }
     }

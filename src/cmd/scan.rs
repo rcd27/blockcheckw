@@ -367,7 +367,7 @@ pub async fn run_scan(
 
 // ── Report formatting (pure) ────────────────────────────────────────────────
 
-/// Format ranked report with scores and stars. Returns (content, strategy_count).
+/// Format ranked report (sorted by structural simplicity). Returns (content, strategy_count).
 fn format_ranked_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
     use std::fmt::Write as _;
 
@@ -385,19 +385,10 @@ fn format_ranked_report(domain: &str, summary: &[ProtocolSummary]) -> (String, u
         writeln!(buf, "# {} — {} strategies", entry.protocol, ranked.len()).unwrap();
 
         for (i, score) in ranked.iter().enumerate() {
-            let stars = match score.stars {
-                3 => "***",
-                2 => "** ",
-                _ => "*  ",
-            };
             writeln!(
                 buf,
-                "#{:<4} {} [score={:>3} perf={:>3} simple={:>3}] nfqws2 {}",
+                "#{:<4} nfqws2 {}",
                 i + 1,
-                stars,
-                score.total,
-                score.performance,
-                score.simplicity,
                 score.strategy_args.join(" "),
             )
             .unwrap();

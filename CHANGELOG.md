@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/rcd27/blockcheckw/compare/v0.3.2...v0.4.0) (2026-03-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ux:** отказ от интерпретации/ранжирования стратегий
+
+### Bug Fixes
+
+* **ux:** ещё одна попытка написать ранжирование для страт, но это туфта ([c61e6f8](https://github.com/rcd27/blockcheckw/commit/c61e6f8f36c28d5cba739aab4d0dd8dbc0d9640c))
+* **ux:** отказ от интерпретации/ранжирования стратегий ([11eb4d9](https://github.com/rcd27/blockcheckw/commit/11eb4d92162f5b139bb81be462018fdb55a4ffd5))
+
 ## [0.3.2](https://github.com/rcd27/blockcheckw/compare/v0.3.1...v0.3.2) (2026-03-21)
 
 

@@ -302,6 +302,36 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
         stopped_service: None,
     }));
 
+    // Panic hook: restore zapret2 synchronously if we crash.
+    // We can't use async here, so we shell out directly.
+    let panic_state = state.clone();
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Best-effort synchronous cleanup
+        if let Ok(guard) = panic_state.try_lock() {
+            // Drop nft table
+            let _ = std::process::Command::new("nft")
+                .args(["delete", "table", "inet", &guard.nft_table])
+                .status();
+            // Restart zapret2
+            if let Some(ref mgr) = guard.stopped_service {
+                let _ = match mgr {
+                    ServiceManager::Systemd { unit } => std::process::Command::new("systemctl")
+                        .args(["start", unit])
+                        .status(),
+                    ServiceManager::InitD { script } => {
+                        std::process::Command::new(script).arg("start").status()
+                    }
+                };
+                eprintln!(
+                    "\n  {} zapret2 restored after panic",
+                    style("OK").green().bold(),
+                );
+            }
+        }
+        prev_hook(info);
+    }));
+
     let handler_state = state.clone();
     tokio::spawn(async move {
         // First Ctrl+C: graceful cleanup

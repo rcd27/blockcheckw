@@ -138,6 +138,10 @@ pub async fn run_scan(
             "{}",
             style("All protocols are available without bypass. Nothing to scan.").green()
         ));
+        // Restore zapret2 before early return
+        if let Some(ref mgr) = stopped_service {
+            restore_service(mgr).await;
+        }
         return;
     }
 

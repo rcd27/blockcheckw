@@ -9,9 +9,10 @@ use blockcheckw::network::dns::DnsSpoofResult;
 use blockcheckw::network::{dns, isp};
 use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::runner::run_parallel;
+use blockcheckw::pipeline::scan_report::{ScanProtocolResult, ScanReport};
 use blockcheckw::pipeline::test_report;
 use blockcheckw::pipeline::worker_task::HttpTestMode;
-use blockcheckw::strategy::{generator, rank};
+use blockcheckw::strategy::generator;
 use blockcheckw::ui;
 
 use super::{
@@ -274,14 +275,13 @@ pub async fn run_scan(
         }
     }
 
-    // Blocked protocols results (ranked)
+    // Blocked protocols results
     for entry in &summary {
         let proto = entry.protocol.to_string();
         if entry.strategies.is_empty() {
             screen.println(&ui::summary_no_strategies(&proto));
         } else {
-            let ranked = rank::rank_strategies(&entry.strategies);
-            let total = ranked.len();
+            let total = entry.strategies.len();
             let show = if top_n == 0 || top_n >= total {
                 total
             } else {
@@ -291,8 +291,8 @@ pub async fn run_scan(
             screen.println(&ui::summary_found(&proto, total));
 
             screen.println(&ui::top_strategies_header(&proto, show, total));
-            for (i, score) in ranked.iter().take(show).enumerate() {
-                screen.println(&ui::ranked_strategy_line(i + 1, score));
+            for (i, args) in entry.strategies.iter().take(show).enumerate() {
+                screen.println(&ui::numbered_strategy_line(i + 1, args));
             }
 
             if top_n > 0 && total > top_n {
@@ -340,17 +340,17 @@ pub async fn run_scan(
         )),
     }
 
-    let (content, count) = format_ranked_report(domain, &summary);
-    let ranked_path = format!("{now}_report.txt");
-    match write_report(&ranked_path, &content) {
+    let (content, count) = format_scan_report(domain, &summary);
+    let scan_path = format!("{now}_scan.json");
+    match write_report(&scan_path, &content) {
         Ok(()) => screen.println(&format!(
-            "  {} ranked report: {} strategies → {}",
+            "  {} scan report: {} strategies → {}",
             style("OK").green().bold(),
             count,
-            style(&ranked_path).cyan(),
+            style(&scan_path).cyan(),
         )),
         Err(e) => screen.println(&format!(
-            "  {} failed to write ranked report: {e}",
+            "  {} failed to write scan report: {e}",
             style("ERROR:").red().bold(),
         )),
     }
@@ -376,36 +376,39 @@ pub async fn run_scan(
 
 // ── Report formatting (pure) ────────────────────────────────────────────────
 
-/// Format ranked report (sorted by structural simplicity). Returns (content, strategy_count).
-fn format_ranked_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
-    use std::fmt::Write as _;
-
-    let mut buf = String::new();
+/// Format scan report as JSON. Returns (content, strategy_count).
+fn format_scan_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
+    let timestamp = test_report::chrono_like_timestamp();
     let mut total = 0;
 
-    writeln!(buf, "# blockcheckw ranked report for {domain}").unwrap();
+    let protocols: Vec<ScanProtocolResult> = summary
+        .iter()
+        .filter(|entry| !entry.strategies.is_empty())
+        .map(|entry| {
+            let strategies: Vec<String> = entry
+                .strategies
+                .iter()
+                .map(|args| format!("nfqws2 {}", args.join(" ")))
+                .collect();
+            total += strategies.len();
+            ScanProtocolResult {
+                protocol: entry.protocol.to_string(),
+                total: strategies.len(),
+                strategies,
+            }
+        })
+        .collect();
 
-    for entry in summary {
-        if entry.strategies.is_empty() {
-            continue;
-        }
-        let ranked = rank::rank_strategies(&entry.strategies);
-        writeln!(buf).unwrap();
-        writeln!(buf, "# {} — {} strategies", entry.protocol, ranked.len()).unwrap();
+    let report = ScanReport {
+        domain: domain.to_string(),
+        timestamp,
+        total,
+        working: total,
+        protocols,
+    };
 
-        for (i, score) in ranked.iter().enumerate() {
-            writeln!(
-                buf,
-                "#{:<4} nfqws2 {}",
-                i + 1,
-                score.strategy_args.join(" "),
-            )
-            .unwrap();
-            total += 1;
-        }
-    }
-
-    (buf, total)
+    let json = serde_json::to_string_pretty(&report).unwrap();
+    (json, total)
 }
 
 /// Format vanilla blockcheck2-compatible report. Returns (content, strategy_count).
@@ -433,7 +436,7 @@ fn format_vanilla_report(domain: &str, summary: &[ProtocolSummary]) -> (String, 
     (buf, total)
 }
 
-/// Format strategies file (ranked, args only). Returns (content, strategy_count).
+/// Format strategies file (args only). Returns (content, strategy_count).
 fn format_strategies_file(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
     use std::fmt::Write as _;
 
@@ -448,14 +451,19 @@ fn format_strategies_file(domain: &str, summary: &[ProtocolSummary]) -> (String,
         if entry.strategies.is_empty() {
             continue;
         }
-        let ranked = rank::rank_strategies(&entry.strategies);
         writeln!(buf).unwrap();
-        writeln!(buf, "# {} — {} strategies", entry.protocol, ranked.len()).unwrap();
+        writeln!(
+            buf,
+            "# {} — {} strategies",
+            entry.protocol,
+            entry.strategies.len()
+        )
+        .unwrap();
 
-        for score in &ranked {
-            writeln!(buf, "{}", score.strategy_args.join(" ")).unwrap();
+        for args in &entry.strategies {
+            writeln!(buf, "{}", args.join(" ")).unwrap();
         }
-        total += ranked.len();
+        total += entry.strategies.len();
     }
 
     (buf, total)

@@ -224,13 +224,13 @@ pub fn top_strategies_header(protocol: &str, count: usize, total: usize) -> Stri
     )
 }
 
-/// Ranked strategy line (no subjective scoring).
+/// Numbered strategy line for scan summary.
 /// ```text
 ///   #1 nfqws2 args
 /// ```
-pub fn ranked_strategy_line(rank: usize, score: &crate::strategy::rank::StrategyScore) -> String {
-    let args_str = score.strategy_args.join(" ");
-    format!("  #{:<2} nfqws2 {}", rank, style(&args_str).cyan(),)
+pub fn numbered_strategy_line(index: usize, args: &[String]) -> String {
+    let args_str = args.join(" ");
+    format!("  #{:<2} nfqws2 {}", index, style(&args_str).cyan())
 }
 
 /// Layout manager for scan output. Ensures all text goes through `MultiProgress`

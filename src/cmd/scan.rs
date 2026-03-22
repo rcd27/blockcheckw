@@ -16,7 +16,7 @@ use blockcheckw::ui;
 
 use super::{
     chrono_local_prefix, handle_bypass_conflicts, resolve_bypass_conflicts_if_any, restore_service,
-    set_stopped_service, spawn_cleanup_handler,
+    set_nft_backup, set_stopped_service, spawn_cleanup_handler,
 };
 
 /// Per-protocol scan results.
@@ -111,13 +111,18 @@ pub async fn run_scan(
     };
 
     // 1b. Check for conflicting DPI bypass processes
-    let stopped_service = match handle_bypass_conflicts(&config.nft_table).await {
-        Ok(svc) => svc,
+    let stopped = match handle_bypass_conflicts(&config.nft_table).await {
+        Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
-    if let Some(ref mgr) = stopped_service {
-        set_stopped_service(&cleanup, mgr.clone()).await;
-    }
+    let (stopped_service, nft_backup) = match stopped {
+        Some((mgr, backup)) => {
+            set_stopped_service(&cleanup, mgr.clone()).await;
+            set_nft_backup(&cleanup, backup.clone()).await;
+            (Some(mgr), backup)
+        }
+        None => (None, None),
+    };
 
     // 2. Baseline per protocol
     screen.newline();
@@ -140,7 +145,7 @@ pub async fn run_scan(
         ));
         // Restore zapret2 before early return
         if let Some(ref mgr) = stopped_service {
-            restore_service(mgr).await;
+            restore_service(mgr, &nft_backup).await;
         }
         return;
     }
@@ -365,7 +370,7 @@ pub async fn run_scan(
 
     // Restore zapret2 if we stopped it
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr).await;
+        restore_service(mgr, &nft_backup).await;
     }
 }
 

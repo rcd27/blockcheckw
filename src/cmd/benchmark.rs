@@ -19,9 +19,13 @@ pub async fn run_benchmark_cmd(
     };
 
     let config = CoreConfig::default();
-    let stopped_service = match handle_bypass_conflicts(&config.nft_table).await {
-        Ok(svc) => svc,
+    let stopped = match handle_bypass_conflicts(&config.nft_table).await {
+        Ok(result) => result,
         Err(()) => std::process::exit(1),
+    };
+    let (stopped_service, nft_backup) = match stopped {
+        Some((mgr, backup)) => (Some(mgr), backup),
+        None => (None, None),
     };
 
     let max = max_workers
@@ -32,6 +36,6 @@ pub async fn run_benchmark_cmd(
 
     // Restore zapret2 if we stopped it
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr).await;
+        restore_service(mgr, &nft_backup).await;
     }
 }

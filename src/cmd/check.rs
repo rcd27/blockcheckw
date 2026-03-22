@@ -8,7 +8,10 @@ use blockcheckw::pipeline::check;
 use blockcheckw::strategy::generator;
 use blockcheckw::ui;
 
-use super::{handle_bypass_conflicts, restore_service, set_stopped_service, spawn_cleanup_handler};
+use super::{
+    handle_bypass_conflicts, restore_service, set_nft_backup, set_stopped_service,
+    spawn_cleanup_handler,
+};
 
 pub async fn run_check_cmd(
     domain: &str,
@@ -86,13 +89,18 @@ pub async fn run_check_cmd(
     };
 
     // Check for conflicts
-    let stopped_service = match handle_bypass_conflicts(&config.nft_table).await {
-        Ok(svc) => svc,
+    let stopped = match handle_bypass_conflicts(&config.nft_table).await {
+        Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
-    if let Some(ref mgr) = stopped_service {
-        set_stopped_service(&cleanup, mgr.clone()).await;
-    }
+    let (stopped_service, nft_backup) = match stopped {
+        Some((mgr, backup)) => {
+            set_stopped_service(&cleanup, mgr.clone()).await;
+            set_nft_backup(&cleanup, backup.clone()).await;
+            (Some(mgr), backup)
+        }
+        None => (None, None),
+    };
 
     // Run check
     screen.newline();
@@ -190,6 +198,6 @@ pub async fn run_check_cmd(
 
     // Restore zapret2 if we stopped it
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr).await;
+        restore_service(mgr, &nft_backup).await;
     }
 }

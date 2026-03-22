@@ -154,10 +154,12 @@ pub async fn detect_bypass_conflicts(own_table: &str) -> BypassConflicts {
     conflicts
 }
 
-/// Display conflicts and handle them. Returns `Some(ServiceManager)` if a service was stopped
-/// (caller must restart it on graceful exit), or `None` if no service was involved.
-/// Returns `Err(())` if user aborted.
-pub async fn handle_bypass_conflicts(own_table: &str) -> Result<Option<ServiceManager>, ()> {
+/// Display conflicts and handle them. Returns `Some((ServiceManager, nft_ruleset_backup))` if a
+/// service was stopped (caller must restart it on graceful exit), or `None` if no service was
+/// involved. Returns `Err(())` if user aborted.
+pub async fn handle_bypass_conflicts(
+    own_table: &str,
+) -> Result<Option<(ServiceManager, Option<String>)>, ()> {
     let conflicts = detect_bypass_conflicts(own_table).await;
     if conflicts.is_empty() {
         return Ok(None);
@@ -194,6 +196,12 @@ pub async fn handle_bypass_conflicts(own_table: &str) -> Result<Option<ServiceMa
             return Err(());
         }
 
+        // Backup entire nft ruleset BEFORE stopping zapret2 (stop drops tables)
+        let nft_backup = backup_nft_ruleset().await;
+        if nft_backup.is_some() {
+            eprintln!("  {} nft ruleset backed up", style("OK").green().bold(),);
+        }
+
         if stop_service(mgr).await {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             eprintln!("  {} zapret2 stopped via {mgr}", style("OK").green().bold());
@@ -201,7 +209,7 @@ pub async fn handle_bypass_conflicts(own_table: &str) -> Result<Option<ServiceMa
                 "  {} will restart automatically when blockcheckw finishes",
                 style("→").dim(),
             );
-            Ok(Some(mgr.clone()))
+            Ok(Some((mgr.clone(), nft_backup)))
         } else {
             eprintln!(
                 "  {} failed to stop zapret2 via {mgr}",
@@ -283,6 +291,79 @@ fn prompt_yes_no() -> bool {
     input.is_empty() || input == "y" || input == "yes"
 }
 
+// ── nft ruleset backup/restore ────────────────────────────────────────────────
+
+/// Backup the entire nft ruleset before stopping zapret2.
+pub async fn backup_nft_ruleset() -> Option<String> {
+    use blockcheckw::system::process::run_process;
+
+    if let Ok(result) = run_process(&["nft", "list", "ruleset"], 5_000).await {
+        if result.exit_code == 0 && !result.stdout.is_empty() {
+            return Some(result.stdout);
+        }
+    }
+    None
+}
+
+/// Restore entire nft ruleset from backup after zapret2 start.
+/// Flushes whatever zapret2 start created, then loads the saved snapshot.
+pub async fn restore_nft_ruleset(dump: &str) {
+    // Flush current ruleset, then load backup
+    let _ = std::process::Command::new("nft")
+        .args(["flush", "ruleset"])
+        .status();
+
+    let status = nft_load_stdin(dump);
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!(
+                "  {} nft ruleset restored from backup",
+                style("OK").green().bold(),
+            );
+        }
+        _ => {
+            eprintln!("  {}failed to restore nft ruleset from backup", WARN);
+        }
+    }
+}
+
+/// Synchronous restore for panic hook (can't use async).
+fn restore_nft_ruleset_sync(dump: &str) {
+    let _ = std::process::Command::new("nft")
+        .args(["flush", "ruleset"])
+        .status();
+
+    match nft_load_stdin(dump) {
+        Ok(s) if s.success() => {
+            eprintln!(
+                "  {} nft ruleset restored after panic",
+                style("OK").green().bold(),
+            );
+        }
+        _ => {
+            eprintln!("  {}failed to restore nft ruleset after panic", WARN);
+        }
+    }
+}
+
+/// Pipe `dump` into `nft -f -`.
+fn nft_load_stdin(dump: &str) -> std::io::Result<std::process::ExitStatus> {
+    use std::io::Write;
+
+    let mut child = std::process::Command::new("nft")
+        .arg("-f")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    if let Some(ref mut stdin) = child.stdin {
+        stdin.write_all(dump.as_bytes())?;
+    }
+    child.wait()
+}
+
 // ── Shared cleanup state ────────────────────────────────────────────────────
 
 /// Shared state for Ctrl+C handler: nft table to drop + optional service to restart.
@@ -291,6 +372,8 @@ pub type CleanupState = Arc<Mutex<CleanupInfo>>;
 pub struct CleanupInfo {
     pub nft_table: String,
     pub stopped_service: Option<ServiceManager>,
+    /// Full nft ruleset backup taken before we stopped zapret2.
+    pub nft_backup: Option<String>,
 }
 
 /// Create shared cleanup state and spawn Ctrl+C handler that will:
@@ -300,6 +383,7 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
     let state = Arc::new(Mutex::new(CleanupInfo {
         nft_table: nft_table.to_string(),
         stopped_service: None,
+        nft_backup: None,
     }));
 
     // Panic hook: restore zapret2 synchronously if we crash.
@@ -309,7 +393,7 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
     std::panic::set_hook(Box::new(move |info| {
         // Best-effort synchronous cleanup
         if let Ok(guard) = panic_state.try_lock() {
-            // Drop nft table
+            // Drop our nft table
             let _ = std::process::Command::new("nft")
                 .args(["delete", "table", "inet", &guard.nft_table])
                 .status();
@@ -327,6 +411,10 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
                     "\n  {} zapret2 restored after panic",
                     style("OK").green().bold(),
                 );
+            }
+            // Restore nft ruleset from backup
+            if let Some(ref dump) = guard.nft_backup {
+                restore_nft_ruleset_sync(dump);
             }
         }
         prev_hook(info);
@@ -371,6 +459,12 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
                     );
                 }
             }
+            // Restore user's nft ruleset from backup
+            if let Some(ref dump) = info.nft_backup {
+                // Small delay to let zapret2 finish creating its tables
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                restore_nft_ruleset(dump).await;
+            }
             std::process::exit(130);
         }
     });
@@ -383,8 +477,13 @@ pub async fn set_stopped_service(state: &CleanupState, mgr: ServiceManager) {
     state.lock().await.stopped_service = Some(mgr);
 }
 
-/// Restart zapret2 service and print status. Call at graceful exit.
-pub async fn restore_service(mgr: &ServiceManager) {
+/// Record nft ruleset backup, so cleanup handlers can restore it.
+pub async fn set_nft_backup(state: &CleanupState, backup: Option<String>) {
+    state.lock().await.nft_backup = backup;
+}
+
+/// Restart zapret2 service, then restore nft ruleset from backup. Call at graceful exit.
+pub async fn restore_service(mgr: &ServiceManager, nft_backup: &Option<String>) {
     eprintln!();
     eprintln!("{}", style("=== Restoring zapret2 ===").bold().cyan());
     if start_service(mgr).await {
@@ -397,6 +496,11 @@ pub async fn restore_service(mgr: &ServiceManager) {
             "  {}failed to restart zapret2 via {mgr}, please start manually",
             WARN,
         );
+    }
+    if let Some(ref dump) = nft_backup {
+        // Small delay to let zapret2 finish creating its tables
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        restore_nft_ruleset(dump).await;
     }
 }
 

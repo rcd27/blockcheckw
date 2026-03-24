@@ -22,3 +22,28 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --lib
       - run: cargo clippy -- -D warnings
+
+  integration:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Load kernel modules
+        run: |
+          sudo modprobe nfnetlink_queue
+          sudo modprobe nf_tables
+          sudo modprobe nft_queue
+
+      - name: Build integration image
+        run: docker build -f docker/integration.Dockerfile -t blockcheckw-integration .
+
+      - name: Run e2e_infra tests
+        run: docker run --rm --privileged blockcheckw-integration --test e2e_infra -- --nocapture
+
+      - name: Run parallel_benchmark tests
+        continue-on-error: true
+        run: docker run --rm --privileged blockcheckw-integration --test parallel_benchmark -- --nocapture

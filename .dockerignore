@@ -1,0 +1,10 @@
+target/
+.git/
+docs/
+*.json
+*.txt
+.github/
+.gitmodules
+.gitignore
+CLAUDE.md
+README.md

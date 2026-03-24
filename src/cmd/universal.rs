@@ -319,10 +319,7 @@ pub async fn run_universal(
 
     let json = serde_json::to_string_pretty(&report).unwrap();
 
-    // JSON to stdout (for pipe support)
-    println!("{json}");
-    screen.newline();
-
+    // Save artifacts BEFORE writing to stdout — stdout may break (pipe closed)
     let path = output.map(String::from).unwrap_or_else(|| {
         let prefix = super::chrono_local_prefix();
         format!("{prefix}_universal.json")
@@ -379,6 +376,10 @@ pub async fn run_universal(
             }
         }
     }
+
+    // JSON to stdout (for pipe support) — after artifacts are saved
+    super::print_stdout_graceful(&json);
+    screen.newline();
 
     // Hint for next step
     let has_strategies = results.iter().any(|r| !r.strategies.is_empty());

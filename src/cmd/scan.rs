@@ -322,12 +322,7 @@ pub async fn run_scan(
         }
     }
 
-    // 6. JSON to stdout (for pipe support)
-    let (scan_json, _) = format_scan_report(domain, &summary);
-    println!("{scan_json}");
-    screen.newline();
-
-    // 7. Write reports (always)
+    // 6. Write reports (always) — before stdout, which may break on pipe
     let now = chrono_local_prefix();
 
     let (content, count) = format_vanilla_report(domain, &summary);
@@ -359,6 +354,11 @@ pub async fn run_scan(
             style("ERROR:").red().bold(),
         )),
     }
+
+    // 7. JSON to stdout (for pipe support) — after artifacts are saved
+    let (scan_json, _) = format_scan_report(domain, &summary);
+    super::print_stdout_graceful(&scan_json);
+    screen.newline();
 
     if count > 0 {
         screen.println(&format!(

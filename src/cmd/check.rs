@@ -132,10 +132,8 @@ pub async fn run_check_cmd(
         report.elapsed_secs,
     ));
 
-    // Output JSON — stdout (for pipe support) + file
+    // Output JSON — file first (stdout may break on pipe), then stdout
     let json = serde_json::to_string_pretty(&report).unwrap();
-    println!("{json}");
-    screen.newline();
 
     let path = output.map(String::from).unwrap_or_else(|| {
         let prefix = super::chrono_local_prefix();
@@ -159,6 +157,9 @@ pub async fn run_check_cmd(
             ));
         }
     }
+
+    super::print_stdout_graceful(&json);
+    screen.newline();
 
     // Restore zapret2 if we stopped it
     if let Some(ref mgr) = stopped_service {

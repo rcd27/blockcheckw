@@ -12,6 +12,20 @@ use tokio::sync::Mutex;
 
 use blockcheckw::ui::WARN;
 
+/// Write JSON to stdout, silently ignoring BrokenPipe (downstream closed).
+pub fn print_stdout_graceful(data: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match out
+        .write_all(data.as_bytes())
+        .and_then(|_| out.write_all(b"\n"))
+    {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(e) => eprintln!("  stdout write error: {e}"),
+    }
+}
+
 /// Global flag: auto-confirm all prompts (set by --yes / -y).
 static AUTO_YES: AtomicBool = AtomicBool::new(false);
 

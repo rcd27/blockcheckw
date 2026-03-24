@@ -8,7 +8,9 @@ pub static CROSS: Emoji<'_, '_> = Emoji("✗ ", "x ");
 pub static ARROW: Emoji<'_, '_> = Emoji("→ ", "-> ");
 pub static WARN: Emoji<'_, '_> = Emoji("⚠ ", "! ");
 
-/// Section header: `=== title ===` in bold cyan
+// ── Free helpers (format strings, no I/O) ────────────────────────────────────
+
+/// Section header string: `=== title ===` in bold cyan (no I/O).
 pub fn section(title: &str) -> String {
     format!("{}", style(format!("=== {title} ===")).bold().cyan())
 }
@@ -233,10 +235,18 @@ pub fn numbered_strategy_line(index: usize, args: &[String]) -> String {
     format!("  #{:<2} nfqws2 {}", index, style(&args_str).cyan())
 }
 
-/// Layout manager for scan output. Ensures all text goes through `MultiProgress`
-/// so progress bars and vanilla output never interleave.
-/// When no TTY is detected, falls back to plain println.
-pub struct ScanScreen {
+// ── Console: single output sink for the entire application ───────────────────
+
+/// Unified output controller. All user-facing messages go through `Console`,
+/// ensuring progress bars and text never interleave.
+///
+/// Created once in `main()` after privilege elevation. Passed as `&Console`
+/// (read-only output) or `&mut Console` (progress bar / info bar mutations)
+/// throughout the call chain.
+///
+/// Pre-init code (`require_root`, `acquire_instance_lock`) and panic hooks
+/// are the only places that may `eprintln!` directly.
+pub struct Console {
     multi: MultiProgress,
     divider_bar: Option<ProgressBar>,
     pb: Option<ProgressBar>,
@@ -247,13 +257,13 @@ pub struct ScanScreen {
     phase_total: u64,
 }
 
-impl Default for ScanScreen {
+impl Default for Console {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ScanScreen {
+impl Console {
     pub fn new() -> Self {
         let is_tty = Term::stderr().is_term();
         let multi = if is_tty {
@@ -272,7 +282,9 @@ impl ScanScreen {
         }
     }
 
-    /// Print a line above the progress bar (or just to stdout if no bar active).
+    // ── Basic output ─────────────────────────────────────────────────────
+
+    /// Print a line above the progress bar (or to stderr if no TTY).
     pub fn println(&self, msg: &str) {
         if self.is_tty {
             let _ = self.multi.println(msg);
@@ -289,6 +301,42 @@ impl ScanScreen {
             eprintln!();
         }
     }
+
+    // ── Semantic output (convenience) ────────────────────────────────────
+
+    /// Section header: `=== title ===` in bold cyan.
+    pub fn section(&self, title: &str) {
+        self.println(&format!(
+            "{}",
+            style(format!("=== {title} ===")).bold().cyan()
+        ));
+    }
+
+    /// Success: `  ✓ OK msg` in green.
+    pub fn ok(&self, msg: &str) {
+        self.println(&format!(
+            "  {} {}",
+            style("OK").green().bold(),
+            style(msg).green()
+        ));
+    }
+
+    /// Warning: `  ⚠ msg` in yellow.
+    pub fn warn(&self, msg: &str) {
+        self.println(&format!("  {}{}", WARN, style(msg).yellow()));
+    }
+
+    /// Error: `  ERROR: msg` in red bold.
+    pub fn error(&self, msg: &str) {
+        self.println(&format!("  {} {msg}", style("ERROR:").red().bold()));
+    }
+
+    /// Dim info line (indented).
+    pub fn info(&self, msg: &str) {
+        self.println(&format!("  {}", style(msg).dim()));
+    }
+
+    // ── Sticky footer (ISP, DNS, tally counters) ─────────────────────────
 
     /// Add a fixed info line that stays below the progress bar.
     /// Multiple lines can be added (ISP, DNS, etc).
@@ -334,6 +382,8 @@ impl ScanScreen {
             bar.finish_and_clear();
         }
     }
+
+    // ── Progress bar ─────────────────────────────────────────────────────
 
     /// Create divider + progress bar and add both to `MultiProgress`.
     /// If an info_bar exists, inserts divider and pb before it so info stays at the bottom.
@@ -423,7 +473,7 @@ impl ScanScreen {
         &self.multi
     }
 
-    /// Access the progress bar (for `run_parallel`). Panics if not started.
+    /// Access the progress bar (for `run_parallel`).
     pub fn pb(&self) -> &ProgressBar {
         self.pb.as_ref().expect("progress bar not started")
     }

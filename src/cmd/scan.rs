@@ -8,9 +8,8 @@ use blockcheckw::firewall::nftables;
 use blockcheckw::network::dns::DnsSpoofResult;
 use blockcheckw::network::{dns, isp};
 use blockcheckw::pipeline::baseline;
+use blockcheckw::pipeline::report::{self, ProtocolSummary};
 use blockcheckw::pipeline::runner::{run_parallel, RunParams};
-use blockcheckw::pipeline::scan_report::{ScanProtocolResult, ScanReport, StrategyEntry};
-use blockcheckw::pipeline::test_report;
 use blockcheckw::pipeline::worker_task::HttpTestMode;
 use blockcheckw::strategy::generator;
 use blockcheckw::ui;
@@ -19,12 +18,6 @@ use super::{
     chrono_local_prefix, handle_bypass_conflicts, resolve_bypass_conflicts_if_any, restore_service,
     set_nft_backup, set_stopped_service, spawn_cleanup_handler,
 };
-
-/// Per-protocol scan results.
-struct ProtocolSummary {
-    protocol: Protocol,
-    strategies: Vec<Vec<String>>,
-}
 
 pub struct ScanParams<'a> {
     pub workers: usize,
@@ -55,7 +48,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
 
     let cleanup = spawn_cleanup_handler(&config.nft_table);
 
-    let mut screen = ui::ScanScreen::new();
+    let mut screen = ui::Console::new();
 
     // 0. ISP info
     if let Some(info) = isp::detect_ip_info().await {
@@ -117,13 +110,13 @@ pub async fn run_scan(params: ScanParams<'_>) {
             resolution.ips
         }
         Err(e) => {
-            eprintln!("{} {e}", style("ERROR:").red().bold());
+            screen.error(&e.to_string());
             std::process::exit(1);
         }
     };
 
     // 1b. Check for conflicting DPI bypass processes
-    let stopped = match handle_bypass_conflicts(&config.nft_table).await {
+    let stopped = match handle_bypass_conflicts(&config.nft_table, &screen).await {
         Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
@@ -157,7 +150,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
         ));
         // Restore zapret2 before early return
         if let Some(ref mgr) = stopped_service {
-            restore_service(mgr, &nft_backup).await;
+            restore_service(mgr, &nft_backup, &screen).await;
         }
         return;
     }
@@ -318,7 +311,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
 
     // 5. Write strategies to file
     if let Some(path) = output {
-        let (content, count) = format_strategies_file(domain, &summary);
+        let (content, count) = report::build_strategies_file(domain, &summary);
         match write_report(path, &content) {
             Ok(()) => screen.println(&format!(
                 "\n  {} {} strategies written to {}",
@@ -337,7 +330,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
     // 6. Write reports (always) — before stdout, which may break on pipe
     let now = chrono_local_prefix();
 
-    let (content, count) = format_vanilla_report(domain, &summary);
+    let (content, count) = report::build_vanilla_report(domain, &summary);
     let vanilla_path = format!("{now}_report_vanilla.txt");
     match write_report(&vanilla_path, &content) {
         Ok(()) => screen.println(&format!(
@@ -352,7 +345,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
         )),
     }
 
-    let (content, count) = format_scan_report(domain, &summary);
+    let (content, count) = report::build_scan_report(domain, &summary);
     let scan_path = format!("{now}_scan.json");
     match write_report(&scan_path, &content) {
         Ok(()) => screen.println(&format!(
@@ -368,8 +361,8 @@ pub async fn run_scan(params: ScanParams<'_>) {
     }
 
     // 7. JSON to stdout (for pipe support) — after artifacts are saved
-    let (scan_json, _) = format_scan_report(domain, &summary);
-    super::print_stdout_graceful(&scan_json);
+    let (scan_json, _) = report::build_scan_report(domain, &summary);
+    super::print_stdout_graceful(&scan_json, &screen);
     screen.newline();
 
     if count > 0 {
@@ -387,115 +380,8 @@ pub async fn run_scan(params: ScanParams<'_>) {
 
     // Restore zapret2 if we stopped it
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr, &nft_backup).await;
+        restore_service(mgr, &nft_backup, &screen).await;
     }
-}
-
-// ── Report formatting (pure) ────────────────────────────────────────────────
-
-/// Format scan report as JSON. Returns (content, strategy_count).
-fn format_scan_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
-    let timestamp = test_report::chrono_like_timestamp();
-    let mut total = 0;
-
-    let protocols: Vec<ScanProtocolResult> = summary
-        .iter()
-        .filter(|entry| !entry.strategies.is_empty())
-        .map(|entry| {
-            let strategies: Vec<String> = entry
-                .strategies
-                .iter()
-                .map(|args| format!("nfqws2 {}", args.join(" ")))
-                .collect();
-            total += strategies.len();
-            ScanProtocolResult {
-                protocol: entry.protocol.to_string(),
-                total: strategies.len(),
-                strategies,
-            }
-        })
-        .collect();
-
-    let strategies: Vec<StrategyEntry> = summary
-        .iter()
-        .filter(|entry| !entry.strategies.is_empty())
-        .flat_map(|entry| {
-            entry.strategies.iter().map(|args| StrategyEntry {
-                protocol: entry.protocol.to_string(),
-                args: args.join(" "),
-                coverage: 1,
-            })
-        })
-        .collect();
-
-    let report = ScanReport {
-        domain: domain.to_string(),
-        timestamp,
-        total,
-        working: total,
-        protocols,
-        strategies,
-    };
-
-    let json = serde_json::to_string_pretty(&report).expect("report serialization");
-    (json, total)
-}
-
-/// Format vanilla blockcheck2-compatible report. Returns (content, strategy_count).
-/// Format: `curl_test_<proto> ipv4 <domain> : nfqws2 <args>`
-fn format_vanilla_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
-    use std::fmt::Write as _;
-
-    let mut buf = String::new();
-    let mut total = 0;
-
-    let _ = writeln!(buf, "* SUMMARY");
-
-    for entry in summary {
-        let test_name = match entry.protocol {
-            Protocol::Http => "curl_test_http",
-            Protocol::HttpsTls12 => "curl_test_https_tls12",
-            Protocol::HttpsTls13 => "curl_test_https_tls13",
-        };
-        for s in &entry.strategies {
-            let _ = writeln!(buf, "{test_name} ipv4 {domain} : nfqws2 {}", s.join(" "));
-            total += 1;
-        }
-    }
-
-    (buf, total)
-}
-
-/// Format strategies file (args only). Returns (content, strategy_count).
-fn format_strategies_file(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
-    use std::fmt::Write as _;
-
-    let timestamp = test_report::chrono_like_timestamp();
-    let mut buf = String::new();
-    let mut total = 0;
-
-    let _ = writeln!(buf, "# blockcheckw scan results for {domain}");
-    let _ = writeln!(buf, "# {timestamp}");
-
-    for entry in summary {
-        if entry.strategies.is_empty() {
-            continue;
-        }
-        let _ = writeln!(buf);
-        let _ = writeln!(
-            buf,
-            "# {} — {} strategies",
-            entry.protocol,
-            entry.strategies.len()
-        );
-
-        for args in &entry.strategies {
-            let _ = writeln!(buf, "{}", args.join(" "));
-        }
-        total += entry.strategies.len();
-    }
-
-    (buf, total)
 }
 
 // ── Report I/O ──────────────────────────────────────────────────────────────

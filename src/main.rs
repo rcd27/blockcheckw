@@ -282,7 +282,11 @@ async fn main() {
     // Prevent parallel execution — keep _lock alive until process exits
     let _lock = cmd::acquire_instance_lock();
 
-    cmd::check_prerequisites();
+    let console = blockcheckw::ui::Console::new();
+    cmd::check_prerequisites(&console);
+    // Console is available for cmd functions that create their own internally.
+    // In future, pass it through to all cmd entry points.
+    drop(console);
 
     // Init tracing for all subcommands (warn level)
     tracing_subscriber::fmt()

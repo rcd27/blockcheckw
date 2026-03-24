@@ -1,52 +1,15 @@
 use std::time::Instant;
 
 use console::style;
-use serde::Serialize;
 
 use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
+use crate::dto::{CheckReport, CheckedStrategy, VerifiedStrategy};
 use crate::firewall::nftables;
 use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, HttpResult};
 use crate::strategy::generator::TaggedStrategy;
 use crate::ui;
 use crate::worker::nfqws2::start_nfqws2;
 use crate::worker::slot::WorkerSlot;
-
-/// Result of checking a single strategy.
-#[derive(Debug, Clone, Serialize)]
-pub struct CheckedStrategy {
-    pub protocol: String,
-    pub args: String,
-    pub working: bool,
-    pub bytes_downloaded: u64,
-    pub latency_ms: u64,
-    pub speed_kbps: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// A strategy that passed verification with factual metrics.
-#[derive(Debug, Clone, Serialize)]
-pub struct VerifiedStrategy {
-    pub protocol: String,
-    pub args: String,
-    pub coverage: usize,
-    pub success_rate: f64,
-    pub median_latency_ms: u64,
-    pub median_speed_kbps: f64,
-    pub passes_ok: usize,
-    pub passes_total: usize,
-}
-
-/// Full check output document.
-#[derive(Debug, Serialize)]
-pub struct CheckReport {
-    pub domain: String,
-    pub timestamp: String,
-    pub total: usize,
-    pub working: usize,
-    pub elapsed_secs: f64,
-    pub strategies: Vec<VerifiedStrategy>,
-}
 
 /// Verify strategies from a vanilla report with real data transfer.
 ///
@@ -60,7 +23,7 @@ pub async fn run_check(
     ips: &[String],
     take: usize,
     passes: usize,
-    screen: &mut ui::ScanScreen,
+    screen: &mut ui::Console,
 ) -> CheckReport {
     let start = Instant::now();
     let slot = WorkerSlot::create_slots(1, config.base_qnum)

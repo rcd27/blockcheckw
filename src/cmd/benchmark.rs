@@ -1,5 +1,6 @@
 use blockcheckw::config::CoreConfig;
 use blockcheckw::pipeline::benchmark;
+use blockcheckw::ui;
 
 use super::{handle_bypass_conflicts, restore_service};
 
@@ -10,16 +11,18 @@ pub async fn run_benchmark_cmd(
     protocol: &str,
     raw: bool,
 ) {
+    let con = ui::Console::new();
+
     let protocol = match blockcheckw::config::parse_protocols(protocol) {
         Ok(p) => p[0],
         Err(e) => {
-            eprintln!("ERROR: {e}");
+            con.error(&e.to_string());
             std::process::exit(1);
         }
     };
 
     let config = CoreConfig::default();
-    let stopped = match handle_bypass_conflicts(&config.nft_table).await {
+    let stopped = match handle_bypass_conflicts(&config.nft_table, &con).await {
         Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
@@ -36,6 +39,6 @@ pub async fn run_benchmark_cmd(
 
     // Restore zapret2 if we stopped it
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr, &nft_backup).await;
+        restore_service(mgr, &nft_backup, &con).await;
     }
 }

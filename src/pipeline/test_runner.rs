@@ -1,8 +1,7 @@
 use std::time::Instant;
 
-use serde::Serialize;
-
 use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
+use crate::dto::{PassResult, StrategyStats, StrategyTestResult};
 use crate::error::BlockcheckError;
 use crate::firewall::nftables;
 use crate::network::http_client::{http_test, interpret_http_result, pick_random_ip, HttpVerdict};
@@ -15,37 +14,6 @@ pub struct TestConfig {
     pub delay_ms: u64,
     pub request_timeout: u64,
     pub with_baseline: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PassResult {
-    pub pass_index: usize,
-    pub success: bool,
-    pub verdict: String,
-    pub latency_ms: u64,
-    pub timestamp: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StrategyTestResult {
-    pub strategy_args: Vec<String>,
-    pub pass_results: Vec<PassResult>,
-    pub stats: StrategyStats,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StrategyStats {
-    pub total_passes: usize,
-    pub successes: usize,
-    pub failures: usize,
-    pub errors: usize,
-    pub success_rate: f64,
-    pub latency_median_ms: u64,
-    pub latency_p95_ms: u64,
-    pub latency_p99_ms: u64,
-    pub latency_min_ms: u64,
-    pub latency_max_ms: u64,
-    pub error_distribution: Vec<(String, usize)>,
 }
 
 /// Parse a strategies file: one strategy per line, comments (#) and empty lines skipped.
@@ -253,7 +221,7 @@ pub async fn run_strategy_tests(
     protocol: Protocol,
     ips: &[String],
     strategies: &[Vec<String>],
-    screen: &ui::ScanScreen,
+    screen: &ui::Console,
 ) -> Vec<StrategyTestResult> {
     let mut results = Vec::new();
 

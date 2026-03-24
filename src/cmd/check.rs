@@ -30,17 +30,13 @@ pub async fn run_check_cmd(
 
     let cleanup = spawn_cleanup_handler(&config.nft_table);
 
-    let mut screen = ui::ScanScreen::new();
+    let mut screen = ui::Console::new();
 
     // Load strategies from vanilla file and sort by structural simplicity
     let mut strategies = match generator::load_tagged_strategies(std::path::Path::new(from_file)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "{} failed to read {}: {e}",
-                style("ERROR:").red().bold(),
-                style(from_file).cyan(),
-            );
+            screen.error(&format!("failed to read {}: {e}", style(from_file).cyan()));
             std::process::exit(1);
         }
     };
@@ -84,13 +80,13 @@ pub async fn run_check_cmd(
             resolution.ips
         }
         Err(e) => {
-            eprintln!("{} {e}", style("ERROR:").red().bold());
+            screen.error(&e.to_string());
             std::process::exit(1);
         }
     };
 
     // Check for conflicts
-    let stopped = match handle_bypass_conflicts(&config.nft_table).await {
+    let stopped = match handle_bypass_conflicts(&config.nft_table, &screen).await {
         Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
@@ -158,11 +154,11 @@ pub async fn run_check_cmd(
         }
     }
 
-    super::print_stdout_graceful(&json);
+    super::print_stdout_graceful(&json, &screen);
     screen.newline();
 
     // Restore zapret2 if we stopped it
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr, &nft_backup).await;
+        restore_service(mgr, &nft_backup, &screen).await;
     }
 }

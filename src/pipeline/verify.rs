@@ -7,7 +7,7 @@ use crate::error::TaskResult;
 use crate::network::http_client::DATA_TRANSFER_MIN_BYTES;
 use crate::pipeline::runner::{run_parallel, RunParams, StrategyResult};
 use crate::pipeline::worker_task::HttpTestMode;
-use crate::ui::ScanScreen;
+use crate::ui::Console;
 
 /// Configuration for verification passes.
 #[derive(Debug, Clone)]
@@ -169,7 +169,7 @@ pub async fn run_verification(
     candidates: &[Vec<String>],
     ips: &[String],
     verify_config: &VerifyConfig,
-    screen: &mut ScanScreen,
+    screen: &mut Console,
 ) -> VerificationSummary {
     let verify_core = Arc::new(CoreConfig {
         request_timeout: verify_config.request_timeout,

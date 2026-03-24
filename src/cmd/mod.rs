@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use blockcheckw::ui::WARN;
 
 /// Write JSON to stdout, silently ignoring BrokenPipe (downstream closed).
-pub fn print_stdout_graceful(data: &str) {
+pub fn print_stdout_graceful(data: &str, con: &blockcheckw::ui::Console) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
     match out
@@ -22,7 +22,7 @@ pub fn print_stdout_graceful(data: &str) {
     {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-        Err(e) => eprintln!("  stdout write error: {e}"),
+        Err(e) => con.error(&format!("stdout write error: {e}")),
     }
 }
 
@@ -183,93 +183,75 @@ pub async fn detect_bypass_conflicts(own_table: &str) -> BypassConflicts {
 /// involved. Returns `Err(())` if user aborted.
 pub async fn handle_bypass_conflicts(
     own_table: &str,
+    con: &blockcheckw::ui::Console,
 ) -> Result<Option<(ServiceManager, Option<String>)>, ()> {
     let conflicts = detect_bypass_conflicts(own_table).await;
     if conflicts.is_empty() {
         return Ok(None);
     }
 
-    eprintln!();
-    eprintln!("{}", style("=== Conflicting DPI bypass ===").bold().cyan());
+    con.newline();
+    con.section("Conflicting DPI bypass");
     if conflicts.has_nfqws2_processes {
-        eprintln!("  {}running nfqws2 processes found", WARN,);
+        con.warn("running nfqws2 processes found");
     }
     for (family, table) in &conflicts.conflicting_tables {
-        eprintln!(
-            "  {}nft table '{} {}' has queue rules on port 443",
-            WARN, family, table
-        );
+        con.warn(&format!(
+            "nft table '{family} {table}' has queue rules on port 443"
+        ));
     }
 
     // Try to detect service manager
     let service_mgr = detect_service_manager().await;
 
     if let Some(ref mgr) = service_mgr {
-        eprintln!(
+        con.println(&format!(
             "  detected service: {}",
             style(format!("{mgr}")).cyan().bold()
-        );
-        eprintln!();
+        ));
+        con.newline();
         eprint!(
             "  Stop zapret2 via {mgr} for the duration of the scan? {} ",
             style("[Y/n]").bold()
         );
 
         if !prompt_yes_no() {
-            eprintln!("  {}", style("Aborted.").red());
+            con.println(&format!("  {}", style("Aborted.").red()));
             return Err(());
         }
 
         // Backup entire nft ruleset BEFORE stopping zapret2 (stop drops tables)
         let nft_backup = backup_nft_ruleset().await;
         if nft_backup.is_some() {
-            eprintln!("  {} nft ruleset backed up", style("OK").green().bold(),);
+            con.ok("nft ruleset backed up");
         }
 
         if stop_service(mgr).await {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            eprintln!("  {} zapret2 stopped via {mgr}", style("OK").green().bold());
-            eprintln!(
-                "  {} will restart automatically when blockcheckw finishes",
-                style("→").dim(),
-            );
+            con.ok(&format!("zapret2 stopped via {mgr}"));
+            con.info("will restart automatically when blockcheckw finishes");
             Ok(Some((mgr.clone(), nft_backup)))
         } else {
-            eprintln!(
-                "  {} failed to stop zapret2 via {mgr}",
-                style("ERROR:").red().bold()
-            );
-            eprintln!(
-                "  {} please stop it manually and re-run blockcheckw",
-                style("→").dim(),
-            );
+            con.error(&format!("failed to stop zapret2 via {mgr}"));
+            con.info("please stop it manually and re-run blockcheckw");
             Err(())
         }
     } else {
-        eprintln!(
-            "  {}no systemd unit or init.d script found for zapret2",
-            WARN,
-        );
-        eprintln!();
+        con.warn("no systemd unit or init.d script found for zapret2");
+        con.newline();
         eprint!(
             "  Kill nfqws2 processes and drop conflicting nft tables? {} ",
             style("[Y/n]").bold()
         );
 
         if !prompt_yes_no() {
-            eprintln!("  {}", style("Aborted.").red());
+            con.println(&format!("  {}", style("Aborted.").red()));
             return Err(());
         }
 
         resolve_bypass_conflicts_manual(&conflicts).await;
-        eprintln!(
-            "  {} processes killed, nft tables dropped",
-            style("OK").green().bold()
-        );
-        eprintln!(
-            "  {}you will need to restart DPI bypass manually afterwards",
-            WARN,
-        );
+        con.ok("processes killed, nft tables dropped");
+        con.warn("you will need to restart DPI bypass manually afterwards");
         Ok(None)
     }
 }
@@ -340,7 +322,7 @@ pub async fn backup_nft_ruleset() -> Option<String> {
 
 /// Restore entire nft ruleset from backup after zapret2 start.
 /// Flushes whatever zapret2 start created, then loads the saved snapshot.
-pub async fn restore_nft_ruleset(dump: &str) {
+pub async fn restore_nft_ruleset(dump: &str, con: &blockcheckw::ui::Console) {
     // Flush current ruleset, then load backup
     let _ = std::process::Command::new("nft")
         .args(["flush", "ruleset"])
@@ -349,13 +331,10 @@ pub async fn restore_nft_ruleset(dump: &str) {
     let status = nft_load_stdin(dump);
     match status {
         Ok(s) if s.success() => {
-            eprintln!(
-                "  {} nft ruleset restored from backup",
-                style("OK").green().bold(),
-            );
+            con.ok("nft ruleset restored from backup");
         }
         _ => {
-            eprintln!("  {}failed to restore nft ruleset from backup", WARN);
+            con.warn("failed to restore nft ruleset from backup");
         }
     }
 }
@@ -496,7 +475,8 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
             if let Some(ref dump) = info.nft_backup {
                 // Small delay to let zapret2 finish creating its tables
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                restore_nft_ruleset(dump).await;
+                let cleanup_con = blockcheckw::ui::Console::new();
+                restore_nft_ruleset(dump, &cleanup_con).await;
             }
             std::process::exit(130);
         }
@@ -516,24 +496,24 @@ pub async fn set_nft_backup(state: &CleanupState, backup: Option<String>) {
 }
 
 /// Restart zapret2 service, then restore nft ruleset from backup. Call at graceful exit.
-pub async fn restore_service(mgr: &ServiceManager, nft_backup: &Option<String>) {
-    eprintln!();
-    eprintln!("{}", style("=== Restoring zapret2 ===").bold().cyan());
+pub async fn restore_service(
+    mgr: &ServiceManager,
+    nft_backup: &Option<String>,
+    con: &blockcheckw::ui::Console,
+) {
+    con.newline();
+    con.section("Restoring zapret2");
     if start_service(mgr).await {
-        eprintln!(
-            "  {} zapret2 restarted via {mgr}",
-            style("OK").green().bold(),
-        );
+        con.ok(&format!("zapret2 restarted via {mgr}"));
     } else {
-        eprintln!(
-            "  {}failed to restart zapret2 via {mgr}, please start manually",
-            WARN,
-        );
+        con.warn(&format!(
+            "failed to restart zapret2 via {mgr}, please start manually"
+        ));
     }
     if let Some(ref dump) = nft_backup {
         // Small delay to let zapret2 finish creating its tables
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        restore_nft_ruleset(dump).await;
+        restore_nft_ruleset(dump, con).await;
     }
 }
 
@@ -605,53 +585,45 @@ pub fn acquire_instance_lock() -> InstanceLock {
 
 /// Check that required binaries and kernel features are available.
 /// Exits with code 6 (matching vanilla blockcheck2) if something is missing.
-pub fn check_prerequisites() {
+pub fn check_prerequisites(con: &blockcheckw::ui::Console) {
     use blockcheckw::config::CoreConfig;
 
-    eprintln!("{}", style("=== Checking prerequisites ===").bold().cyan());
+    con.section("Checking prerequisites");
 
     let config = CoreConfig::default();
     let mut ok = true;
 
     // nfqws2 binary
     if std::path::Path::new(&config.nfqws2_path).is_file() {
-        eprintln!(
-            "  {} nfqws2: {}",
-            style("OK").green().bold(),
-            style(&config.nfqws2_path).dim(),
-        );
+        con.ok(&format!("nfqws2: {}", style(&config.nfqws2_path).dim()));
     } else {
-        eprintln!(
-            "  {} nfqws2 not found at {}",
-            style("FAIL").red().bold(),
-            style(&config.nfqws2_path).cyan(),
-        );
-        eprintln!(
+        con.error(&format!(
+            "nfqws2 not found at {}",
+            style(&config.nfqws2_path).cyan()
+        ));
+        con.println(&format!(
             "       run \"{}/install_bin.sh\" or check ZAPRET_BASE path",
             config.zapret_base,
-        );
+        ));
         ok = false;
     }
 
     // nft binary
     if which("nft") {
-        eprintln!("  {} nft", style("OK").green().bold());
+        con.ok("nft");
     } else {
-        eprintln!("  {} nft not found in PATH", style("FAIL").red().bold(),);
-        eprintln!("       install nftables: apt install nftables / opkg install nftables");
+        con.error("nft not found in PATH");
+        con.println("       install nftables: apt install nftables / opkg install nftables");
         ok = false;
     }
 
     // nft queue support (try creating a table with queue rule)
     if ok {
         if nft_has_queue_support() {
-            eprintln!("  {} nft queue support", style("OK").green().bold());
+            con.ok("nft queue support");
         } else {
-            eprintln!(
-                "  {} nftables queue support not available",
-                style("FAIL").red().bold(),
-            );
-            eprintln!("       install kernel module: modprobe nfnetlink_queue");
+            con.error("nftables queue support not available");
+            con.println("       install kernel module: modprobe nfnetlink_queue");
             ok = false;
         }
     }

@@ -4,7 +4,7 @@ use console::style;
 use serde::Serialize;
 
 use crate::config::Protocol;
-use crate::pipeline::test_runner::StrategyTestResult;
+use crate::dto::StrategyTestResult;
 use crate::ui;
 
 /// Render full terminal report for test results.
@@ -15,7 +15,7 @@ pub fn render_terminal_report(
     passes: usize,
     curl_timeout: &str,
     verbose: bool,
-    screen: &ui::ScanScreen,
+    screen: &ui::Console,
 ) {
     screen.println(&format!(
         "\n{}",
@@ -106,7 +106,7 @@ pub fn render_terminal_report(
 }
 
 /// Render comparison table for multiple strategies.
-fn render_comparison_table(results: &[StrategyTestResult], screen: &ui::ScanScreen) {
+fn render_comparison_table(results: &[StrategyTestResult], screen: &ui::Console) {
     screen.println(&format!("\n{}", ui::section("Comparison")));
 
     screen.println(&format!(
@@ -341,7 +341,7 @@ fn days_to_date(days_since_epoch: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::test_runner::{PassResult, StrategyStats};
+    use crate::dto::{PassResult, StrategyStats};
 
     fn make_test_result(
         args: Vec<String>,

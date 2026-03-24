@@ -2,40 +2,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use console::style;
-use serde::Serialize;
 
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
 use blockcheckw::error::TaskResult;
 use blockcheckw::network::dns;
+use blockcheckw::pipeline::report::{self, UniversalProtocolData};
 use blockcheckw::pipeline::runner::{run_parallel, RunParams};
-use blockcheckw::pipeline::scan_report::StrategyEntry;
-use blockcheckw::pipeline::test_report;
 use blockcheckw::pipeline::worker_task::HttpTestMode;
 use blockcheckw::strategy::generator;
 use blockcheckw::ui;
-
-#[derive(Debug, Serialize)]
-struct UniversalStrategy {
-    args: String,
-    coverage: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct UniversalProtocolResult {
-    protocol: String,
-    domains_tested: Vec<String>,
-    domains_excluded: Vec<String>,
-    strategies: Vec<UniversalStrategy>,
-}
-
-#[derive(Debug, Serialize)]
-struct UniversalReport {
-    timestamp: String,
-    domains_sampled: usize,
-    protocols: Vec<UniversalProtocolResult>,
-    /// Flat list of all strategies for interchange with check.
-    strategies: Vec<StrategyEntry>,
-}
 
 use super::{
     handle_bypass_conflicts, restore_service, set_nft_backup, set_stopped_service,
@@ -90,13 +65,13 @@ pub async fn run_universal(
 
     let cleanup = spawn_cleanup_handler(&config.nft_table);
 
-    let mut screen = ui::ScanScreen::new();
+    let mut screen = ui::Console::new();
 
     // Load domain list
     let all_domains = match load_domain_list(domain_list) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("{} {e}", style("ERROR:").red().bold());
+            screen.error(&e.to_string());
             std::process::exit(1);
         }
     };
@@ -110,7 +85,7 @@ pub async fn run_universal(
     ));
 
     // Check for conflicts
-    let stopped = match handle_bypass_conflicts(&config.nft_table).await {
+    let stopped = match handle_bypass_conflicts(&config.nft_table, &screen).await {
         Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
@@ -127,13 +102,7 @@ pub async fn run_universal(
     let candidates = shuffle(&all_domains);
 
     // Full brute-force scan per protocol
-    struct ProtocolResult {
-        protocol: Protocol,
-        strategies: Vec<(Vec<String>, usize)>,
-        tested_domains: Vec<String>,
-        excluded_domains: Vec<String>,
-    }
-    let mut results: Vec<ProtocolResult> = Vec::new();
+    let mut results: Vec<UniversalProtocolData> = Vec::new();
 
     for &protocol in protocols {
         screen.newline();
@@ -224,7 +193,7 @@ pub async fn run_universal(
                 "  {}",
                 style("no domains with working strategies").yellow()
             ));
-            results.push(ProtocolResult {
+            results.push(UniversalProtocolData {
                 protocol,
                 strategies: vec![],
                 tested_domains,
@@ -234,14 +203,7 @@ pub async fn run_universal(
         }
 
         // Sort by coverage descending
-        let mut ranked: Vec<(Vec<String>, usize)> = hits
-            .into_iter()
-            .map(|(key, count)| {
-                let args: Vec<String> = key.split_whitespace().map(String::from).collect();
-                (args, count)
-            })
-            .collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        let ranked = report::rank_by_coverage(hits);
 
         screen.println(&format!(
             "  Result: {} strategies across {} domains ({} excluded)",
@@ -250,7 +212,7 @@ pub async fn run_universal(
             excluded_domains.len(),
         ));
 
-        results.push(ProtocolResult {
+        results.push(UniversalProtocolData {
             protocol,
             strategies: ranked,
             tested_domains,
@@ -285,39 +247,7 @@ pub async fn run_universal(
     }
 
     // Save report
-    let flat_strategies: Vec<StrategyEntry> = results
-        .iter()
-        .flat_map(|r| {
-            r.strategies.iter().map(|(args, count)| StrategyEntry {
-                protocol: r.protocol.to_string(),
-                args: args.join(" "),
-                coverage: *count,
-            })
-        })
-        .collect();
-
-    let report = UniversalReport {
-        timestamp: test_report::chrono_like_timestamp(),
-        domains_sampled: sample,
-        protocols: results
-            .iter()
-            .map(|r| UniversalProtocolResult {
-                protocol: r.protocol.to_string(),
-                domains_tested: r.tested_domains.clone(),
-                domains_excluded: r.excluded_domains.clone(),
-                strategies: r
-                    .strategies
-                    .iter()
-                    .map(|(args, count)| UniversalStrategy {
-                        args: args.join(" "),
-                        coverage: *count,
-                    })
-                    .collect(),
-            })
-            .collect(),
-        strategies: flat_strategies,
-    };
-
+    let report = report::build_universal_report(sample, &results);
     let json = serde_json::to_string_pretty(&report).expect("report serialization");
 
     // Save artifacts BEFORE writing to stdout — stdout may break (pipe closed)
@@ -344,28 +274,21 @@ pub async fn run_universal(
     }
 
     // Save cleaned domain list (original minus all excluded domains)
-    let all_excluded: std::collections::HashSet<&str> = results
-        .iter()
-        .flat_map(|r| r.excluded_domains.iter().map(|s| s.as_str()))
-        .collect();
-
-    if !all_excluded.is_empty() {
-        let cleaned: String = all_domains
-            .iter()
-            .filter(|d| !all_excluded.contains(d.as_str()))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
-
+    if let Some(cleaned) = report::build_cleaned_domain_list(&all_domains, &results) {
         let base = domain_list.strip_suffix(".cleaned").unwrap_or(domain_list);
         let cleaned_path = format!("{base}.cleaned");
+        let excluded_count = results
+            .iter()
+            .flat_map(|r| &r.excluded_domains)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         match std::fs::write(&cleaned_path, &cleaned) {
             Ok(()) => {
                 blockcheckw::system::elevate::chown_to_caller(&cleaned_path);
                 screen.println(&format!(
                     "  {} cleaned domain list ({} excluded) → {}",
                     style("OK").green().bold(),
-                    all_excluded.len(),
+                    excluded_count,
                     style(&cleaned_path).cyan(),
                 ));
             }
@@ -379,7 +302,7 @@ pub async fn run_universal(
     }
 
     // JSON to stdout (for pipe support) — after artifacts are saved
-    super::print_stdout_graceful(&json);
+    super::print_stdout_graceful(&json, &screen);
     screen.newline();
 
     // Hint for next step
@@ -402,6 +325,6 @@ pub async fn run_universal(
 
     // Restore zapret2
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr, &nft_backup).await;
+        restore_service(mgr, &nft_backup, &screen).await;
     }
 }

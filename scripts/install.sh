@@ -120,6 +120,15 @@ else
     exit 1
 fi
 
+# --- Shell completions ---
+
+info "Устанавливаю shell completions..."
+if "${INSTALL_DIR}/blockcheckw" completions --install >/dev/null 2>&1; then
+    info "Shell completions установлены"
+else
+    info "Shell completions не установлены (не критично)"
+fi
+
 # --- Подсказка ---
 
 case ":$PATH:" in

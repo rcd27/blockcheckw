@@ -67,7 +67,7 @@ pub fn detect_shell() -> Option<clap_complete::Shell> {
     let shell_env = std::env::var("SHELL").ok()?;
     let shell_name = std::path::Path::new(&shell_env).file_name()?.to_str()?;
     match shell_name {
-        "bash" => Some(clap_complete::Shell::Bash),
+        "bash" | "ash" | "sh" => Some(clap_complete::Shell::Bash),
         "zsh" => Some(clap_complete::Shell::Zsh),
         "fish" => Some(clap_complete::Shell::Fish),
         "elvish" => Some(clap_complete::Shell::Elvish),

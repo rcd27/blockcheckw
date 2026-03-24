@@ -21,14 +21,8 @@ fn real_home() -> Option<PathBuf> {
     std::env::var("SUDO_USER")
         .ok()
         .and_then(|user| {
-            let c_user = std::ffi::CString::new(user).ok()?;
-            // Safety: getpwnam is POSIX, returns null on failure.
-            let pw = unsafe { libc::getpwnam(c_user.as_ptr()) };
-            if pw.is_null() {
-                return None;
-            }
-            let home = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
-            Some(PathBuf::from(home.to_string_lossy().into_owned()))
+            let u = nix::unistd::User::from_name(&user).ok()??;
+            Some(u.dir)
         })
         .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
 }

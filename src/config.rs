@@ -100,29 +100,20 @@ impl fmt::Display for Protocol {
 
 /// Detect uid for "nobody" user. Falls back to 65534 (standard on most Linux distros).
 fn detect_nobody_uid() -> u32 {
-    // Safety: getpwnam is safe with a valid C string, returns null if user not found
-    unsafe {
-        let name = c"nobody".as_ptr();
-        let pw = libc::getpwnam(name);
-        if pw.is_null() {
-            65534
-        } else {
-            (*pw).pw_uid
-        }
-    }
+    nix::unistd::User::from_name("nobody")
+        .ok()
+        .flatten()
+        .map(|u| u.uid.as_raw())
+        .unwrap_or(65534)
 }
 
 /// Detect gid for "nobody" user. Falls back to 65534.
 fn detect_nobody_gid() -> u32 {
-    unsafe {
-        let name = c"nobody".as_ptr();
-        let pw = libc::getpwnam(name);
-        if pw.is_null() {
-            65534
-        } else {
-            (*pw).pw_gid
-        }
-    }
+    nix::unistd::User::from_name("nobody")
+        .ok()
+        .flatten()
+        .map(|u| u.gid.as_raw())
+        .unwrap_or(65534)
 }
 
 pub fn detect_nfqws2_path(zapret_base: &str) -> String {

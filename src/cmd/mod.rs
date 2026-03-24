@@ -542,20 +542,24 @@ pub async fn restore_service(mgr: &ServiceManager, nft_backup: &Option<String>) 
 const LOCK_PATH: &str = "/var/run/blockcheckw.lock";
 
 /// Acquire an exclusive lock to prevent parallel blockcheckw execution.
-/// Returns the lock file (must be kept alive for the duration of the process).
+/// Opaque lock handle — keeps the flock alive until dropped.
+pub struct InstanceLock(#[allow(dead_code)] nix::fcntl::Flock<std::fs::File>);
+
+/// Returns the lock handle (must be kept alive for the duration of the process).
 /// Exits if another instance is already running.
-pub fn acquire_instance_lock() -> std::fs::File {
+pub fn acquire_instance_lock() -> InstanceLock {
+    use nix::fcntl::{Flock, FlockArg};
     use std::io::Write;
 
     // No truncate before flock — truncate would create a new file description
     // and bypass the existing lock held by another process
-    #[allow(clippy::suspicious_open_options)]
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(LOCK_PATH);
 
-    let mut file = match file {
+    let file = match file {
         Ok(f) => f,
         Err(e) => {
             eprintln!(
@@ -567,30 +571,34 @@ pub fn acquire_instance_lock() -> std::fs::File {
         }
     };
 
-    use std::os::unix::io::AsRawFd;
-    let fd = file.as_raw_fd();
-
     // Try non-blocking first
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if ret != 0 {
-        // Lock held by another instance — wait (supports pipe: universal | check)
-        let held_pid = std::fs::read_to_string(LOCK_PATH).unwrap_or_default();
-        let held_pid = held_pid.trim();
-        eprintln!(
-            "  {} waiting for another blockcheckw instance (PID {held_pid}) to finish...",
-            style("WAIT:").yellow().bold(),
-        );
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-        if ret != 0 {
-            eprintln!("  {} failed to acquire lock", style("ERROR:").red().bold(),);
-            std::process::exit(1);
+    let lock = match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(lock) => lock,
+        Err((inner_file, _err)) => {
+            // Lock held by another instance — wait (supports pipe: universal | check)
+            let held_pid = std::fs::read_to_string(LOCK_PATH).unwrap_or_default();
+            let held_pid = held_pid.trim();
+            eprintln!(
+                "  {} waiting for another blockcheckw instance (PID {held_pid}) to finish...",
+                style("WAIT:").yellow().bold(),
+            );
+            match Flock::lock(inner_file, FlockArg::LockExclusive) {
+                Ok(lock) => lock,
+                Err(_) => {
+                    eprintln!("  {} failed to acquire lock", style("ERROR:").red().bold(),);
+                    std::process::exit(1);
+                }
+            }
         }
-    }
+    };
 
     // Write PID for diagnostics (truncate after locking, not before)
-    let _ = file.set_len(0);
-    let _ = write!(file, "{}", std::process::id());
-    file
+    // Flock<File> implements DerefMut<Target=File>, so we can write directly
+    let mut lock = lock;
+    let _ = lock.set_len(0);
+    let _ = write!(lock, "{}", std::process::id());
+
+    InstanceLock(lock)
 }
 
 // ── Prerequisites check ─────────────────────────────────────────────────────

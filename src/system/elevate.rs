@@ -5,7 +5,7 @@ use std::process::Command;
 /// Mirrors `require_root()` from vanilla `elevate.sh`.
 pub fn require_root() {
     // Already root
-    if unsafe { libc::getuid() } == 0 {
+    if nix::unistd::getuid().is_root() {
         return;
     }
 
@@ -61,21 +61,13 @@ pub fn tune_tcp() {
 /// Each worker needs ~6-8 fd (nfqws2 process + TCP socket + nft calls).
 /// Default soft limit is often 1024 — not enough for 256+ workers.
 pub fn raise_nofile_limit() {
-    unsafe {
-        let mut rlim: libc::rlimit = std::mem::zeroed();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
-            let target = rlim.rlim_max.min(1_048_576); // cap at 1M, use hard limit
-            if rlim.rlim_cur < target {
-                let old = rlim.rlim_cur;
-                rlim.rlim_cur = target;
-                if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) != 0 {
-                    tracing::warn!(
-                        "failed to raise RLIMIT_NOFILE from {} to {}: {}",
-                        old,
-                        target,
-                        std::io::Error::last_os_error(),
-                    );
-                }
+    use nix::sys::resource::{getrlimit, setrlimit, Resource};
+
+    if let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_NOFILE) {
+        let target = hard.min(1_048_576); // cap at 1M, use hard limit
+        if soft < target {
+            if let Err(e) = setrlimit(Resource::RLIMIT_NOFILE, target, hard) {
+                tracing::warn!("failed to raise RLIMIT_NOFILE from {soft} to {target}: {e}");
             }
         }
     }
@@ -98,17 +90,12 @@ pub fn chown_to_caller(path: &str) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(uid);
 
-    let c_path = match std::ffi::CString::new(path) {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    unsafe {
-        if libc::chown(c_path.as_ptr(), uid, gid) != 0 {
-            tracing::warn!(
-                "failed to chown {path} to {uid}:{gid}: {}",
-                std::io::Error::last_os_error(),
-            );
-        }
+    if let Err(e) = nix::unistd::chown(
+        path,
+        Some(nix::unistd::Uid::from_raw(uid)),
+        Some(nix::unistd::Gid::from_raw(gid)),
+    ) {
+        tracing::warn!("failed to chown {path} to {uid}:{gid}: {e}");
     }
 }
 

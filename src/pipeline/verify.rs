@@ -5,7 +5,7 @@ use console::style;
 use crate::config::{CoreConfig, Protocol};
 use crate::error::TaskResult;
 use crate::network::http_client::DATA_TRANSFER_MIN_BYTES;
-use crate::pipeline::runner::{run_parallel, StrategyResult};
+use crate::pipeline::runner::{run_parallel, RunParams, StrategyResult};
 use crate::pipeline::worker_task::HttpTestMode;
 use crate::ui::ScanScreen;
 
@@ -191,16 +191,17 @@ pub async fn run_verification(
             &format!("Verify {protocol} [{pass}/{}]", verify_config.passes),
         );
 
-        let (results, _stats) = run_parallel(
-            &verify_core,
+        let (results, _stats) = run_parallel(RunParams {
+            config: &verify_core,
             domain,
             protocol,
-            candidates,
+            strategies: candidates,
             ips,
-            Some(screen.multi()),
-            Some(screen.pb()),
-            HttpTestMode::Standard,
-        )
+            multi: Some(screen.multi()),
+            external_pb: Some(screen.pb()),
+            mode: HttpTestMode::Standard,
+            deadline: None,
+        })
         .await;
 
         screen.finish_progress();
@@ -260,18 +261,19 @@ pub async fn run_verification(
             ..config.clone()
         });
 
-        let (dt_results, _dt_stats) = run_parallel(
-            &dt_core,
+        let (dt_results, _dt_stats) = run_parallel(RunParams {
+            config: &dt_core,
             domain,
             protocol,
-            dt_candidates,
+            strategies: dt_candidates,
             ips,
-            Some(screen.multi()),
-            Some(screen.pb()),
-            HttpTestMode::DataTransfer {
+            multi: Some(screen.multi()),
+            external_pb: Some(screen.pb()),
+            mode: HttpTestMode::DataTransfer {
                 min_bytes: dt_config.min_bytes,
             },
-        )
+            deadline: None,
+        })
         .await;
 
         screen.finish_progress();

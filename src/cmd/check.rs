@@ -133,7 +133,7 @@ pub async fn run_check_cmd(
     ));
 
     // Output JSON — file first (stdout may break on pipe), then stdout
-    let json = serde_json::to_string_pretty(&report).unwrap();
+    let json = serde_json::to_string_pretty(&report).expect("report serialization");
 
     let path = output.map(String::from).unwrap_or_else(|| {
         let prefix = super::chrono_local_prefix();

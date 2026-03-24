@@ -309,7 +309,9 @@ async fn main() {
             protocol,
             raw,
         }) => {
-            let sub = matches.subcommand_matches("benchmark").unwrap();
+            let sub = matches
+                .subcommand_matches("benchmark")
+                .expect("clap guarantees subcommand");
             let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
 
             if is_explicit(sub, "domain") {
@@ -328,7 +330,9 @@ async fn main() {
             passes,
             output,
         }) => {
-            let sub = matches.subcommand_matches("check").unwrap();
+            let sub = matches
+                .subcommand_matches("check")
+                .expect("clap guarantees subcommand");
 
             let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
             let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
@@ -390,7 +394,9 @@ async fn main() {
             output,
             from_file,
         }) => {
-            let sub = matches.subcommand_matches("scan").unwrap();
+            let sub = matches
+                .subcommand_matches("scan")
+                .expect("clap guarantees subcommand");
 
             let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
             let eff_protocols = resolve_protocols(sub, &protocols, &persisted.protocols);
@@ -422,16 +428,16 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            cmd::scan::run_scan(
-                eff_workers as usize,
-                &eff_domain,
-                &protocols,
+            cmd::scan::run_scan(cmd::scan::ScanParams {
+                workers: eff_workers as usize,
+                domain: &eff_domain,
+                protocols: &protocols,
                 dns_mode,
-                timeout,
-                top,
-                output.as_deref(),
-                from_file.as_deref(),
-            )
+                timeout_secs: timeout,
+                top_n: top,
+                output: output.as_deref(),
+                from_file: from_file.as_deref(),
+            })
             .await;
         }
         Some(Command::Universal {
@@ -441,7 +447,9 @@ async fn main() {
             sample,
             output,
         }) => {
-            let sub = matches.subcommand_matches("universal").unwrap();
+            let sub = matches
+                .subcommand_matches("universal")
+                .expect("clap guarantees subcommand");
 
             let eff_protocols = resolve_protocols(sub, &protocols, &persisted.protocols);
             let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
@@ -484,7 +492,7 @@ async fn main() {
         }
         Some(Command::Completions { .. }) => unreachable!("handled above"),
         None => {
-            Cli::command().print_help().unwrap();
+            let _ = Cli::command().print_help();
         }
     }
 }

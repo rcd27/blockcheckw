@@ -301,13 +301,13 @@ impl ScanScreen {
         if self.info_bars.is_empty() {
             let width = Term::stdout().size().1 as usize;
             let divider = self.multi.add(ProgressBar::new(0));
-            divider.set_style(ProgressStyle::with_template("{msg}").unwrap());
+            divider.set_style(ProgressStyle::with_template("{msg}").expect("static template"));
             divider.set_message(format!("{}", style("─".repeat(width)).dim()));
             divider.tick();
             self.info_bars.push(divider);
         }
         let bar = self.multi.add(ProgressBar::new(0));
-        bar.set_style(ProgressStyle::with_template("{msg}").unwrap());
+        bar.set_style(ProgressStyle::with_template("{msg}").expect("static template"));
         bar.set_message(format!("{}", style(msg).dim()));
         bar.tick();
         self.info_bars.push(bar);
@@ -369,11 +369,11 @@ impl ScanScreen {
             (self.multi.add(divider), self.multi.add(pb))
         };
 
-        divider.set_style(ProgressStyle::with_template("{msg}").unwrap());
+        divider.set_style(ProgressStyle::with_template("{msg}").expect("static template"));
         divider.set_message(format!("{}", style("─".repeat(width)).dim()));
 
         let rate_key = |state: &ProgressState, w: &mut dyn Write| {
-            write!(w, "{:.1}/s", state.per_sec()).unwrap();
+            let _ = write!(w, "{:.1}/s", state.per_sec());
         };
 
         if prefix.is_empty() {
@@ -381,7 +381,7 @@ impl ScanScreen {
                 ProgressStyle::with_template(
                     "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({rate}, ETA {eta})"
                 )
-                .unwrap()
+                .expect("static template")
                 .with_key("rate", rate_key)
                 .progress_chars("=>-"),
             );
@@ -390,7 +390,7 @@ impl ScanScreen {
                 ProgressStyle::with_template(
                     "{prefix:.bold} {spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({rate}, ETA {eta})"
                 )
-                .unwrap()
+                .expect("static template")
                 .with_key("rate", rate_key)
                 .progress_chars("=>-"),
             );

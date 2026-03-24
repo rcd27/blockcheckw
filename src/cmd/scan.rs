@@ -8,7 +8,7 @@ use blockcheckw::firewall::nftables;
 use blockcheckw::network::dns::DnsSpoofResult;
 use blockcheckw::network::{dns, isp};
 use blockcheckw::pipeline::baseline;
-use blockcheckw::pipeline::runner::run_parallel;
+use blockcheckw::pipeline::runner::{run_parallel, RunParams};
 use blockcheckw::pipeline::scan_report::{ScanProtocolResult, ScanReport, StrategyEntry};
 use blockcheckw::pipeline::test_report;
 use blockcheckw::pipeline::worker_task::HttpTestMode;
@@ -26,17 +26,28 @@ struct ProtocolSummary {
     strategies: Vec<Vec<String>>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run_scan(
-    workers: usize,
-    domain: &str,
-    protocols: &[Protocol],
-    dns_mode: DnsMode,
-    timeout_secs: u64,
-    top_n: usize,
-    output: Option<&str>,
-    from_file: Option<&str>,
-) {
+pub struct ScanParams<'a> {
+    pub workers: usize,
+    pub domain: &'a str,
+    pub protocols: &'a [Protocol],
+    pub dns_mode: DnsMode,
+    pub timeout_secs: u64,
+    pub top_n: usize,
+    pub output: Option<&'a str>,
+    pub from_file: Option<&'a str>,
+}
+
+pub async fn run_scan(params: ScanParams<'_>) {
+    let ScanParams {
+        workers,
+        domain,
+        protocols,
+        dns_mode,
+        timeout_secs,
+        top_n,
+        output,
+        from_file,
+    } = params;
     let config = Arc::new(CoreConfig {
         worker_count: workers,
         ..CoreConfig::default()
@@ -204,16 +215,17 @@ pub async fn run_scan(
                 &format!("Scanning {protocol}"),
             );
 
-            let (results, stats) = run_parallel(
-                &config,
+            let (results, stats) = run_parallel(RunParams {
+                config: &config,
                 domain,
                 protocol,
-                &strategies,
-                &ips,
-                Some(screen.multi()),
-                Some(screen.pb()),
-                HttpTestMode::Standard,
-            )
+                strategies: &strategies,
+                ips: &ips,
+                multi: Some(screen.multi()),
+                external_pb: Some(screen.pb()),
+                mode: HttpTestMode::Standard,
+                deadline: None,
+            })
             .await;
 
             screen.finish_progress();
@@ -425,7 +437,7 @@ fn format_scan_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usi
         strategies,
     };
 
-    let json = serde_json::to_string_pretty(&report).unwrap();
+    let json = serde_json::to_string_pretty(&report).expect("report serialization");
     (json, total)
 }
 
@@ -437,7 +449,7 @@ fn format_vanilla_report(domain: &str, summary: &[ProtocolSummary]) -> (String, 
     let mut buf = String::new();
     let mut total = 0;
 
-    writeln!(buf, "* SUMMARY").unwrap();
+    let _ = writeln!(buf, "* SUMMARY");
 
     for entry in summary {
         let test_name = match entry.protocol {
@@ -446,7 +458,7 @@ fn format_vanilla_report(domain: &str, summary: &[ProtocolSummary]) -> (String, 
             Protocol::HttpsTls13 => "curl_test_https_tls13",
         };
         for s in &entry.strategies {
-            writeln!(buf, "{test_name} ipv4 {domain} : nfqws2 {}", s.join(" ")).unwrap();
+            let _ = writeln!(buf, "{test_name} ipv4 {domain} : nfqws2 {}", s.join(" "));
             total += 1;
         }
     }
@@ -462,24 +474,23 @@ fn format_strategies_file(domain: &str, summary: &[ProtocolSummary]) -> (String,
     let mut buf = String::new();
     let mut total = 0;
 
-    writeln!(buf, "# blockcheckw scan results for {domain}").unwrap();
-    writeln!(buf, "# {timestamp}").unwrap();
+    let _ = writeln!(buf, "# blockcheckw scan results for {domain}");
+    let _ = writeln!(buf, "# {timestamp}");
 
     for entry in summary {
         if entry.strategies.is_empty() {
             continue;
         }
-        writeln!(buf).unwrap();
-        writeln!(
+        let _ = writeln!(buf);
+        let _ = writeln!(
             buf,
             "# {} — {} strategies",
             entry.protocol,
             entry.strategies.len()
-        )
-        .unwrap();
+        );
 
         for args in &entry.strategies {
-            writeln!(buf, "{}", args.join(" ")).unwrap();
+            let _ = writeln!(buf, "{}", args.join(" "));
         }
         total += entry.strategies.len();
     }

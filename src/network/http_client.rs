@@ -94,8 +94,6 @@ impl fmt::Display for HttpVerdict {
 /// ensuring all packets (including SYN) carry the mark.
 /// If fwmark == 0, no mark is set (used for baseline tests).
 pub async fn marked_tcp_connect(addr: SocketAddr, fwmark: u32) -> io::Result<TcpStream> {
-    use std::os::unix::io::{FromRawFd, IntoRawFd};
-
     let socket = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::STREAM,
@@ -108,9 +106,9 @@ pub async fn marked_tcp_connect(addr: SocketAddr, fwmark: u32) -> io::Result<Tcp
 
     socket.set_nonblocking(true)?;
 
-    // Convert socket2::Socket → raw fd → tokio::net::TcpSocket
-    let raw_fd = socket.into_raw_fd();
-    let tokio_socket = unsafe { tokio::net::TcpSocket::from_raw_fd(raw_fd) };
+    // socket2::Socket → OwnedFd → tokio::net::TcpSocket (safe conversion)
+    let owned_fd: std::os::unix::io::OwnedFd = socket.into();
+    let tokio_socket = tokio::net::TcpSocket::from_std_stream(std::net::TcpStream::from(owned_fd));
 
     tokio_socket.connect(addr).await
 }

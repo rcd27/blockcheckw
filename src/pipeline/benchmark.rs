@@ -2,7 +2,7 @@ use console::style;
 
 use crate::config::{CoreConfig, Protocol};
 use crate::network::dns;
-use crate::pipeline::runner::run_parallel_with_deadline;
+use crate::pipeline::runner::{run_parallel, RunParams};
 use crate::pipeline::worker_task::HttpTestMode;
 use crate::strategy::generator;
 
@@ -323,7 +323,7 @@ pub async fn run_benchmark(
     let multi = MultiProgress::new();
 
     let table_bar = multi.add(ProgressBar::new_spinner());
-    table_bar.set_style(ProgressStyle::with_template("{msg}").unwrap());
+    table_bar.set_style(ProgressStyle::with_template("{msg}").expect("static template"));
     table_bar.set_message(if raw {
         build_table_text(&header, &[], 0.0)
     } else {
@@ -338,7 +338,7 @@ pub async fn run_benchmark(
             ProgressStyle::with_template(
                 "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} levels {msg}"
             )
-            .unwrap()
+            .expect("static template")
             .progress_chars("=>-"),
         );
         pb.enable_steady_tick(std::time::Duration::from_millis(200));
@@ -390,17 +390,17 @@ pub async fn run_benchmark(
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(time_per_level);
 
-        let (_results, stats) = run_parallel_with_deadline(
-            &config,
+        let (_results, stats) = run_parallel(RunParams {
+            config: &config,
             domain,
             protocol,
-            &strategies,
-            &ips,
-            Some(&multi),
-            None,
-            HttpTestMode::Standard,
-            Some(deadline),
-        )
+            strategies: &strategies,
+            ips: &ips,
+            multi: Some(&multi),
+            external_pb: None,
+            mode: HttpTestMode::Standard,
+            deadline: Some(deadline),
+        })
         .await;
 
         mem_sampler.abort();

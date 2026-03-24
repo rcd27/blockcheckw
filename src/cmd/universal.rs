@@ -7,7 +7,7 @@ use serde::Serialize;
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
 use blockcheckw::error::TaskResult;
 use blockcheckw::network::dns;
-use blockcheckw::pipeline::runner::run_parallel;
+use blockcheckw::pipeline::runner::{run_parallel, RunParams};
 use blockcheckw::pipeline::scan_report::StrategyEntry;
 use blockcheckw::pipeline::test_report;
 use blockcheckw::pipeline::worker_task::HttpTestMode;
@@ -174,16 +174,17 @@ pub async fn run_universal(
 
             screen.begin_progress_with_prefix(corpus.len() as u64, domain);
 
-            let (scan_results, _stats) = run_parallel(
-                &config,
+            let (scan_results, _stats) = run_parallel(RunParams {
+                config: &config,
                 domain,
                 protocol,
-                &corpus,
-                &ips,
-                Some(screen.multi()),
-                Some(screen.pb()),
-                HttpTestMode::Standard,
-            )
+                strategies: &corpus,
+                ips: &ips,
+                multi: Some(screen.multi()),
+                external_pb: Some(screen.pb()),
+                mode: HttpTestMode::Standard,
+                deadline: None,
+            })
             .await;
 
             screen.finish_progress();
@@ -317,7 +318,7 @@ pub async fn run_universal(
         strategies: flat_strategies,
     };
 
-    let json = serde_json::to_string_pretty(&report).unwrap();
+    let json = serde_json::to_string_pretty(&report).expect("report serialization");
 
     // Save artifacts BEFORE writing to stdout — stdout may break (pipe closed)
     let path = output.map(String::from).unwrap_or_else(|| {

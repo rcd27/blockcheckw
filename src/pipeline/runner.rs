@@ -39,23 +39,26 @@ impl RunStats {
     }
 }
 
+/// Parameters for parallel strategy execution.
+pub struct RunParams<'a> {
+    pub config: &'a CoreConfig,
+    pub domain: &'a str,
+    pub protocol: Protocol,
+    pub strategies: &'a [Vec<String>],
+    pub ips: &'a [String],
+    pub multi: Option<&'a MultiProgress>,
+    pub external_pb: Option<&'a ProgressBar>,
+    pub mode: HttpTestMode,
+    pub deadline: Option<Instant>,
+}
+
 /// Run strategies in parallel batches using worker slots.
 ///
 /// nftables rules are added once per batch (not per strategy), drastically
 /// reducing nft fork+exec overhead. Only nfqws2 start/kill and HTTP tests
 /// happen per strategy.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_parallel(
-    config: &CoreConfig,
-    domain: &str,
-    protocol: Protocol,
-    strategies: &[Vec<String>],
-    ips: &[String],
-    multi: Option<&MultiProgress>,
-    external_pb: Option<&ProgressBar>,
-    mode: HttpTestMode,
-) -> (Vec<StrategyResult>, RunStats) {
-    run_parallel_with_deadline(
+pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunStats) {
+    let RunParams {
         config,
         domain,
         protocol,
@@ -64,26 +67,9 @@ pub async fn run_parallel(
         multi,
         external_pb,
         mode,
-        None,
-    )
-    .await
-}
+        deadline,
+    } = params;
 
-/// Run strategies in parallel batches with optional deadline.
-/// If `deadline` is set, stops processing new batches after the deadline
-/// and returns partial results.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_parallel_with_deadline(
-    config: &CoreConfig,
-    domain: &str,
-    protocol: Protocol,
-    strategies: &[Vec<String>],
-    ips: &[String],
-    multi: Option<&MultiProgress>,
-    external_pb: Option<&ProgressBar>,
-    mode: HttpTestMode,
-    deadline: Option<Instant>,
-) -> (Vec<StrategyResult>, RunStats) {
     let start = Instant::now();
     let slots = WorkerSlot::create_slots(config.worker_count, config.base_qnum);
 
@@ -119,9 +105,9 @@ pub async fn run_parallel_with_deadline(
                 ProgressStyle::with_template(
                     "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({rate}, ETA {eta})"
                 )
-                .unwrap()
+                .expect("static template")
                 .with_key("rate", |state: &ProgressState, w: &mut dyn Write| {
-                    write!(w, "{:.1}/s", state.per_sec()).unwrap();
+                    let _ = write!(w, "{:.1}/s", state.per_sec());
                 })
                 .progress_chars("=>-"),
             );

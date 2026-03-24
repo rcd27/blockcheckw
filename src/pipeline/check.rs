@@ -66,7 +66,7 @@ pub async fn run_check(
     let slot = WorkerSlot::create_slots(1, config.base_qnum)
         .into_iter()
         .next()
-        .unwrap();
+        .expect("create_slots(1) returns exactly one slot");
 
     // Prepare nftables table
     nftables::drop_table(&config.nft_table).await;

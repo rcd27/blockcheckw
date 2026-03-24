@@ -151,7 +151,7 @@ pub async fn check_dns_spoofing(doh_server_url: &str) -> DnsSpoofResult {
                 details: format!(
                     "all {} domains resolve to same IP: {}",
                     SPOOFING_CHECK_DOMAINS.len(),
-                    unique.into_iter().next().unwrap(),
+                    unique.into_iter().next().expect("checked len == 1"),
                 ),
             };
         }

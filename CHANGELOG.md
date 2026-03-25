@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.1](https://github.com/rcd27/blockcheckw/compare/v0.7.0...v0.7.1) (2026-03-25)
+
+
+### Features
+
+* **proxy:** глобальный флаг --via: возможность сканирования через прокси ([9bab176](https://github.com/rcd27/blockcheckw/commit/9bab1764226c976536f04e063f8aa30a986d0de6))
+
+
+### Bug Fixes
+
+* **ci-cd:** прогон e2e в контейнере на CI ([7cbc718](https://github.com/rcd27/blockcheckw/commit/7cbc7182bdc70495cb6c06d85372baf8234461f5))
+* **completions:** определение BusyBox + автоустановка completions в install.sh ([3a12f3e](https://github.com/rcd27/blockcheckw/commit/3a12f3ea4d3fab97b380b265d0734720b5dc0ac6))
+* **pipe:** отчёты - до падения ([3844654](https://github.com/rcd27/blockcheckw/commit/3844654df10e6b076441ad450098311942a68a4a))
+* **review:** праввки по ревью: убраны unsafe и unwrap везде, где можно ([57345f6](https://github.com/rcd27/blockcheckw/commit/57345f680ac16bdfcfdca85cdaba383c39b04deb))
+
 ## [0.7.0](https://github.com/rcd27/blockcheckw/compare/v0.6.0...v0.7.0) (2026-03-22)
 
 

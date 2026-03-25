@@ -404,6 +404,7 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Best-effort synchronous cleanup
+        blockcheckw::network::route::remove_all_routes_sync();
         if let Ok(guard) = panic_state.try_lock() {
             // Drop our nft table
             let _ = std::process::Command::new("nft")
@@ -451,6 +452,7 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
                 }
             });
 
+            blockcheckw::network::route::remove_all_routes().await;
             let info = handler_state.lock().await;
             blockcheckw::firewall::nftables::drop_table(&info.nft_table).await;
             eprintln!(

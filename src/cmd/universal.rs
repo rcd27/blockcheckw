@@ -5,7 +5,7 @@ use console::style;
 
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
 use blockcheckw::error::TaskResult;
-use blockcheckw::network::dns;
+use blockcheckw::network::{dns, route};
 use blockcheckw::pipeline::report::{self, UniversalProtocolData};
 use blockcheckw::pipeline::runner::{run_parallel, RunParams};
 use blockcheckw::pipeline::worker_task::HttpTestMode;
@@ -57,6 +57,7 @@ pub async fn run_universal(
     dns_mode: DnsMode,
     sample: usize,
     output: Option<&str>,
+    via: Option<&str>,
 ) {
     let config = Arc::new(CoreConfig {
         worker_count: workers,
@@ -83,6 +84,13 @@ pub async fn run_universal(
         style(domain_list).cyan(),
         style(sample).bold(),
     ));
+
+    // Remote gateway check
+    if let Some(gateway) = via {
+        if !route::check_gateway(gateway, &screen).await {
+            std::process::exit(1);
+        }
+    }
 
     // Check for conflicts
     let stopped = match handle_bypass_conflicts(&config.nft_table, &screen).await {
@@ -141,6 +149,11 @@ pub async fn run_universal(
                 }
             };
 
+            // Add routes for this domain's IPs
+            if let Some(gateway) = via {
+                route::add_routes(gateway, &ips).await;
+            }
+
             screen.begin_progress_with_prefix(corpus.len() as u64, domain);
 
             let (scan_results, _stats) = run_parallel(RunParams {
@@ -157,6 +170,11 @@ pub async fn run_universal(
             .await;
 
             screen.finish_progress();
+
+            // Remove routes for this domain's IPs
+            if via.is_some() {
+                route::remove_routes(&ips).await;
+            }
 
             let working: Vec<&Vec<String>> = scan_results
                 .iter()
@@ -323,7 +341,8 @@ pub async fn run_universal(
         ));
     }
 
-    // Restore zapret2
+    // Cleanup routes + restore zapret2
+    route::remove_all_routes().await;
     if let Some(ref mgr) = stopped_service {
         restore_service(mgr, &nft_backup, &screen).await;
     }

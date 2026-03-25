@@ -3,7 +3,7 @@ use std::sync::Arc;
 use console::style;
 
 use blockcheckw::config::{CoreConfig, DnsMode};
-use blockcheckw::network::{dns, isp};
+use blockcheckw::network::{dns, isp, route};
 use blockcheckw::pipeline::check;
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
@@ -13,15 +13,28 @@ use super::{
     spawn_cleanup_handler,
 };
 
-pub async fn run_check_cmd(
-    domain: &str,
-    from_file: &str,
-    dns_mode: DnsMode,
-    timeout: u64,
-    take: usize,
-    passes: usize,
-    output: Option<&str>,
-) {
+pub struct CheckParams<'a> {
+    pub domain: &'a str,
+    pub from_file: &'a str,
+    pub dns_mode: DnsMode,
+    pub timeout: u64,
+    pub take: usize,
+    pub passes: usize,
+    pub output: Option<&'a str>,
+    pub via: Option<&'a str>,
+}
+
+pub async fn run_check_cmd(params: CheckParams<'_>) {
+    let CheckParams {
+        domain,
+        from_file,
+        dns_mode,
+        timeout,
+        take,
+        passes,
+        output,
+        via,
+    } = params;
     let config = Arc::new(CoreConfig {
         worker_count: 1,
         request_timeout: timeout,
@@ -84,6 +97,14 @@ pub async fn run_check_cmd(
             std::process::exit(1);
         }
     };
+
+    // Remote gateway route setup
+    if let Some(gateway) = via {
+        if !route::check_gateway(gateway, &screen).await {
+            std::process::exit(1);
+        }
+        route::add_routes(gateway, &ips).await;
+    }
 
     // Check for conflicts
     let stopped = match handle_bypass_conflicts(&config.nft_table, &screen).await {
@@ -157,7 +178,8 @@ pub async fn run_check_cmd(
     super::print_stdout_graceful(&json, &screen);
     screen.newline();
 
-    // Restore zapret2 if we stopped it
+    // Cleanup routes + restore zapret2
+    route::remove_all_routes().await;
     if let Some(ref mgr) = stopped_service {
         restore_service(mgr, &nft_backup, &screen).await;
     }

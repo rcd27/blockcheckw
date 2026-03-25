@@ -42,6 +42,10 @@ struct Cli {
     #[arg(long, global = true)]
     auto: bool,
 
+    /// Route traffic through a remote gateway (e.g. Tailscale IP of a router)
+    #[arg(long, global = true)]
+    via: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -217,6 +221,7 @@ async fn main() {
     // Panic hook: cleanup nftables table on panic (async runtime may be dead, use sync Command)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        blockcheckw::network::route::remove_all_routes_sync();
         if let Ok(mut child) = std::process::Command::new("nft")
             .args(["delete", "table", "inet", "zapret"])
             .stdout(std::process::Stdio::null())
@@ -263,6 +268,7 @@ async fn main() {
     }
 
     cmd::set_auto_yes(cli.auto);
+    let via = cli.via;
 
     blockcheckw::system::elevate::require_root();
     blockcheckw::system::elevate::tune_tcp();
@@ -373,15 +379,16 @@ async fn main() {
                 }
             };
 
-            cmd::check::run_check_cmd(
-                &eff_domain,
-                &source,
+            cmd::check::run_check_cmd(cmd::check::CheckParams {
+                domain: &eff_domain,
+                from_file: &source,
                 dns_mode,
                 timeout,
                 take,
-                passes as usize,
-                output.as_deref(),
-            )
+                passes: passes as usize,
+                output: output.as_deref(),
+                via: via.as_deref(),
+            })
             .await;
 
             // Clean up temp file from stdin pipe
@@ -441,6 +448,7 @@ async fn main() {
                 top_n: top,
                 output: output.as_deref(),
                 from_file: from_file.as_deref(),
+                via: via.as_deref(),
             })
             .await;
         }
@@ -491,6 +499,7 @@ async fn main() {
                 dns_mode,
                 sample,
                 output.as_deref(),
+                via.as_deref(),
             )
             .await;
         }

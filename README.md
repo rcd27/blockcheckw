@@ -3,6 +3,7 @@
 [![CI](https://github.com/rcd27/blockcheckw/actions/workflows/ci.yml/badge.svg)](https://github.com/rcd27/blockcheckw/actions/workflows/ci.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/rcd27/blockcheckw)](https://github.com/rcd27/blockcheckw/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/rcd27/blockcheckw/total)](https://github.com/rcd27/blockcheckw/releases)
 
 Быстрая обёртка над [blockcheck2](https://github.com/bol-van/zapret2) для параллельного поиска стратегий обхода DPI.
 

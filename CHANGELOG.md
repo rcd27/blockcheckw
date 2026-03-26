@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/rcd27/blockcheckw/compare/v0.8.0...v0.8.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* **check:** проверка на 16+ КБ при прогоне стратегий ([706c7e4](https://github.com/rcd27/blockcheckw/commit/706c7e452557c8e663f5fdcc32039410da3d583e)), closes [#19](https://github.com/rcd27/blockcheckw/issues/19)
+
 ## [0.8.0](https://github.com/rcd27/blockcheckw/compare/v0.7.1...v0.8.0) (2026-03-26)
 
 

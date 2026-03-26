@@ -1,23 +1,13 @@
 # Quickstart: blockcheckw
 
 ## TL;DR
-// FIXME
-```bash
-# Всё в одну строку: benchmark → scan → check
-blockcheckw benchmark | xargs -I{} blockcheckw -w {} scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
-```
-
-Или по шагам:
 
 ```bash
 # 1. Найти оптимальное число воркеров
 blockcheckw benchmark
 
-# 2. Сканировать (подставить число из benchmark)
-blockcheckw -w 1024 scan -d rutracker.org
-
-# 3. Проверить найденные стратегии (pipe из scan)
-blockcheckw -w 1024 scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
+# 2. Сканировать → проверить лучшие стратегии (pipe)
+blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
 ```
 
 Pipe работает между любыми командами: `scan`, `universal`, `check`.
@@ -82,6 +72,21 @@ blockcheckw --version
 
 > blockcheckw автоматически поднимает привилегии (sudo) при запуске.
 
+### Глобальные флаги
+
+Эти флаги указываются **перед** именем команды:
+
+| Флаг | Описание |
+|------|----------|
+| `-w, --workers <N>` | Число параллельных воркеров (1–2048, по умолчанию 8) |
+| `--auto` | Автоподтверждение всех промптов (для скриптов) |
+| `--via <IP>` | Сканирование через удалённый шлюз (например, Tailscale IP роутера) |
+
+```bash
+# Пример: скан через роутер с 512 воркерами
+blockcheckw -w 512 --via 100.64.0.2 scan -d rutracker.org
+```
+
 ### 1. Подбор числа воркеров (benchmark)
 
 Первым делом узнайте, сколько воркеров тянет ваша система:
@@ -105,7 +110,15 @@ blockcheckw benchmark -t 20 -M 64
 Benchmark автоматически остановится, если памяти не хватает на следующий уровень.
 Рекомендованное число запоминается — при следующем запуске `-w` подхватится автоматически.
 
-### 2. Сканирование — найти рабочие стратегии
+| Флаг | Описание |
+|------|----------|
+| `-t, --time <SEC>` | Секунд на уровень (по умолчанию 30, минимум 5) |
+| `-M, --max-workers <N>` | Максимум воркеров для теста |
+| `-d, --domain <DOMAIN>` | Домен для теста (по умолчанию `rutracker.org`) |
+| `-p, --protocol <PROTO>` | Протокол: `http`, `tls12`, `tls13` (по умолчанию `tls12`) |
+| `--raw` | Только таблица, без рекомендации (для скриптов) |
+
+### 2. Сканирование — найти рабочие стратегии (scan)
 
 ```bash
 blockcheckw -w 256 scan -d rutracker.org
@@ -116,6 +129,15 @@ blockcheckw -w 256 scan -d rutracker.org
 ```bash
 # Только TLS 1.2:
 blockcheckw -w 256 scan -d rutracker.org -p tls12
+
+# С таймаутом 300 секунд:
+blockcheckw -w 256 scan -d rutracker.org --timeout 300
+
+# Показать top-10 стратегий вместо top-5:
+blockcheckw -w 256 scan -d rutracker.org --top 10
+
+# Кастомные стратегии из файла (вместо встроенного корпуса):
+blockcheckw -w 256 scan -d rutracker.org --from-file my_strategies.txt
 ```
 
 Pipe в check (scan → проверка с data transfer):
@@ -124,7 +146,17 @@ Pipe в check (scan → проверка с data transfer):
 blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
 ```
 
-Результат всегда сохраняется в файл (JSON + vanilla report), даже при pipe.
+Результат сохраняется в файл (JSON + vanilla report) автоматически.
+
+| Флаг | Описание |
+|------|----------|
+| `-d, --domain <DOMAIN>` | Домен (по умолчанию `rutracker.org`) |
+| `-p, --protocols <LIST>` | Протоколы через запятую: `http,tls12,tls13` (по умолчанию все) |
+| `--dns <MODE>` | DNS: `auto`, `system`, `doh` (по умолчанию `auto`) |
+| `--timeout <SEC>` | Общий таймаут в секундах (0 = без лимита) |
+| `--top <N>` | Показать top N стратегий на протокол (0 = все, по умолчанию 5) |
+| `-o, --output <FILE>` | Сохранить в указанный файл |
+| `--from-file <FILE>` | Загрузить стратегии из файла вместо встроенных |
 
 ### 3. Проверка стратегий (check)
 
@@ -135,26 +167,57 @@ blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --
 blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
 
 # Из файла:
-blockcheckw check --from-file report_vanilla.txt -d rutracker.org
+blockcheckw check --from-file 2026-03-22_18-02_report_vanilla.txt -d rutracker.org
 
-# 5 проходов верификации:
+# 5 проходов верификации, взять 10 лучших:
 blockcheckw check --from-file report_vanilla.txt --take 10 --passes 5
 ```
 
 **Как работает check:**
 
-Каждая стратегия проверяется `--passes` раз с реальным GET-запросом (data transfer).
-Если первый проход FAIL — стратегия сразу отбрасывается (early-exit).
-Только стратегии с 100% success rate попадают в результат.
-`--take N` останавливает проверку после N верифицированных стратегий на протокол.
+- Каждая стратегия проверяется `--passes` раз с реальным GET-запросом (data transfer)
+- Если первый проход FAIL — стратегия сразу отбрасывается (early-exit)
+- Только стратегии с 100% success rate попадают в результат
+- `--take N` останавливает проверку после N верифицированных стратегий на протокол
+
+| Флаг | Описание |
+|------|----------|
+| `--from-file <FILE>` | Vanilla report или JSON (читает stdin если pipe) |
+| `-d, --domain <DOMAIN>` | Домен (по умолчанию `rutracker.org`) |
+| `--dns <MODE>` | DNS: `auto`, `system`, `doh` (по умолчанию `auto`) |
+| `--timeout <SEC>` | Таймаут на стратегию в секундах (по умолчанию 6, макс 60) |
+| `--take <N>` | Остановиться после N верифицированных на протокол (0 = все) |
+| `--passes <N>` | Проходов верификации (по умолчанию 3, макс 100) |
+| `-o, --output <FILE>` | Сохранить JSON-отчёт в файл |
 
 ### 4. Универсальные стратегии (universal)
 
-Найти стратегии, работающие на нескольких доменах:
+Найти стратегии, работающие сразу на нескольких заблокированных доменах:
 
 ```bash
-blockcheckw -w 1024 universal --domain-list blocked.txt --sample 5 | blockcheckw check -d rutracker.org --take 10
+# Подготовить список доменов:
+cat > blocked.txt << 'EOF'
+rutracker.org
+livejournal.com
+linkedin.com
+EOF
+
+# Найти универсальные стратегии (сэмпл из 5 доменов):
+blockcheckw -w 512 universal --domain-list blocked.txt --sample 5
+
+# Pipe в check для верификации:
+blockcheckw -w 512 universal --domain-list blocked.txt --sample 5 | blockcheckw check -d rutracker.org --take 10
 ```
+
+Стратегии ранжируются по покрытию — сколько доменов из сэмпла они обходят.
+
+| Флаг | Описание |
+|------|----------|
+| `--domain-list <FILE>` | Файл с доменами (один на строку, пустые строки и `#` игнорируются) |
+| `-p, --protocols <LIST>` | Протоколы через запятую (по умолчанию `tls12`) |
+| `--dns <MODE>` | DNS: `auto`, `system`, `doh` (по умолчанию `auto`) |
+| `--sample <N>` | Сколько доменов тестировать из списка (по умолчанию 10) |
+| `-o, --output <FILE>` | Сохранить JSON-отчёт в файл |
 
 ## Если zapret2 уже запущен
 

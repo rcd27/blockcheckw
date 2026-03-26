@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnetfilter-queue-dev \
     libnfnetlink-dev \
     libmnl-dev \
+    libcap-dev \
     libluajit-5.1-dev \
     zlib1g-dev \
     curl \

@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.8.0](https://github.com/rcd27/blockcheckw/compare/v0.7.1...v0.8.0) (2026-03-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ux:** pipe/TTL режим для всего приложения
+* **universal:** новый брут-форс для N доменов
+* **check:** радикальное упрощение фичи. Без сканов. early-exit
+* **ux:** отказ от интерпретации/ранжирования стратегий
+* авто-определение `nobody uid/gid`, убран хардкод
+* panic hook без timeout мог уводить роутеры в reboot
+* **nfqws2:** killall nfqws2 заменён на sertvice stop/start (systemd / init.d), fallback без сервиса + gracefull exit с восстановлением
+* **check:** добавлен entry-point в приложение, проверка vanilla списков "рабочих" стратегий на предмет РЕАЛЬНОЙ передачи данных
+
+### Features
+
+* **check:** добавлен entry-point в приложение, проверка vanilla списков "рабочих" стратегий на предмет РЕАЛЬНОЙ передачи данных ([9c877da](https://github.com/rcd27/blockcheckw/commit/9c877da8352caaaba5c58fb12a5982be5ff38968))
+* **check:** радикальное упрощение фичи. Без сканов. early-exit ([a9dd5ab](https://github.com/rcd27/blockcheckw/commit/a9dd5ab7344aa7e1744eb5dd7058b7342c649f0b))
+* **completions:** добавление автокомплит зависимостей ([b696430](https://github.com/rcd27/blockcheckw/commit/b69643083fc663588f67458234cbcbfb160c80be))
+* **completions:** реализация CLI completions ([84732e0](https://github.com/rcd27/blockcheckw/commit/84732e076a47a8b75f7c3759974973bca826d0a2))
+* **completions:** увеличено кол-во портов для воркера ([0969b45](https://github.com/rcd27/blockcheckw/commit/0969b45dae774f8c9f2fd1a58af333b15fe9209e))
+* **completions:** цветная схема для completeioins ([f0b5be9](https://github.com/rcd27/blockcheckw/commit/f0b5be999bbeb9ed6fa5709895aa9b2bc09847fd))
+* data-transfer проверка на реальную передачу данных, а не просто HANDSHAKE ([c1cca73](https://github.com/rcd27/blockcheckw/commit/c1cca73f5de41d050e74937fcc6e941d307098bc))
+* **docs:** QUICKSTART.md, версия утилиты ([efaad40](https://github.com/rcd27/blockcheckw/commit/efaad40420835e9a19b15d09a4e7fc512fae0b58))
+* **error-prone:** валидация CLI аргументов ([f9fd623](https://github.com/rcd27/blockcheckw/commit/f9fd623c1bbce0d81724d7fa6e579733117b073a))
+* **error-prone:** проверка жизни nfqws2 при старте, если упал, то отображаем это соответственно, без магических sleep(100) ([c04ea7c](https://github.com/rcd27/blockcheckw/commit/c04ea7caec73a69fdbede83afeac24189ad4c655))
+* **error-prone:** проверка на наличие запущенного процесса `blockcheckw` ([0e43a7a](https://github.com/rcd27/blockcheckw/commit/0e43a7a3c7c3084884f7756de27926086501ceb1))
+* **nfqws2:** killall nfqws2 заменён на sertvice stop/start (systemd / init.d), fallback без сервиса + gracefull exit с восстановлением ([55647e0](https://github.com/rcd27/blockcheckw/commit/55647e0c3eff847d5c17fe82f2ef4e697bf0bf7d))
+* **proxy:** глобальный флаг --via: возможность сканирования через прокси ([9bab176](https://github.com/rcd27/blockcheckw/commit/9bab1764226c976536f04e063f8aa30a986d0de6))
+* **report:** blockcheckw_report.txt по окончании прогона ([d2b260c](https://github.com/rcd27/blockcheckw/commit/d2b260cd205e1c7a159bd2e365f6eb6cff1a73cb))
+* **test:** тестовый режим прогона blockcheckw ([c643c83](https://github.com/rcd27/blockcheckw/commit/c643c83c2de245405a8cba43d783c04e515725a1))
+* **ux:** check_prerequisites на наличие необходимого окружения ([e9a7c07](https://github.com/rcd27/blockcheckw/commit/e9a7c07bd103f0ae760b16f2135ac33ca8f243e2))
+* **ux:** pipe/TTL режим для всего приложения ([3a38d58](https://github.com/rcd27/blockcheckw/commit/3a38d58fda236473f3b3e294a2a24cd332486e17))
+* **ux:** второй прогон, правки по UI ([46f6e0e](https://github.com/rcd27/blockcheckw/commit/46f6e0eed8f8ce8c3e4b2a280d81c6bbd6ef65ba))
+* **ux:** добавлена обработка повторного CTRL+C для force quit ([d4e907c](https://github.com/rcd27/blockcheckw/commit/d4e907c26f25222a00c82cfd60aefe309b667225))
+* **ux:** путь обывателя + правки - улучшение UX ([df83bbb](https://github.com/rcd27/blockcheckw/commit/df83bbb412eacf31f0693878c45f350ebfcc6664))
+* **ux:** сохранение/восстановление nft таблиц между прогонами blockcheckw ([370aacf](https://github.com/rcd27/blockcheckw/commit/370aacf3df32a25391e60da30184f3762b97fd86))
+
+
+### Bug Fixes
+
+* **build:** недостающие файлы ([97ee04d](https://github.com/rcd27/blockcheckw/commit/97ee04d4c6dbf30994e927750b8f921e37582933))
+* **check:** немного свой пайплайн для CHECK, отличающийся от SCAN ([0122d9d](https://github.com/rcd27/blockcheckw/commit/0122d9d109e35df2b64509d590de3c4d5f7356dd))
+* **ci-cd:** локальная проверка CI ([21a3856](https://github.com/rcd27/blockcheckw/commit/21a385673a4d9e2f5de8ef05450e35e046f66fa5))
+* **ci-cd:** прикрепление бинарей к релизу ([0f39318](https://github.com/rcd27/blockcheckw/commit/0f393184d4096518fde3f44c54b93c0167014445))
+* **ci-cd:** прогон e2e в контейнере на CI ([7cbc718](https://github.com/rcd27/blockcheckw/commit/7cbc7182bdc70495cb6c06d85372baf8234461f5))
+* **completions:** определение BusyBox + автоустановка completions в install.sh ([3a12f3e](https://github.com/rcd27/blockcheckw/commit/3a12f3ea4d3fab97b380b265d0734720b5dc0ac6))
+* **core:** дублирование RegEx вызовов ([0dfc1fb](https://github.com/rcd27/blockcheckw/commit/0dfc1fb499c671122debe97a38214a151b1e41e5))
+* **core:** обработка "неудачного" setrlimit, chowm ([4a914cc](https://github.com/rcd27/blockcheckw/commit/4a914cc4dbe9c77b8f0dafc4f7f8aca2ee01cf83))
+* **dns:** кэширование DNS ([9c8bfa4](https://github.com/rcd27/blockcheckw/commit/9c8bfa4ebf5445669ce5f3c761417468113889bd))
+* **docs:** правки QUICKSTART и READMDE ([a6682bb](https://github.com/rcd27/blockcheckw/commit/a6682bb96cb6215bb6863290f506f715d2c581dd))
+* **docs:** разделение readme и quickstart ([df9f568](https://github.com/rcd27/blockcheckw/commit/df9f5689418e4543d288a5fc80fa5140ba1cf986))
+* **e2e:** интеграционный тест в контейнере ([5b7bd48](https://github.com/rcd27/blockcheckw/commit/5b7bd48a547d97d442ed6912d71b3bd5c1803b32))
+* **fp:** вынос сайд-эффекта ([fa9374b](https://github.com/rcd27/blockcheckw/commit/fa9374b259a82132e788f0c0c00e67a0eaaf1b5e))
+* **multiplatform:** AtomicU64 -&gt; AtomicUSize для поддержки 32-битных платформ ([c86204f](https://github.com/rcd27/blockcheckw/commit/c86204f450e3092bea6845f8e1a34ddcf77e3c4c))
+* panic hook без timeout мог уводить роутеры в reboot ([a1f98f5](https://github.com/rcd27/blockcheckw/commit/a1f98f58485c3ab82e1e4687d181256bc354c7d8))
+* **performance:** ненужные копирования строк между воркерами ([a0ad7d9](https://github.com/rcd27/blockcheckw/commit/a0ad7d9b1c22c3fed2a54f5bd43c3cea62ce30dc))
+* **pipe:** отчёты - до падения ([3844654](https://github.com/rcd27/blockcheckw/commit/3844654df10e6b076441ad450098311942a68a4a))
+* **ranking:** переделана система ранжирования, теперь производительность + простота ([57f6e4a](https://github.com/rcd27/blockcheckw/commit/57f6e4a999d9fa4c39898abc7d1e41049068fda6))
+* **review:** праввки по ревью: убраны unsafe и unwrap везде, где можно ([57345f6](https://github.com/rcd27/blockcheckw/commit/57345f680ac16bdfcfdca85cdaba383c39b04deb))
+* **scan:** verify и data-scan убраны из pipeline, как ломающие нахождение стратегий: TIME_WAIT на порту приводил к false negative ([7ac478e](https://github.com/rcd27/blockcheckw/commit/7ac478ee89054a2dd8293abb8bcab6043eae8f92))
+* **scan:** форматированный отчёт после SCAN ([09d5735](https://github.com/rcd27/blockcheckw/commit/09d573599c1524066f7c86e4b6f4f6d0679fcfd1))
+* **strategies:** оптимизация генерации стратегий, приведение к vanilla-style ([868fe6b](https://github.com/rcd27/blockcheckw/commit/868fe6b6e3dd27d9257e5f86416ca05e59e09442))
+* **strategy:** генерация стратегий tls12 1:1 с ваниллой ([e776fb8](https://github.com/rcd27/blockcheckw/commit/e776fb8be4421ba767a359c0f2d71748278a6c08))
+* **ui:** более информативный progress-bar ([0ea9a80](https://github.com/rcd27/blockcheckw/commit/0ea9a809bb9037aeee9f2d39069c30d4f7c81e77))
+* **universal:** новый брут-форс для N доменов ([18f0267](https://github.com/rcd27/blockcheckw/commit/18f02678b191d0f35c08ce4bf55e83fb3c19cb82))
+* **ux:** ещё одна попытка написать ранжирование для страт, но это туфта ([c61e6f8](https://github.com/rcd27/blockcheckw/commit/c61e6f8f36c28d5cba739aab4d0dd8dbc0d9640c))
+* **ux:** отказ от интерпретации/ранжирования стратегий ([11eb4d9](https://github.com/rcd27/blockcheckw/commit/11eb4d92162f5b139bb81be462018fdb55a4ffd5))
+* **zapret2:** перезапуск сервиса при panic! ([9e92b56](https://github.com/rcd27/blockcheckw/commit/9e92b56744f616acf0e0d19fe00dd3c7cb0bf997))
+* авто-определение `nobody uid/gid`, убран хардкод ([d8daf8d](https://github.com/rcd27/blockcheckw/commit/d8daf8d21655d4ddf91bde16c65ce607bd70e1de))
+
 ## [0.7.1](https://github.com/rcd27/blockcheckw/compare/v0.7.0...v0.7.1) (2026-03-25)
 
 

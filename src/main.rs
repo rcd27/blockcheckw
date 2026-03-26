@@ -148,6 +148,25 @@ enum Command {
         from_file: Option<String>,
     },
 
+    /// Show zapret2 effectiveness: compare access with and without the service
+    Status {
+        /// Path to file with blocked domains (one per line)
+        #[arg(long)]
+        domain_list: String,
+
+        /// DNS resolution mode: auto, system, doh
+        #[arg(long, default_value = "auto")]
+        dns: String,
+
+        /// Request timeout per domain in seconds
+        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u64).range(1..=60))]
+        timeout: u64,
+
+        /// Save JSON report to file
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
     /// Find universal strategies that work across multiple blocked domains
     Universal {
         /// Path to file with blocked domains (one per line)
@@ -288,11 +307,12 @@ async fn main() {
     // Prevent parallel execution — keep _lock alive until process exits
     let _lock = cmd::acquire_instance_lock();
 
-    let console = blockcheckw::ui::Console::new();
-    cmd::check_prerequisites(&console);
-    // Console is available for cmd functions that create their own internally.
-    // In future, pass it through to all cmd entry points.
-    drop(console);
+    // Status doesn't need nfqws2/nft — skip prereqs
+    if !matches!(cli.command, Some(Command::Status { .. })) {
+        let console = blockcheckw::ui::Console::new();
+        cmd::check_prerequisites(&console);
+        drop(console);
+    }
 
     // Init tracing for all subcommands (warn level)
     tracing_subscriber::fmt()
@@ -501,6 +521,39 @@ async fn main() {
                 output.as_deref(),
                 via.as_deref(),
             )
+            .await;
+        }
+        Some(Command::Status {
+            domain_list,
+            dns,
+            timeout,
+            output,
+        }) => {
+            let sub = matches
+                .subcommand_matches("status")
+                .expect("clap guarantees subcommand");
+
+            let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
+
+            if is_explicit(sub, "dns") {
+                persisted.dns = Some(dns.clone());
+            }
+            blockcheckw::persist::save(&persisted);
+
+            let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("ERROR: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            cmd::status::run_status_cmd(cmd::status::StatusParams {
+                domain_list: &domain_list,
+                dns_mode,
+                timeout,
+                output: output.as_deref(),
+            })
             .await;
         }
         Some(Command::Completions { .. }) => unreachable!("handled above"),

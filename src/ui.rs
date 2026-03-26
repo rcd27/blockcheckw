@@ -373,6 +373,11 @@ impl Console {
         }
     }
 
+    /// Get a clone of the last info bar (for passing to async tasks).
+    pub fn last_info_bar(&self) -> Option<ProgressBar> {
+        self.info_bars.last().cloned()
+    }
+
     /// Clear and remove all info bars.
     pub fn finish_info(&mut self) {
         if !self.is_tty {

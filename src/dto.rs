@@ -97,6 +97,53 @@ pub struct UniversalReport {
     pub strategies: Vec<StrategyEntry>,
 }
 
+// ── Status report ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockType {
+    /// Domain is accessible
+    Available,
+    /// TCP connect fails → IP-level block, zapret can't help
+    IpBlocked,
+    /// TCP connects but TLS/data fails → DPI/SNI block, zapret can bypass
+    SniBlocked,
+    /// DNS resolution failed
+    DnsFailed,
+}
+
+impl std::fmt::Display for BlockType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BlockType::Available => write!(f, "available"),
+            BlockType::IpBlocked => write!(f, "IP blocked"),
+            BlockType::SniBlocked => write!(f, "SNI blocked"),
+            BlockType::DnsFailed => write!(f, "DNS failed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DomainStatus {
+    pub domain: String,
+    pub block_type: BlockType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_kbps: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatusReport {
+    pub timestamp: String,
+    pub total: usize,
+    pub available: usize,
+    pub sni_blocked: usize,
+    pub ip_blocked: usize,
+    pub dns_failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_speed_kbps: Option<f64>,
+    pub domains: Vec<DomainStatus>,
+}
+
 // ── Strategy test results (test_runner) ──────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]

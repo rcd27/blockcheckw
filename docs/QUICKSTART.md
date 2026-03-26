@@ -160,7 +160,11 @@ blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --
 
 ### 3. Проверка стратегий (check)
 
-Верификация с реальным data transfer. Стратегии сортируются по простоте автоматически.
+Верификация с реальным data transfer (32KB+). Стратегии сортируются по простоте автоматически.
+
+Автоматически детектирует 16KB DPI cap — когда DPI пропускает TLS handshake, но обрывает
+соединение после ~16KB данных. Такая стратегия грузит страницу, но ломает видео/скачивание.
+check это ловит и помечает стратегию как FAIL.
 
 ```bash
 # Из pipe (рекомендуется):
@@ -217,6 +221,37 @@ blockcheckw -w 512 universal --domain-list blocked.txt --sample 5 | blockcheckw 
 | `-p, --protocols <LIST>` | Протоколы через запятую (по умолчанию `tls12`) |
 | `--dns <MODE>` | DNS: `auto`, `system`, `doh` (по умолчанию `auto`) |
 | `--sample <N>` | Сколько доменов тестировать из списка (по умолчанию 10) |
+| `-o, --output <FILE>` | Сохранить JSON-отчёт в файл |
+
+### 5. Диагностика доступности (status)
+
+Standalone проверка: открывается домен или нет, и если нет — почему.
+Не привязан к стратегиям или zapret2. Просто диагностика.
+
+```bash
+blockcheckw status --domain-list blocked.txt
+```
+
+Для каждого домена: DNS → TCP connect → TLS/HTTP. По результатам — тип блокировки:
+- **available** — домен доступен
+- **SNI blocked** — TCP проходит, TLS нет. DPI блокирует по SNI. zapret может обойти
+- **IP blocked** — TCP не проходит. Нужен VPN
+- **DNS failed** — не резолвится
+
+```
+=== Status summary ===
+  available: 824/1096 | SNI blocked: 135 | IP blocked: 55 | elapsed: 25.9s
+  135 SNI-blocked domains can be bypassed with zapret2
+  55 IP-blocked domains require VPN
+```
+
+1000+ доменов за ~30 секунд. JSON-отчёт сохраняется автоматически.
+
+| Флаг | Описание |
+|------|----------|
+| `--domain-list <FILE>` | Файл с доменами (один на строку, `#` — комментарий) |
+| `--dns <MODE>` | DNS: `auto`, `system`, `doh` (по умолчанию `auto`) |
+| `--timeout <SEC>` | Таймаут на домен в секундах (по умолчанию 6) |
 | `-o, --output <FILE>` | Сохранить JSON-отчёт в файл |
 
 ## Если zapret2 уже запущен

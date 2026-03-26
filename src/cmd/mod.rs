@@ -2,6 +2,7 @@ pub mod benchmark;
 pub mod check;
 pub mod completions;
 pub mod scan;
+pub mod status;
 pub mod universal;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,7 +56,7 @@ impl std::fmt::Display for ServiceManager {
 }
 
 /// Detect how zapret2 is managed. Returns None if no service found.
-async fn detect_service_manager() -> Option<ServiceManager> {
+pub async fn detect_service_manager() -> Option<ServiceManager> {
     use blockcheckw::system::process::run_process;
 
     // Check systemd first (most common on desktop/server Linux)
@@ -82,7 +83,7 @@ async fn detect_service_manager() -> Option<ServiceManager> {
 }
 
 /// Stop zapret2 service. Returns true on success.
-async fn stop_service(mgr: &ServiceManager) -> bool {
+pub async fn stop_service(mgr: &ServiceManager) -> bool {
     use blockcheckw::system::process::run_process;
 
     let result = match mgr {

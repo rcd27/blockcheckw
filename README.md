@@ -1,16 +1,23 @@
 # Blockcheck Wrapper
 
+[![CI](https://github.com/rcd27/blockcheckw/actions/workflows/ci.yml/badge.svg)](https://github.com/rcd27/blockcheckw/actions/workflows/ci.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/rcd27/blockcheckw)](https://github.com/rcd27/blockcheckw/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Быстрая обёртка над [blockcheck2](https://github.com/bol-van/zapret2) для параллельного поиска стратегий обхода DPI.
 
 ## Зачем
 
-Ванильный `blockcheck2.sh` прогоняет стратегии **последовательно** — одну за другой. На TLS 1.2 (~8600 стратегий) это
-занимает **~90 минут**.
+|                        | blockcheck2.sh        | blockcheckw                        |
+|------------------------|-----------------------|------------------------------------|
+| Скорость               | ~90 мин (TLS 1.2)     | ~2 мин (1024 воркера)              |
+| Параллельность         | нет (последовательно) | vmap dispatch, O(1) lookup         |
+| Пропускная способность | ~1 стратегия/сек      | ~150 стратегий/сек                 |
+| Язык                   | Bash + curl           | Rust (compiled binary)             |
+| TLS fingerprint        | curl/OpenSSL          | rustls                             |
+| Установка              | часть zapret2         | отдельный бинарь, install.sh       |
 
-blockcheckw запускает их **параллельно** и находит рабочие стратегии за **~2 минуты** при 1024 воркерах (~150
-стратегий/сек).
-
-> Задача ускорения подбора может быть также решена путём отброса заведомо нерабочих стратегий, с помощью флагов типа 
+> Задача ускорения подбора может быть также решена путём отброса заведомо нерабочих стратегий, с помощью флагов типа
 > --no-{strategy}(сокращением пространства имён стратегий). blockcheckw пошёл путём брут-форса, упор только в RAM
 
 ## Как пользоваться

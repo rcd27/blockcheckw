@@ -12,12 +12,7 @@ use blockcheckw::pipeline::worker_task::HttpTestMode;
 /// Generate N test strategies (fake with TTL 1..N).
 fn generate_strategies(count: usize) -> Vec<Vec<String>> {
     (1..=count)
-        .map(|ttl| {
-            vec![
-                "--dpi-desync=fake".to_string(),
-                format!("--dpi-desync-ttl={ttl}"),
-            ]
-        })
+        .map(|ttl| vec![format!("--lua-desync=fake:ttl={ttl}")])
         .collect()
 }
 

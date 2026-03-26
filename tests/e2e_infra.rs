@@ -101,16 +101,18 @@ async fn nft_vmap_add_remove_rules() {
     let content = &list_result.stdout;
 
     for slot in &slots {
+        let has_queue = content.contains(&format!("queue num {}", slot.qnum))
+            || content.contains(&format!("queue to {}", slot.qnum));
         assert!(
-            content.contains(&format!("queue num {}", slot.qnum)),
-            "table should contain queue num {} for slot {}",
-            slot.qnum,
-            slot.id,
+            has_queue,
+            "table should contain queue for slot {} (qnum {}). Content:\n{content}",
+            slot.id, slot.qnum,
         );
     }
 
     // Verify only 1 postnat dispatch rule + 1 prenat dispatch rule (not N per worker)
-    let postnat_queue_count = content.matches("queue num").count();
+    let postnat_queue_count =
+        content.matches("queue num").count() + content.matches("queue to").count();
     // vmap elements + dispatch rule references — should be more than slots but
     // the key thing is chains have single dispatch rules
     eprintln!("Total 'queue num' occurrences: {postnat_queue_count}");
@@ -123,11 +125,15 @@ async fn nft_vmap_add_remove_rules() {
         .expect("nft list after remove");
 
     for slot in &slots {
-        assert!(
-            !list_result2
+        let still_has = list_result2
+            .stdout
+            .contains(&format!("queue num {}", slot.qnum))
+            || list_result2
                 .stdout
-                .contains(&format!("queue num {}", slot.qnum)),
-            "queue num {} should be removed after cleanup",
+                .contains(&format!("queue to {}", slot.qnum));
+        assert!(
+            !still_has,
+            "queue {} should be removed after cleanup",
             slot.qnum,
         );
     }
@@ -153,10 +159,7 @@ async fn nfqws2_receives_marked_traffic() {
     nftables::drop_table(table).await;
     nftables::prepare_table(table).await.expect("prepare_table");
 
-    let strategy = vec![
-        "--dpi-desync=fake".to_string(),
-        "--dpi-desync-ttl=1".to_string(),
-    ];
+    let strategy = vec!["--lua-desync=fake:ttl=1".to_string()];
     let mut nfqws2 = start_nfqws2(&config, slot.qnum, &strategy).expect("start nfqws2");
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
@@ -203,10 +206,7 @@ async fn autottl_prenat_captures_synack() {
     nftables::drop_table(table).await;
     nftables::prepare_table(table).await.expect("prepare_table");
 
-    let strategy = vec![
-        "--dpi-desync=fake".to_string(),
-        "--dpi-desync-autottl=-2,3-20".to_string(),
-    ];
+    let strategy = vec!["--lua-desync=fake:autottl=-2,3-20".to_string()];
     let mut nfqws2 = start_nfqws2(&config, slot.qnum, &strategy).expect("start nfqws2");
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 

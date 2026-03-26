@@ -65,6 +65,10 @@ pub fn format_baseline_verdict_styled(result: &BaselineResult) -> String {
             &proto,
             &format!("data transfer failed ({size_download}B downloaded)"),
         ),
+        HttpVerdict::DpiDataLimit { size_download } => ui::verdict_blocked(
+            &proto,
+            &format!("DPI data limit ({size_download}B downloaded, likely ~16KB cap)"),
+        ),
     }
 }
 

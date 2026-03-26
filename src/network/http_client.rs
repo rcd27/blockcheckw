@@ -16,7 +16,12 @@ use tokio_rustls::TlsConnector;
 use crate::config::Protocol;
 
 /// Minimum bytes downloaded to consider data transfer successful.
-pub const DATA_TRANSFER_MIN_BYTES: u64 = 1024;
+/// Set to 32KB to catch DPI systems that kill connections after ~16-20KB.
+pub const DATA_TRANSFER_MIN_BYTES: u64 = 32_768;
+
+/// DPI data-limit heuristic: connections killed in this byte range
+/// suggest a DPI system that caps data transfer (typically ~16KB).
+const DPI_LIMIT_RANGE: std::ops::Range<u64> = 10_240..25_600;
 
 /// How much HTTP body to download.
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +65,7 @@ pub enum HttpVerdict {
     ServerReceivesFakes,
     Unavailable { reason: String },
     DataTransferFailed { size_download: u64 },
+    DpiDataLimit { size_download: u64 },
 }
 
 impl fmt::Display for HttpVerdict {
@@ -77,6 +83,12 @@ impl fmt::Display for HttpVerdict {
             }
             HttpVerdict::DataTransferFailed { size_download } => {
                 write!(f, "DATA TRANSFER FAILED ({size_download}B downloaded)")
+            }
+            HttpVerdict::DpiDataLimit { size_download } => {
+                write!(
+                    f,
+                    "DPI DATA LIMIT ({size_download}B downloaded, likely ~16KB cap)"
+                )
             }
         }
     }
@@ -509,12 +521,10 @@ pub fn interpret_data_transfer_result(
     match base_verdict {
         HttpVerdict::Available => {
             let downloaded = result.size_download.unwrap_or(0);
-            if downloaded >= min_bytes {
-                HttpVerdict::Available
-            } else {
-                HttpVerdict::DataTransferFailed {
-                    size_download: downloaded,
-                }
+            match downloaded {
+                n if n >= min_bytes => HttpVerdict::Available,
+                n if DPI_LIMIT_RANGE.contains(&n) => HttpVerdict::DpiDataLimit { size_download: n },
+                n => HttpVerdict::DataTransferFailed { size_download: n },
             }
         }
         other => other,
@@ -646,7 +656,7 @@ mod tests {
             size_download: Some(50_000),
         };
         assert!(matches!(
-            interpret_data_transfer_result(&result, "example.com", 1024),
+            interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
             HttpVerdict::Available
         ));
     }
@@ -660,7 +670,7 @@ mod tests {
             size_download: Some(500),
         };
         assert!(matches!(
-            interpret_data_transfer_result(&result, "example.com", 1024),
+            interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
             HttpVerdict::DataTransferFailed { size_download: 500 }
         ));
     }
@@ -671,10 +681,10 @@ mod tests {
             status_code: Some(200),
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
-            size_download: Some(1024),
+            size_download: Some(DATA_TRANSFER_MIN_BYTES),
         };
         assert!(matches!(
-            interpret_data_transfer_result(&result, "example.com", 1024),
+            interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
             HttpVerdict::Available
         ));
     }
@@ -688,7 +698,7 @@ mod tests {
             size_download: None,
         };
         assert!(matches!(
-            interpret_data_transfer_result(&result, "example.com", 1024),
+            interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
             HttpVerdict::DataTransferFailed { size_download: 0 }
         ));
     }
@@ -702,8 +712,55 @@ mod tests {
             size_download: None,
         };
         assert!(matches!(
-            interpret_data_transfer_result(&result, "example.com", 1024),
+            interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
             HttpVerdict::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn test_interpret_data_transfer_dpi_limit() {
+        let result = HttpResult {
+            status_code: Some(200),
+            headers: "HTTP/1.1 200 OK\r\n".to_string(),
+            error: None,
+            size_download: Some(16_384),
+        };
+        assert!(matches!(
+            interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
+            HttpVerdict::DpiDataLimit {
+                size_download: 16_384
+            }
+        ));
+    }
+
+    #[test]
+    fn test_interpret_data_transfer_dpi_limit_boundaries() {
+        // 10240 — нижняя граница DPI range
+        let result_low = HttpResult {
+            status_code: Some(200),
+            headers: "HTTP/1.1 200 OK\r\n".to_string(),
+            error: None,
+            size_download: Some(10_240),
+        };
+        assert!(matches!(
+            interpret_data_transfer_result(&result_low, "example.com", DATA_TRANSFER_MIN_BYTES),
+            HttpVerdict::DpiDataLimit {
+                size_download: 10_240
+            }
+        ));
+
+        // 26000 — выше DPI range, но ниже min_bytes → DataTransferFailed
+        let result_above = HttpResult {
+            status_code: Some(200),
+            headers: "HTTP/1.1 200 OK\r\n".to_string(),
+            error: None,
+            size_download: Some(26_000),
+        };
+        assert!(matches!(
+            interpret_data_transfer_result(&result_above, "example.com", DATA_TRANSFER_MIN_BYTES),
+            HttpVerdict::DataTransferFailed {
+                size_download: 26_000
+            }
         ));
     }
 

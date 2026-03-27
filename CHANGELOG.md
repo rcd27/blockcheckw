@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.3](https://github.com/rcd27/blockcheckw/compare/v0.8.2...v0.8.3) (2026-03-27)
+
+
+### Features
+
+* **versioning:** --upgrade для скачивания новой версии ([bd401ff](https://github.com/rcd27/blockcheckw/commit/bd401ff731eb891f6b3043c85e3218e98ed269b6))
+
 ## [0.8.2](https://github.com/rcd27/blockcheckw/compare/v0.8.1...v0.8.2) (2026-03-26)
 
 

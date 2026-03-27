@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/rcd27/blockcheckw/compare/v0.8.1...v0.8.2) (2026-03-26)
+
+
+### Features
+
+* **status:** диагностика доступности доменов (SNI/IP/DNS) ([4c17cb1](https://github.com/rcd27/blockcheckw/commit/4c17cb1fb8ee9483e22175e165f02a421c7770ff))
+
 ## [0.8.1](https://github.com/rcd27/blockcheckw/compare/v0.8.0...v0.8.1) (2026-03-26)
 
 

@@ -29,11 +29,18 @@ const fn help_styles() -> clap::builder::styling::Styles {
 #[derive(Parser)]
 #[command(
     name = "blockcheckw",
-    version,
     about = "Parallel DPI bypass strategy scanner",
     styles = help_styles(),
 )]
 struct Cli {
+    /// Print version and check for updates
+    #[arg(short = 'V', long)]
+    version: bool,
+
+    /// Upgrade to the latest release
+    #[arg(long)]
+    upgrade: bool,
+
     /// Number of parallel workers
     #[arg(short, long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=2048))]
     workers: u16,
@@ -266,6 +273,18 @@ async fn main() {
     // Parse CLI: get both typed struct and raw matches (for value_source detection)
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    // --version: print version + check for updates (no root needed)
+    if cli.version {
+        print_version_and_check().await;
+        return;
+    }
+
+    // --upgrade: download and install latest release (no root needed)
+    if cli.upgrade {
+        run_upgrade().await;
+        return;
+    }
 
     // Completions don't need root — handle before elevation
     if let Some(Command::Completions { shell, install }) = &cli.command {
@@ -559,6 +578,78 @@ async fn main() {
         Some(Command::Completions { .. }) => unreachable!("handled above"),
         None => {
             let _ = Cli::command().print_help();
+        }
+    }
+}
+
+/// Print current version and check GitHub for updates.
+async fn print_version_and_check() {
+    use console::style;
+
+    let current = env!("CARGO_PKG_VERSION");
+    println!("blockcheckw v{current}");
+
+    eprint!("checking for updates... ");
+    match blockcheckw::network::update_check::check_latest_release(current).await {
+        Some(release) => {
+            eprintln!(
+                "{}",
+                style(format!("newer version available: {}", release.tag))
+                    .yellow()
+                    .bold()
+            );
+            eprintln!(
+                "  upgrade: {}",
+                style("blockcheckw --upgrade").green().bold()
+            );
+        }
+        None => {
+            eprintln!("{}", style("up to date").green());
+        }
+    }
+}
+
+/// Download and install the latest release.
+async fn run_upgrade() {
+    use console::style;
+
+    let current = env!("CARGO_PKG_VERSION");
+    let con = blockcheckw::ui::Console::new();
+
+    con.println(&format!("blockcheckw v{current}"));
+    con.println("checking for updates...");
+
+    match blockcheckw::network::update_check::check_latest_release(current).await {
+        Some(release) => {
+            con.ok(&format!(
+                "newer version available: {} → {}",
+                style(format!("v{current}")).dim(),
+                style(&release.tag).green().bold(),
+            ));
+            con.println("  running install script...");
+            con.newline();
+
+            let status = std::process::Command::new("bash")
+                .args([
+                    "-c",
+                    "curl -fsSL https://raw.githubusercontent.com/rcd27/blockcheckw/main/scripts/install.sh | bash",
+                ])
+                .status();
+
+            match status {
+                Ok(s) if s.success() => {
+                    con.newline();
+                    con.ok("upgrade complete");
+                }
+                _ => {
+                    con.newline();
+                    con.error("upgrade failed");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => {
+            con.ok(&format!("v{current} is the latest version"));
         }
     }
 }

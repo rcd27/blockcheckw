@@ -147,25 +147,13 @@ pub fn default_max_workers() -> usize {
     SystemProfile::detect().estimated_max
 }
 
-/// Find optimal worker count: highest throughput with zero errors.
+/// Find optimal worker count: highest throughput across all levels.
+///
+/// Benchmark measures scanning speed, not strategy success rate.
+/// "Errors" (failed strategies) are expected — they don't indicate
+/// infrastructure problems, so we pick purely by throughput.
 pub fn find_optimal(points: &[BenchmarkPoint]) -> usize {
-    let clean: Vec<&BenchmarkPoint> = points.iter().filter(|p| p.errors == 0).collect();
-
-    if clean.is_empty() {
-        return points
-            .iter()
-            .min_by(|a, b| {
-                a.errors.cmp(&b.errors).then(
-                    b.throughput
-                        .partial_cmp(&a.throughput)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                )
-            })
-            .map(|p| p.workers)
-            .unwrap_or(8);
-    }
-
-    clean
+    points
         .iter()
         .max_by(|a, b| {
             a.throughput
@@ -534,7 +522,8 @@ mod tests {
                 peak_mem_mb: 0.0,
             },
         ];
-        assert_eq!(find_optimal(&points), 128);
+        // 256 has highest throughput (35.0) — pick it regardless of errors
+        assert_eq!(find_optimal(&points), 256);
     }
 
     #[test]
@@ -559,7 +548,8 @@ mod tests {
                 peak_mem_mb: 0.0,
             },
         ];
-        assert_eq!(find_optimal(&points), 4);
+        // Highest throughput wins, errors are irrelevant for benchmark
+        assert_eq!(find_optimal(&points), 8);
     }
 
     #[test]

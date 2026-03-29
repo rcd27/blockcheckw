@@ -389,7 +389,7 @@ pub struct CleanupInfo {
     pub nft_backup: Option<String>,
 }
 
-/// Create shared cleanup state and spawn Ctrl+C handler that will:
+/// Create shared cleanup state and spawn signal handlers (SIGINT + SIGTERM) that will:
 /// 1. Drop our nft table
 /// 2. Restart zapret2 service if we stopped it
 pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
@@ -434,15 +434,22 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
         prev_hook(info);
     }));
 
-    let handler_state = state.clone();
+    // SIGTERM handler — same cleanup as Ctrl+C
+    let sigterm_state = state.clone();
     tokio::spawn(async move {
-        // First Ctrl+C: graceful cleanup
-        if tokio::signal::ctrl_c().await.is_ok() {
-            eprintln!("\n{}", style("=== Ctrl+C — cleaning up ===").bold().cyan());
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+        sigterm.recv().await;
+        graceful_cleanup("SIGTERM", &sigterm_state, 143).await;
+    });
 
+    // SIGINT (Ctrl+C) handler
+    let sigint_state = state.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
             // Spawn force-quit listener + delayed hint
             tokio::spawn(async {
-                // Show hint only if cleanup takes more than 1 second
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 eprintln!("  {} press Ctrl+C again to force quit", style("→").dim());
             });
@@ -452,40 +459,51 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
                     std::process::exit(137);
                 }
             });
-
-            blockcheckw::network::route::remove_all_routes().await;
-            let info = handler_state.lock().await;
-            blockcheckw::firewall::nftables::drop_table(&info.nft_table).await;
-            eprintln!(
-                "  {} nft table '{}' dropped",
-                style("OK").green().bold(),
-                info.nft_table,
-            );
-            if let Some(ref mgr) = info.stopped_service {
-                if start_service(mgr).await {
-                    eprintln!(
-                        "  {} zapret2 restarted via {mgr}",
-                        style("OK").green().bold(),
-                    );
-                } else {
-                    eprintln!(
-                        "  {}failed to restart zapret2 via {mgr}, please start manually",
-                        WARN,
-                    );
-                }
-            }
-            // Restore user's nft ruleset from backup
-            if let Some(ref dump) = info.nft_backup {
-                // Small delay to let zapret2 finish creating its tables
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                let cleanup_con = blockcheckw::ui::Console::new();
-                restore_nft_ruleset(dump, &cleanup_con).await;
-            }
-            std::process::exit(130);
+            graceful_cleanup("Ctrl+C", &sigint_state, 130).await;
         }
     });
 
     state
+}
+
+/// Shared graceful cleanup logic for SIGINT and SIGTERM.
+async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i32) {
+    eprintln!(
+        "\n{}",
+        style(format!("=== {signal_name} — cleaning up ==="))
+            .bold()
+            .cyan()
+    );
+
+    blockcheckw::network::route::remove_all_routes().await;
+    let info = state.lock().await;
+    blockcheckw::firewall::nftables::drop_table(&info.nft_table).await;
+    eprintln!(
+        "  {} nft table '{}' dropped",
+        style("OK").green().bold(),
+        info.nft_table,
+    );
+    if let Some(ref mgr) = info.stopped_service {
+        if start_service(mgr).await {
+            eprintln!(
+                "  {} zapret2 restarted via {mgr}",
+                style("OK").green().bold(),
+            );
+        } else {
+            eprintln!(
+                "  {}failed to restart zapret2 via {mgr}, please start manually",
+                WARN,
+            );
+        }
+    }
+    // Restore user's nft ruleset from backup
+    if let Some(ref dump) = info.nft_backup {
+        // Small delay to let zapret2 finish creating its tables
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let cleanup_con = blockcheckw::ui::Console::new();
+        restore_nft_ruleset(dump, &cleanup_con).await;
+    }
+    std::process::exit(exit_code);
 }
 
 /// Record that we stopped a service, so Ctrl+C handler can restart it.

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.4](https://github.com/rcd27/blockcheckw/compare/v0.8.3...v0.8.4) (2026-03-29)
+
+
+### Bug Fixes
+
+* **benchmark:** невернеая рекомендация по количеству воркеров ([0cba1d0](https://github.com/rcd27/blockcheckw/commit/0cba1d06e63d4a4df53b7fe75b66174097db8479)), closes [#27](https://github.com/rcd27/blockcheckw/issues/27)
+* **core:** обработка SIGTERM ([a8240e3](https://github.com/rcd27/blockcheckw/commit/a8240e3affeb480d63aee35fdd523f0ef47c23d6))
+
 ## [0.8.3](https://github.com/rcd27/blockcheckw/compare/v0.8.2...v0.8.3) (2026-03-27)
 
 

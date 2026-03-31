@@ -11,7 +11,7 @@ use blockcheckw::dto::{BlockType, DomainStatus, StatusReport};
 use blockcheckw::network::http_client::{
     http_test_data, pick_random_ip, BodyMode, DATA_TRANSFER_MIN_BYTES,
 };
-use blockcheckw::network::{dns, isp};
+use blockcheckw::network::{dns, isp, route};
 use blockcheckw::pipeline::test_report::chrono_like_timestamp;
 use blockcheckw::ui;
 use blockcheckw::ui::{CHECKMARK, CROSS};
@@ -23,6 +23,7 @@ pub struct StatusParams<'a> {
     pub dns_mode: DnsMode,
     pub timeout: u64,
     pub output: Option<&'a str>,
+    pub via: Option<&'a str>,
 }
 
 /// Single probe result for one domain.
@@ -42,7 +43,13 @@ async fn tcp_reachable(ip: &str, timeout_secs: u64) -> bool {
 }
 
 /// Resolve + classify + probe a single domain.
-async fn resolve_and_probe(domain: &str, dns_mode: DnsMode, timeout_secs: u64) -> ProbeResult {
+/// When `via` is set, adds a route for resolved IPs through the remote gateway.
+async fn resolve_and_probe(
+    domain: &str,
+    dns_mode: DnsMode,
+    timeout_secs: u64,
+    via: Option<&str>,
+) -> ProbeResult {
     // Step 1: DNS
     let ips = match dns::resolve_domain(domain, dns_mode).await {
         Ok(r) if !r.ips.is_empty() => r.ips,
@@ -64,6 +71,11 @@ async fn resolve_and_probe(domain: &str, dns_mode: DnsMode, timeout_secs: u64) -
             }
         }
     };
+
+    // Step 1b: add route via remote gateway (idempotent, skips already-added IPs)
+    if let Some(gateway) = via {
+        route::add_routes(gateway, &ips).await;
+    }
 
     // Step 2: TCP connect — IP blocked?
     if !tcp_reachable(ip, timeout_secs).await {
@@ -131,6 +143,7 @@ async fn probe_all(
     domains: &[String],
     dns_mode: DnsMode,
     timeout_secs: u64,
+    via: Option<&str>,
     pb: &ProgressBar,
     status_bar: Option<ProgressBar>,
 ) -> Vec<ProbeResult> {
@@ -138,6 +151,7 @@ async fn probe_all(
     // Tracks how many probes are currently in-flight (displayed in info-bar).
     let in_flight = Arc::new(AtomicUsize::new(0));
     let pb = pb.clone();
+    let via = via.map(|s| s.to_string());
 
     let tasks: Vec<_> = domains
         .iter()
@@ -147,6 +161,7 @@ async fn probe_all(
             let pb = pb.clone();
             let sb = status_bar.clone();
             let flight = in_flight.clone();
+            let via = via.clone();
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
                 let active = flight.fetch_add(1, Ordering::Relaxed) + 1;
@@ -158,7 +173,7 @@ async fn probe_all(
                     ));
                     bar.tick();
                 }
-                let r = resolve_and_probe(&domain, dns_mode, timeout_secs).await;
+                let r = resolve_and_probe(&domain, dns_mode, timeout_secs, via.as_deref()).await;
                 flight.fetch_sub(1, Ordering::Relaxed);
                 pb.inc(1);
                 r
@@ -196,6 +211,7 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
         dns_mode,
         timeout,
         output,
+        via,
     } = params;
 
     let mut con = ui::Console::new();
@@ -211,20 +227,33 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
     con.section("Status");
     con.println(&format!("  {} domains from {}", domains.len(), domain_list));
 
+    // Remote gateway check (before probing)
+    if let Some(gateway) = via {
+        if !route::check_gateway(gateway, &con).await {
+            std::process::exit(1);
+        }
+    }
+
     // ISP detection runs concurrently with domain probes
     let isp_handle = tokio::spawn(isp::detect_ip_info());
 
     // ── Parallel probe ───────────────────────────────────────────────────
     // All domains are resolved + probed in one pass with progress bar
     // and a sticky info-bar showing "[N active] domain".
+    // When --via is set, each probe adds a route for resolved IPs.
     let total = domains.len();
     let probe_start = Instant::now();
     con.begin_progress(total as u64);
     con.add_info_line(""); // empty info-bar slot for status_bar updates
     let status_bar = con.last_info_bar();
-    let results = probe_all(&domains, dns_mode, timeout, con.pb(), status_bar).await;
+    let results = probe_all(&domains, dns_mode, timeout, via, con.pb(), status_bar).await;
     con.finish_progress();
     let elapsed = probe_start.elapsed();
+
+    // Clean up routes added during probing
+    if via.is_some() {
+        route::remove_all_routes().await;
+    }
 
     if let Ok(Some(info)) = isp_handle.await {
         con.add_info_line(&format!("ISP: {info}"));

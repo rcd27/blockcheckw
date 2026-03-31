@@ -572,6 +572,7 @@ async fn main() {
                 dns_mode,
                 timeout,
                 output: output.as_deref(),
+                via: via.as_deref(),
             })
             .await;
         }

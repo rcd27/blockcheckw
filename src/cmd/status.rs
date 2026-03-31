@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -118,6 +119,14 @@ async fn resolve_and_probe(domain: &str, dns_mode: DnsMode, timeout_secs: u64) -
 }
 
 /// Resolve DNS + probe all domains in parallel, returning results.
+///
+/// Up to 256 domains are probed concurrently. During the run the caller sees:
+///   - a progress bar ticking after each completed domain,
+///   - a sticky info-bar showing `[N active] current_domain`.
+///
+/// The info-bar shows the *last started* domain, not necessarily the slowest one,
+/// but the `[N active]` counter keeps updating so the user knows work is happening
+/// even when a slow domain stalls the displayed name.
 async fn probe_all(
     domains: &[String],
     dns_mode: DnsMode,
@@ -126,6 +135,8 @@ async fn probe_all(
     status_bar: Option<ProgressBar>,
 ) -> Vec<ProbeResult> {
     let semaphore = Arc::new(Semaphore::new(256));
+    // Tracks how many probes are currently in-flight (displayed in info-bar).
+    let in_flight = Arc::new(AtomicUsize::new(0));
     let pb = pb.clone();
 
     let tasks: Vec<_> = domains
@@ -135,38 +146,21 @@ async fn probe_all(
             let sem = semaphore.clone();
             let pb = pb.clone();
             let sb = status_bar.clone();
+            let flight = in_flight.clone();
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
+                let active = flight.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(ref bar) = sb {
-                    bar.set_message(format!("{}", console::style(&domain).dim()));
+                    bar.set_message(format!(
+                        "{} {}",
+                        console::style(format!("[{active} active]")).dim(),
+                        console::style(&domain).dim(),
+                    ));
                     bar.tick();
                 }
                 let r = resolve_and_probe(&domain, dns_mode, timeout_secs).await;
+                flight.fetch_sub(1, Ordering::Relaxed);
                 pb.inc(1);
-
-                let (icon, detail) = match r.block_type {
-                    BlockType::Available => (
-                        format!("{}", console::style(format!("{CHECKMARK}")).green()),
-                        r.speed_kbps
-                            .map(|s| format!("{:.0} Kbps", s))
-                            .unwrap_or_default(),
-                    ),
-                    BlockType::IpBlocked => (
-                        format!("{}", console::style(format!("{CROSS}")).red()),
-                        format!("{}", console::style("IP blocked").red()),
-                    ),
-                    BlockType::SniBlocked => (
-                        format!("{}", console::style(format!("{CROSS}")).yellow()),
-                        format!("{}", console::style("SNI blocked").yellow()),
-                    ),
-                    BlockType::DnsFailed => (
-                        format!("{}", console::style(format!("{CROSS}")).dim()),
-                        format!("{}", console::style("DNS failed").dim()),
-                    ),
-                };
-                let line = format!("  {:<30} {}  {}", domain, icon, detail);
-                pb.suspend(|| eprintln!("{line}"));
-
                 r
             })
         })
@@ -217,14 +211,16 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
     con.section("Status");
     con.println(&format!("  {} domains from {}", domains.len(), domain_list));
 
-    // ISP detection in background
+    // ISP detection runs concurrently with domain probes
     let isp_handle = tokio::spawn(isp::detect_ip_info());
 
-    // DNS resolve + probe in one pass
+    // ── Parallel probe ───────────────────────────────────────────────────
+    // All domains are resolved + probed in one pass with progress bar
+    // and a sticky info-bar showing "[N active] domain".
     let total = domains.len();
     let probe_start = Instant::now();
     con.begin_progress(total as u64);
-    con.add_info_line("");
+    con.add_info_line(""); // empty info-bar slot for status_bar updates
     let status_bar = con.last_info_bar();
     let results = probe_all(&domains, dns_mode, timeout, con.pb(), status_bar).await;
     con.finish_progress();
@@ -234,26 +230,46 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
         con.add_info_line(&format!("ISP: {info}"));
     }
 
-    // Count by block type
-    let available = results
+    // ── Sort results for the summary table ───────────────────────────────
+    // Order: Available (fastest first) → SNI blocked → IP blocked → DNS failed
+    let mut sorted = results;
+    sorted.sort_by(|a, b| {
+        let order = |bt: &BlockType| match bt {
+            BlockType::Available => 0,
+            BlockType::SniBlocked => 1,
+            BlockType::IpBlocked => 2,
+            BlockType::DnsFailed => 3,
+        };
+        order(&a.block_type)
+            .cmp(&order(&b.block_type))
+            .then_with(|| {
+                b.speed_kbps
+                    .unwrap_or(0.0)
+                    .partial_cmp(&a.speed_kbps.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    // ── Aggregate counters ───────────────────────────────────────────────
+    let available = sorted
         .iter()
         .filter(|r| r.block_type == BlockType::Available)
         .count();
-    let sni_blocked = results
+    let sni_blocked = sorted
         .iter()
         .filter(|r| r.block_type == BlockType::SniBlocked)
         .count();
-    let ip_blocked = results
+    let ip_blocked = sorted
         .iter()
         .filter(|r| r.block_type == BlockType::IpBlocked)
         .count();
-    let dns_failed = results
+    let dns_failed = sorted
         .iter()
         .filter(|r| r.block_type == BlockType::DnsFailed)
         .count();
 
-    // Build report
-    let domain_statuses: Vec<DomainStatus> = results
+    // ── Build JSON-serializable report ───────────────────────────────────
+    let domain_statuses: Vec<DomainStatus> = sorted
         .iter()
         .map(|r| DomainStatus {
             domain: r.domain.clone(),
@@ -272,14 +288,65 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
         Some(speeds.iter().sum::<f64>() / speeds.len() as f64)
     };
 
-    // Summary
+    // ── Summary table ────────────────────────────────────────────────────
+    // Printed after all probes complete so columns can be properly aligned.
+    // Domain column width adapts to the longest domain name.
     con.newline();
     con.section("Status summary");
+
+    let domain_col_w = sorted
+        .iter()
+        .map(|r| r.domain.len())
+        .max()
+        .unwrap_or(6)
+        .max(6); // minimum 6 chars ("Domain" header)
+
+    let header = format!(
+        "  {:<domain_col_w$}  {:^12}  {:>10}",
+        style("Domain").bold(),
+        style("Status").bold(),
+        style("Speed").bold(),
+    );
+    let separator = format!("  {}", style("─".repeat(domain_col_w + 26)).dim());
+
+    con.println(&header);
+    con.println(&separator);
+
+    for r in &sorted {
+        let (status_str, speed_str) = match r.block_type {
+            BlockType::Available => (
+                format!("{} {}", CHECKMARK, style("available").green()),
+                r.speed_kbps
+                    .map(|s| format!("{:.0} Kbps", s))
+                    .unwrap_or_default(),
+            ),
+            BlockType::SniBlocked => (
+                format!("{} {}", CROSS, style("SNI blocked").yellow()),
+                String::new(),
+            ),
+            BlockType::IpBlocked => (
+                format!("{} {}", CROSS, style("IP blocked").red()),
+                String::new(),
+            ),
+            BlockType::DnsFailed => (
+                format!("{} {}", CROSS, style("DNS failed").dim()),
+                String::new(),
+            ),
+        };
+        con.println(&format!(
+            "  {:<domain_col_w$}  {:<12}  {:>10}",
+            r.domain, status_str, speed_str,
+        ));
+    }
+
+    // Footer: totals + actionable hints
+    con.println(&separator);
     con.println(&format!(
-        "  available: {} | SNI blocked: {} | IP blocked: {} | elapsed: {:.1}s{}",
+        "  available: {} | SNI blocked: {} | IP blocked: {} | DNS failed: {} | elapsed: {:.1}s{}",
         style(format!("{available}/{total}")).green().bold(),
         style(sni_blocked).yellow().bold(),
         style(ip_blocked).red().bold(),
+        style(dns_failed).dim(),
         elapsed.as_secs_f64(),
         avg_speed
             .map(|s| format!(" | avg speed: {:.0} Kbps", s))
@@ -298,7 +365,7 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
         ));
     }
 
-    // JSON report
+    // ── Persist JSON report ──────────────────────────────────────────────
     let report = StatusReport {
         timestamp: chrono_like_timestamp(),
         total,

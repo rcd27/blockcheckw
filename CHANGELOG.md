@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.6](https://github.com/rcd27/blockcheckw/compare/v0.8.5...v0.8.6) (2026-04-04)
+
+
+### Features
+
+* **via:** обработка --via флага теперь включает в себя http+socks5 IPV4 ([df13615](https://github.com/rcd27/blockcheckw/commit/df13615e04d4455dfe70e35684aa01b7e4a4ee1a))
+
 ## [0.8.5](https://github.com/rcd27/blockcheckw/compare/v0.8.4...v0.8.5) (2026-03-31)
 
 

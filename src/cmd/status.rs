@@ -11,7 +11,7 @@ use blockcheckw::dto::{BlockType, DomainStatus, StatusReport};
 use blockcheckw::network::http_client::{
     http_test_data, pick_random_ip, BodyMode, DATA_TRANSFER_MIN_BYTES,
 };
-use blockcheckw::network::{dns, isp, route};
+use blockcheckw::network::{dns, isp, via::Via};
 use blockcheckw::pipeline::test_report::chrono_like_timestamp;
 use blockcheckw::ui;
 use blockcheckw::ui::{CHECKMARK, CROSS};
@@ -23,7 +23,7 @@ pub struct StatusParams<'a> {
     pub dns_mode: DnsMode,
     pub timeout: u64,
     pub output: Option<&'a str>,
-    pub via: Option<&'a str>,
+    pub via: Option<&'a Via>,
 }
 
 /// Single probe result for one domain.
@@ -48,7 +48,7 @@ async fn resolve_and_probe(
     domain: &str,
     dns_mode: DnsMode,
     timeout_secs: u64,
-    via: Option<&str>,
+    via: Option<&Via>,
 ) -> ProbeResult {
     // Step 1: DNS
     let ips = match dns::resolve_domain(domain, dns_mode).await {
@@ -73,12 +73,22 @@ async fn resolve_and_probe(
     };
 
     // Step 1b: add route via remote gateway (idempotent, skips already-added IPs)
-    if let Some(gateway) = via {
-        route::add_routes(gateway, &ips).await;
+    if let Some(v) = via {
+        v.add_routes(&ips).await;
     }
 
     // Step 2: TCP connect — IP blocked?
-    if !tcp_reachable(ip, timeout_secs).await {
+    let ip_reachable = match via {
+        Some(v) if v.is_proxy() => {
+            let addr: std::net::SocketAddr = format!("{ip}:443").parse().unwrap();
+            let timeout = std::time::Duration::from_secs(timeout_secs);
+            tokio::time::timeout(timeout, v.tcp_connect(addr))
+                .await
+                .is_ok_and(|r| r.is_ok())
+        }
+        _ => tcp_reachable(ip, timeout_secs).await,
+    };
+    if !ip_reachable {
         return ProbeResult {
             domain: domain.to_string(),
             block_type: BlockType::IpBlocked,
@@ -98,6 +108,7 @@ async fn resolve_and_probe(
         0,
         timeout_secs,
         BodyMode::LimitedTo(DATA_TRANSFER_MIN_BYTES * 2),
+        via,
     )
     .await;
     let elapsed = start.elapsed();
@@ -143,7 +154,7 @@ async fn probe_all(
     domains: &[String],
     dns_mode: DnsMode,
     timeout_secs: u64,
-    via: Option<&str>,
+    via: Option<&Via>,
     pb: &ProgressBar,
     status_bar: Option<ProgressBar>,
 ) -> Vec<ProbeResult> {
@@ -151,7 +162,7 @@ async fn probe_all(
     // Tracks how many probes are currently in-flight (displayed in info-bar).
     let in_flight = Arc::new(AtomicUsize::new(0));
     let pb = pb.clone();
-    let via = via.map(|s| s.to_string());
+    let via = via.cloned();
 
     let tasks: Vec<_> = domains
         .iter()
@@ -173,7 +184,7 @@ async fn probe_all(
                     ));
                     bar.tick();
                 }
-                let r = resolve_and_probe(&domain, dns_mode, timeout_secs, via.as_deref()).await;
+                let r = resolve_and_probe(&domain, dns_mode, timeout_secs, via.as_ref()).await;
                 flight.fetch_sub(1, Ordering::Relaxed);
                 pb.inc(1);
                 r
@@ -228,8 +239,8 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
     con.println(&format!("  {} domains from {}", domains.len(), domain_list));
 
     // Remote gateway check (before probing)
-    if let Some(gateway) = via {
-        if !route::check_gateway(gateway, &con).await {
+    if let Some(v) = via {
+        if !v.check_reachable(&con).await {
             std::process::exit(1);
         }
     }
@@ -251,8 +262,8 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
     let elapsed = probe_start.elapsed();
 
     // Clean up routes added during probing
-    if via.is_some() {
-        route::remove_all_routes().await;
+    if let Some(v) = via {
+        v.cleanup().await;
     }
 
     if let Ok(Some(info)) = isp_handle.await {

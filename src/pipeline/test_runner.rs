@@ -163,7 +163,7 @@ async fn execute_timed_test(
     let ip_str = pick_random_ip(ips).unwrap_or("127.0.0.1");
 
     let test_start = Instant::now();
-    let result = http_test(protocol, domain, ip_str, slot.fwmark, request_timeout).await;
+    let result = http_test(protocol, domain, ip_str, slot.fwmark, request_timeout, None).await;
     let verdict = interpret_http_result(&result, domain);
     let success = matches!(verdict, HttpVerdict::Available);
     let verdict_str = format!("{verdict}");
@@ -198,7 +198,7 @@ async fn execute_baseline_pass(
     let ip_str = pick_random_ip(ips).unwrap_or("127.0.0.1");
 
     let test_start = Instant::now();
-    let result = http_test(protocol, domain, ip_str, 0, request_timeout).await;
+    let result = http_test(protocol, domain, ip_str, 0, request_timeout, None).await;
     let verdict = interpret_http_result(&result, domain);
     let success = matches!(verdict, HttpVerdict::Available);
     let verdict_str = format!("{verdict}");

@@ -6,7 +6,7 @@ use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
 use blockcheckw::error::TaskResult;
 use blockcheckw::firewall::nftables;
 use blockcheckw::network::dns::DnsSpoofResult;
-use blockcheckw::network::{dns, isp, route};
+use blockcheckw::network::{dns, isp, via::Via};
 use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::report::{self, ProtocolSummary};
 use blockcheckw::pipeline::runner::{run_parallel, RunParams};
@@ -28,7 +28,7 @@ pub struct ScanParams<'a> {
     pub top_n: usize,
     pub output: Option<&'a str>,
     pub from_file: Option<&'a str>,
-    pub via: Option<&'a str>,
+    pub via: Option<&'a Via>,
 }
 
 pub async fn run_scan(params: ScanParams<'_>) {
@@ -118,11 +118,11 @@ pub async fn run_scan(params: ScanParams<'_>) {
     };
 
     // 1b. Remote gateway route setup
-    if let Some(gateway) = via {
-        if !route::check_gateway(gateway, &screen).await {
+    if let Some(v) = via {
+        if !v.check_reachable(&screen).await {
             std::process::exit(1);
         }
-        route::add_routes(gateway, &ips).await;
+        v.add_routes(&ips).await;
     }
 
     // 1c. Check for conflicting DPI bypass processes
@@ -159,7 +159,9 @@ pub async fn run_scan(params: ScanParams<'_>) {
             style("All protocols are available without bypass. Nothing to scan.").green()
         ));
         // Restore routes + zapret2 before early return
-        route::remove_all_routes().await;
+        if let Some(v) = via {
+            v.cleanup().await;
+        }
         if let Some(ref mgr) = stopped_service {
             restore_service(mgr, &nft_backup, &screen).await;
         }
@@ -390,7 +392,9 @@ pub async fn run_scan(params: ScanParams<'_>) {
     screen.finish_info();
 
     // Cleanup routes + restore zapret2
-    route::remove_all_routes().await;
+    if let Some(v) = via {
+        v.cleanup().await;
+    }
     if let Some(ref mgr) = stopped_service {
         restore_service(mgr, &nft_backup, &screen).await;
     }

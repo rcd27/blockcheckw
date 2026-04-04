@@ -49,7 +49,7 @@ struct Cli {
     #[arg(long, global = true)]
     auto: bool,
 
-    /// Route traffic through a remote gateway (e.g. Tailscale IP of a router)
+    /// Route traffic through a gateway or proxy (e.g. 100.64.0.5, localhost:8888, socks5://host:1080)
     #[arg(long, global = true)]
     via: Option<String>,
 
@@ -247,7 +247,7 @@ async fn main() {
     // Panic hook: cleanup nftables table on panic (async runtime may be dead, use sync Command)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        blockcheckw::network::route::remove_all_routes_sync();
+        blockcheckw::network::via::Via::cleanup_sync();
         if let Ok(mut child) = std::process::Command::new("nft")
             .args(["delete", "table", "inet", "zapret"])
             .stdout(std::process::Stdio::null())
@@ -306,7 +306,12 @@ async fn main() {
     }
 
     cmd::set_auto_yes(cli.auto);
-    let via = cli.via;
+    let via = cli.via.map(|raw| {
+        blockcheckw::network::via::Via::parse(&raw).unwrap_or_else(|e| {
+            eprintln!("ERROR: --via: {e}");
+            std::process::exit(1);
+        })
+    });
 
     blockcheckw::system::elevate::require_root();
     blockcheckw::system::elevate::tune_tcp();
@@ -426,7 +431,7 @@ async fn main() {
                 take,
                 passes: passes as usize,
                 output: output.as_deref(),
-                via: via.as_deref(),
+                via: via.as_ref(),
             })
             .await;
 
@@ -487,7 +492,7 @@ async fn main() {
                 top_n: top,
                 output: output.as_deref(),
                 from_file: from_file.as_deref(),
-                via: via.as_deref(),
+                via: via.as_ref(),
             })
             .await;
         }
@@ -538,7 +543,7 @@ async fn main() {
                 dns_mode,
                 sample,
                 output.as_deref(),
-                via.as_deref(),
+                via.as_ref(),
             )
             .await;
         }
@@ -572,7 +577,7 @@ async fn main() {
                 dns_mode,
                 timeout,
                 output: output.as_deref(),
-                via: via.as_deref(),
+                via: via.as_ref(),
             })
             .await;
         }

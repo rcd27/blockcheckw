@@ -123,6 +123,7 @@ pub async fn execute_worker_task_with_mode(
                 ip,
                 task.slot.fwmark,
                 config.request_timeout,
+                None,
             )
             .await;
             interpret_http_result(&result, &task.domain)
@@ -135,6 +136,7 @@ pub async fn execute_worker_task_with_mode(
                 task.slot.fwmark,
                 config.request_timeout,
                 BodyMode::Unlimited,
+                None,
             )
             .await;
             interpret_data_transfer_result(&result, &task.domain, min_bytes)
@@ -203,6 +205,7 @@ pub async fn execute_worker_task_rules_ready(
                 ip,
                 task.slot.fwmark,
                 config.request_timeout,
+                None,
             )
             .await;
             interpret_http_result(&result, &task.domain)
@@ -215,6 +218,7 @@ pub async fn execute_worker_task_rules_ready(
                 task.slot.fwmark,
                 config.request_timeout,
                 BodyMode::Unlimited,
+                None,
             )
             .await;
             interpret_data_transfer_result(&result, &task.domain, min_bytes)

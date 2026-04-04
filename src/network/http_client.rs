@@ -175,12 +175,13 @@ pub async fn http_test(
     ip: &str,
     fwmark: u32,
     timeout_secs: u64,
+    via: Option<&crate::network::via::Via>,
 ) -> HttpResult {
     let timeout = Duration::from_secs(timeout_secs);
 
     match tokio::time::timeout(
         timeout,
-        http_test_inner(protocol, domain, ip, fwmark, BodyMode::Head),
+        http_test_inner(protocol, domain, ip, fwmark, BodyMode::Head, via),
     )
     .await
     {
@@ -202,10 +203,16 @@ pub async fn http_test_data(
     fwmark: u32,
     timeout_secs: u64,
     mode: BodyMode,
+    via: Option<&crate::network::via::Via>,
 ) -> HttpResult {
     let timeout = Duration::from_secs(timeout_secs);
 
-    match tokio::time::timeout(timeout, http_test_inner(protocol, domain, ip, fwmark, mode)).await {
+    match tokio::time::timeout(
+        timeout,
+        http_test_inner(protocol, domain, ip, fwmark, mode, via),
+    )
+    .await
+    {
         Ok(result) => result,
         Err(_) => HttpResult {
             status_code: None,
@@ -224,8 +231,9 @@ async fn http_test_inner(
     ip: &str,
     fwmark: u32,
     mode: BodyMode,
+    via: Option<&crate::network::via::Via>,
 ) -> HttpResult {
-    let result = http_single_request(protocol, domain, ip, fwmark, mode).await;
+    let result = http_single_request(protocol, domain, ip, fwmark, mode, via).await;
 
     // Follow one redirect if it points to the same domain
     if let Some(code) = result.status_code {
@@ -233,8 +241,15 @@ async fn http_test_inner(
             if let Some(location) = extract_location(&result.headers) {
                 if location.to_lowercase().contains(&domain.to_lowercase()) {
                     if let Some(redirect_host) = extract_host_from_url(&location) {
-                        return http_single_request(protocol, &redirect_host, ip, fwmark, mode)
-                            .await;
+                        return http_single_request(
+                            protocol,
+                            &redirect_host,
+                            ip,
+                            fwmark,
+                            mode,
+                            via,
+                        )
+                        .await;
                     }
                 }
             }
@@ -252,6 +267,7 @@ async fn http_single_request(
     ip: &str,
     fwmark: u32,
     mode: BodyMode,
+    via: Option<&crate::network::via::Via>,
 ) -> HttpResult {
     let port = protocol.port();
     let addr: SocketAddr = match format!("{ip}:{port}").parse() {
@@ -266,17 +282,30 @@ async fn http_single_request(
         }
     };
 
-    // Step 1: TCP connect with SO_MARK
-    let tcp_stream = match marked_tcp_connect(addr, fwmark).await {
-        Ok(s) => s,
-        Err(e) => {
-            return HttpResult {
-                status_code: None,
-                headers: String::new(),
-                error: Some(format!("connect: {e}")),
-                size_download: None,
-            };
-        }
+    // TCP connect: via proxy tunnel or direct with SO_MARK
+    let tcp_stream = match via.filter(|v| v.is_proxy()) {
+        Some(v) => match v.tcp_connect(addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                return HttpResult {
+                    status_code: None,
+                    headers: String::new(),
+                    error: Some(format!("proxy connect: {e}")),
+                    size_download: None,
+                };
+            }
+        },
+        None => match marked_tcp_connect(addr, fwmark).await {
+            Ok(s) => s,
+            Err(e) => {
+                return HttpResult {
+                    status_code: None,
+                    headers: String::new(),
+                    error: Some(format!("connect: {e}")),
+                    size_download: None,
+                };
+            }
+        },
     };
 
     // Step 2: Optionally wrap in TLS

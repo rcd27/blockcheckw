@@ -304,6 +304,7 @@ async fn http_request_uses_relative_uri() {
             &local_addr.ip().to_string(),
             0,
             2,
+            None,
         ),
     )
     .await;

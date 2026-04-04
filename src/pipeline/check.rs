@@ -275,6 +275,7 @@ async fn check_single_strategy(
         slot.fwmark,
         config.request_timeout,
         BodyMode::Unlimited,
+        None,
     )
     .await;
     let latency_ms = test_start.elapsed().as_millis() as u64;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use console::style;
 
 use blockcheckw::config::{CoreConfig, DnsMode};
-use blockcheckw::network::{dns, isp, route};
+use blockcheckw::network::{dns, isp, via::Via};
 use blockcheckw::pipeline::check;
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
@@ -21,7 +21,7 @@ pub struct CheckParams<'a> {
     pub take: usize,
     pub passes: usize,
     pub output: Option<&'a str>,
-    pub via: Option<&'a str>,
+    pub via: Option<&'a Via>,
 }
 
 pub async fn run_check_cmd(params: CheckParams<'_>) {
@@ -99,11 +99,11 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
     };
 
     // Remote gateway route setup
-    if let Some(gateway) = via {
-        if !route::check_gateway(gateway, &screen).await {
+    if let Some(v) = via {
+        if !v.check_reachable(&screen).await {
             std::process::exit(1);
         }
-        route::add_routes(gateway, &ips).await;
+        v.add_routes(&ips).await;
     }
 
     // Check for conflicts
@@ -179,7 +179,9 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
     screen.newline();
 
     // Cleanup routes + restore zapret2
-    route::remove_all_routes().await;
+    if let Some(v) = via {
+        v.cleanup().await;
+    }
     if let Some(ref mgr) = stopped_service {
         restore_service(mgr, &nft_backup, &screen).await;
     }

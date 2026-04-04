@@ -32,7 +32,7 @@ pub async fn test_baseline(
     };
 
     // fwmark=0 — no marking for baseline (no bypass, no nftables rules)
-    let result = http_test(protocol, domain, ip, 0, timeout_secs).await;
+    let result = http_test(protocol, domain, ip, 0, timeout_secs, None).await;
     let verdict = interpret_http_result(&result, domain);
     BaselineResult { protocol, verdict }
 }

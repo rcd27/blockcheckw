@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.5](https://github.com/rcd27/blockcheckw/compare/v0.8.4...v0.8.5) (2026-03-31)
+
+
+### Features
+
+* **status:** добавлен --via ([6c4fe36](https://github.com/rcd27/blockcheckw/commit/6c4fe364ba4cc05f43e98d14b850553625649501))
+* **status:** переработан UI ([a803ea6](https://github.com/rcd27/blockcheckw/commit/a803ea69cee790bd771054219377c6cb77b8a567))
+
 ## [0.8.4](https://github.com/rcd27/blockcheckw/compare/v0.8.3...v0.8.4) (2026-03-29)
 
 

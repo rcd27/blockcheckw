@@ -8,6 +8,8 @@ use blockcheckw::pipeline::check;
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
 
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
 use super::{
     handle_bypass_conflicts, restore_service, set_nft_backup, set_stopped_service,
     spawn_cleanup_handler,
@@ -24,7 +26,14 @@ pub struct CheckParams<'a> {
     pub via: Option<&'a Via>,
 }
 
+#[tracing::instrument(
+    name = "bcw.check",
+    skip(params),
+    fields(domain = %params.domain, take = params.take, passes = params.passes, working = tracing::field::Empty)
+)]
 pub async fn run_check_cmd(params: CheckParams<'_>) {
+    // Привязка к trace'у демона (если прислан TRACEPARENT).
+    tracing::Span::current().set_parent(crate::tracing_otel::parent_context_from_env());
     let CheckParams {
         domain,
         from_file,
@@ -138,6 +147,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         &mut screen,
     )
     .await;
+    tracing::Span::current().record("working", report.working);
 
     // Summary
     screen.newline();

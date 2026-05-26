@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use console::style;
+use tracing::{info_span, Instrument};
 
 use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
 use crate::dto::{CheckReport, CheckedStrategy, VerifiedStrategy};
@@ -97,23 +98,37 @@ pub async fn run_check(
         let mut latencies: Vec<u64> = Vec::with_capacity(passes);
         let mut last_error: Option<String> = None;
 
-        for pass_idx in 0..passes {
-            let checked = check_single_strategy(config, &slot, domain, tagged, ips).await;
-            total_run = pass_idx + 1;
+        // Span на проверку конкретной стратегии (ребёнок bcw.check). Здесь живёт
+        // причина FAIL (connect/timeout) — то, ради чего трейсинг и затевался.
+        let strategy_span = info_span!(
+            "bcw.check.strategy",
+            protocol = %tagged.protocol,
+            args = %args_str,
+            status = tracing::field::Empty,
+            reason = tracing::field::Empty,
+        );
+        async {
+            for pass_idx in 0..passes {
+                let checked = check_single_strategy(config, &slot, domain, tagged, ips).await;
+                total_run = pass_idx + 1;
 
-            if checked.working {
-                ok_count += 1;
-                speeds.push(checked.speed_kbps);
-                latencies.push(checked.latency_ms);
-            } else {
-                last_error = checked.error;
-                // Early-exit: first fail → drop this strategy
-                break;
+                if checked.working {
+                    ok_count += 1;
+                    speeds.push(checked.speed_kbps);
+                    latencies.push(checked.latency_ms);
+                } else {
+                    last_error = checked.error;
+                    // Early-exit: first fail → drop this strategy
+                    break;
+                }
             }
         }
+        .instrument(strategy_span.clone())
+        .await;
 
         if ok_count == total_run && ok_count == passes {
             // All passes OK
+            strategy_span.record("status", "working");
             speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             latencies.sort();
             let median_speed = speeds[speeds.len() / 2];
@@ -140,6 +155,8 @@ pub async fn run_check(
             });
         } else {
             let reason = last_error.as_deref().unwrap_or("failed");
+            strategy_span.record("status", "fail");
+            strategy_span.record("reason", reason);
             screen.println(&format!(
                 "    {} {}/{} {}",
                 style("FAIL").red().bold(),

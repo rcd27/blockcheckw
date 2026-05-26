@@ -24,6 +24,20 @@ pub fn parent_context_from_env() -> opentelemetry::Context {
     parent_context_from_str(std::env::var("TRACEPARENT").ok())
 }
 
+/// Привязывает span к родителю из `TRACEPARENT` — ТОЛЬКО если контекст валиден.
+/// Пустой контекст (standalone, нет env) НЕ устанавливаем: `set_parent(empty)`
+/// отвязывает span от его tracing-родителя и выдаёт новый trace_id → дерево
+/// разлетается по отдельным одно-span'овым трейсам. Без вызова span остаётся
+/// под своим естественным tracing-родителем (единый trace и в standalone).
+pub fn set_parent_from_env(span: &tracing::Span) {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let cx = parent_context_from_env();
+    if cx.span().span_context().is_valid() {
+        span.set_parent(cx);
+    }
+}
+
 /// Инициализация: stderr-`fmt` всегда + OTLP-слой, если задан endpoint.
 /// Возвращает provider-guard (флаш при Drop).
 pub fn init() -> Option<opentelemetry_sdk::trace::TracerProvider> {

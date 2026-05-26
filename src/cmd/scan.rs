@@ -15,7 +15,6 @@ use blockcheckw::strategy::generator;
 use blockcheckw::ui;
 
 use tracing::{info_span, Instrument};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use super::{
     chrono_local_prefix, handle_bypass_conflicts, resolve_bypass_conflicts_if_any, restore_service,
@@ -42,7 +41,7 @@ pub struct ScanParams<'a> {
 pub async fn run_scan(params: ScanParams<'_>) {
     // Привязка к trace'у демона: span bcw.scan становится ребёнком его
     // selection-span'а (если прислан TRACEPARENT). Без env — сам себе корень.
-    tracing::Span::current().set_parent(crate::tracing_otel::parent_context_from_env());
+    crate::tracing_otel::set_parent_from_env(&tracing::Span::current());
     let ScanParams {
         workers,
         domain,

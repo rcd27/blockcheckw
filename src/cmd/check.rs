@@ -8,7 +8,6 @@ use blockcheckw::pipeline::check;
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
 
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use super::{
     handle_bypass_conflicts, restore_service, set_nft_backup, set_stopped_service,
@@ -32,8 +31,8 @@ pub struct CheckParams<'a> {
     fields(domain = %params.domain, take = params.take, passes = params.passes, working = tracing::field::Empty)
 )]
 pub async fn run_check_cmd(params: CheckParams<'_>) {
-    // Привязка к trace'у демона (если прислан TRACEPARENT).
-    tracing::Span::current().set_parent(crate::tracing_otel::parent_context_from_env());
+    // Привязка к trace'у демона (если прислан TRACEPARENT; пустой env — no-op).
+    crate::tracing_otel::set_parent_from_env(&tracing::Span::current());
     let CheckParams {
         domain,
         from_file,

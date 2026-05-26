@@ -14,6 +14,9 @@ use blockcheckw::pipeline::worker_task::HttpTestMode;
 use blockcheckw::strategy::generator;
 use blockcheckw::ui;
 
+use tracing::{info_span, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
 use super::{
     chrono_local_prefix, handle_bypass_conflicts, resolve_bypass_conflicts_if_any, restore_service,
     set_nft_backup, set_stopped_service, spawn_cleanup_handler,
@@ -31,7 +34,15 @@ pub struct ScanParams<'a> {
     pub via: Option<&'a Via>,
 }
 
+#[tracing::instrument(
+    name = "bcw.scan",
+    skip(params),
+    fields(domain = %params.domain, workers = params.workers, found = tracing::field::Empty)
+)]
 pub async fn run_scan(params: ScanParams<'_>) {
+    // Привязка к trace'у демона: span bcw.scan становится ребёнком его
+    // selection-span'а (если прислан TRACEPARENT). Без env — сам себе корень.
+    tracing::Span::current().set_parent(crate::tracing_otel::parent_context_from_env());
     let ScanParams {
         workers,
         domain,
@@ -144,13 +155,20 @@ pub async fn run_scan(params: ScanParams<'_>) {
     screen.println(&ui::section("Baseline (without bypass)"));
     let mut blocked_protocols = Vec::new();
 
-    for &protocol in protocols {
-        let result = baseline::test_baseline(domain, protocol, config.request_timeout, &ips).await;
-        screen.println(&baseline::format_baseline_verdict_styled(&result));
-        if result.is_blocked() {
-            blocked_protocols.push(protocol);
+    let baseline_span = info_span!("bcw.baseline", blocked = tracing::field::Empty);
+    async {
+        for &protocol in protocols {
+            let result =
+                baseline::test_baseline(domain, protocol, config.request_timeout, &ips).await;
+            screen.println(&baseline::format_baseline_verdict_styled(&result));
+            if result.is_blocked() {
+                blocked_protocols.push(protocol);
+            }
         }
     }
+    .instrument(baseline_span.clone())
+    .await;
+    baseline_span.record("blocked", blocked_protocols.len());
 
     if blocked_protocols.is_empty() {
         screen.newline();
@@ -221,6 +239,13 @@ pub async fn run_scan(params: ScanParams<'_>) {
                 &format!("Scanning {protocol}"),
             );
 
+            let proto_span = info_span!(
+                "bcw.scan.protocol",
+                protocol = %protocol,
+                total = tracing::field::Empty,
+                success = tracing::field::Empty,
+                failed = tracing::field::Empty,
+            );
             let (results, stats) = run_parallel(RunParams {
                 config: &config,
                 domain,
@@ -232,7 +257,11 @@ pub async fn run_scan(params: ScanParams<'_>) {
                 mode: HttpTestMode::Standard,
                 deadline: None,
             })
+            .instrument(proto_span.clone())
             .await;
+            proto_span.record("total", stats.completed);
+            proto_span.record("success", stats.successes);
+            proto_span.record("failed", stats.failures);
 
             screen.finish_progress();
 
@@ -388,6 +417,11 @@ pub async fn run_scan(params: ScanParams<'_>) {
             .bold()
         ));
     }
+
+    tracing::Span::current().record(
+        "found",
+        summary.iter().map(|e| e.strategies.len()).sum::<usize>(),
+    );
 
     screen.finish_info();
 

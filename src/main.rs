@@ -2,6 +2,7 @@ use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod cmd;
+mod tracing_otel;
 
 const fn help_styles() -> clap::builder::styling::Styles {
     use clap::builder::styling::{AnsiColor, Color, Style, Styles};

@@ -339,13 +339,8 @@ async fn main() {
         drop(console);
     }
 
-    // Init tracing for all subcommands (warn level)
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
+    // Init tracing: stderr-fmt всегда + OTLP-слой, если задан endpoint.
+    let _otel_guard = tracing_otel::init();
 
     // Load persisted config
     let mut persisted = blockcheckw::persist::load();

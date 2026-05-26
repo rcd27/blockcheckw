@@ -28,8 +28,13 @@ pub fn parent_context_from_env() -> opentelemetry::Context {
 /// Возвращает provider-guard (флаш при Drop).
 pub fn init() -> Option<opentelemetry_sdk::trace::TracerProvider> {
     let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    // Форсим собственные span'ы blockcheckw на INFO независимо от унаследованного
+    // RUST_LOG: демон отдаёт `nevod=debug,reflex_linux=info`, где нет директивы
+    // для target `blockcheckw` → иначе его span'ы падают на дефолт EnvFilter и
+    // отсекаются ещё до OTLP-слоя (зеркалит daemon, который форсит `nevod=debug`).
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn"))
+        .add_directive("blockcheckw=info".parse().unwrap());
 
     match std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok() {
         None => {

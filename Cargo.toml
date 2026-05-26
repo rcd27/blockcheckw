@@ -16,6 +16,10 @@ socket2 = { version = "0.5", features = ["all"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.28"
 indicatif = "0.17"
 console = "0.15"
 clap = { version = "4", features = ["derive", "color"] }

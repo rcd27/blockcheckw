@@ -2,6 +2,7 @@ use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod cmd;
+mod tracing_otel;
 
 const fn help_styles() -> clap::builder::styling::Styles {
     use clap::builder::styling::{AnsiColor, Color, Style, Styles};
@@ -338,13 +339,8 @@ async fn main() {
         drop(console);
     }
 
-    // Init tracing for all subcommands (warn level)
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
+    // Init tracing: stderr-fmt всегда + OTLP-слой, если задан endpoint.
+    let _otel_guard = tracing_otel::init();
 
     // Load persisted config
     let mut persisted = blockcheckw::persist::load();
@@ -355,236 +351,267 @@ async fn main() {
         persisted.workers = Some(cli.workers);
     }
 
-    match cli.command {
-        Some(Command::Benchmark {
-            time,
-            max_workers,
-            domain,
-            protocol,
-            raw,
-        }) => {
-            let sub = matches
-                .subcommand_matches("benchmark")
-                .expect("clap guarantees subcommand");
-            let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
+    // Корневой span команды под родителем из TRACEPARENT (если демон прислал) —
+    // так bcw.scan/bcw.check висят детьми selection-span'а демона.
+    use tracing::Instrument;
+    let cmd_name = match &cli.command {
+        Some(Command::Scan { .. }) => "bcw.scan",
+        Some(Command::Check { .. }) => "bcw.check",
+        _ => "bcw.cmd",
+    };
+    let root = tracing::info_span!("bcw.root", cmd = cmd_name);
+    tracing_otel::set_parent_from_env(&root);
 
-            if is_explicit(sub, "domain") {
-                persisted.domain = Some(domain.clone());
-            }
-            blockcheckw::persist::save(&persisted);
+    // Диспатч под bcw.root через .instrument, НЕ .enter(): держать enter-guard
+    // через .await — анти-паттерн tracing. При поллинге фьючи на другом потоке
+    // tokio thread-local «текущий span» теряется → bcw.scan/check рождаются
+    // корнями, а потомки (baseline/protocol) разлетаются по отдельным trace_id.
+    // .instrument перевходит в span на КАЖДЫЙ poll → потомки наследуют trace_id
+    // bcw.root (единый trace и в standalone, без присланного родителя).
+    async {
+        match cli.command {
+            Some(Command::Benchmark {
+                time,
+                max_workers,
+                domain,
+                protocol,
+                raw,
+            }) => {
+                let sub = matches
+                    .subcommand_matches("benchmark")
+                    .expect("clap guarantees subcommand");
+                let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
 
-            cmd::benchmark::run_benchmark_cmd(time, max_workers, &eff_domain, &protocol, raw).await;
-        }
-        Some(Command::Check {
-            from_file,
-            domain,
-            dns,
-            timeout,
-            take,
-            passes,
-            output,
-        }) => {
-            let sub = matches
-                .subcommand_matches("check")
-                .expect("clap guarantees subcommand");
-
-            let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
-            let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
-
-            if is_explicit(sub, "domain") {
-                persisted.domain = Some(domain.clone());
-            }
-            if is_explicit(sub, "dns") {
-                persisted.dns = Some(dns.clone());
-            }
-            blockcheckw::persist::save(&persisted);
-
-            // Determine input source: --from-file, pre-read stdin pipe, or error
-            let (source, stdin_tmp) = if let Some(path) = from_file {
-                (path, None)
-            } else if let Some(ref data) = stdin_data {
-                // Write pre-read stdin to temp file for load_tagged_strategies
-                let tmp = std::env::temp_dir().join("blockcheckw_stdin.json");
-                if let Err(e) = std::fs::write(&tmp, data) {
-                    eprintln!("ERROR: cannot write temp file: {e}");
-                    std::process::exit(1);
+                if is_explicit(sub, "domain") {
+                    persisted.domain = Some(domain.clone());
                 }
-                (tmp.to_string_lossy().into_owned(), Some(tmp))
-            } else {
-                eprintln!("ERROR: no input — provide --from-file or pipe data to stdin");
-                std::process::exit(1);
-            };
+                blockcheckw::persist::save(&persisted);
 
-            let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("ERROR: {e}");
-                    std::process::exit(1);
-                }
-            };
-
-            cmd::check::run_check_cmd(cmd::check::CheckParams {
-                domain: &eff_domain,
-                from_file: &source,
-                dns_mode,
+                cmd::benchmark::run_benchmark_cmd(time, max_workers, &eff_domain, &protocol, raw)
+                    .await;
+            }
+            Some(Command::Check {
+                from_file,
+                domain,
+                dns,
                 timeout,
                 take,
-                passes: passes as usize,
-                output: output.as_deref(),
-                via: via.as_ref(),
-            })
-            .await;
+                passes,
+                output,
+            }) => {
+                let sub = matches
+                    .subcommand_matches("check")
+                    .expect("clap guarantees subcommand");
 
-            // Clean up temp file from stdin pipe
-            if let Some(tmp) = stdin_tmp {
-                let _ = std::fs::remove_file(tmp);
-            }
-        }
-        Some(Command::Scan {
-            domain,
-            protocols,
-            dns,
-            timeout,
-            top,
-            output,
-            from_file,
-        }) => {
-            let sub = matches
-                .subcommand_matches("scan")
-                .expect("clap guarantees subcommand");
+                let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
+                let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
 
-            let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
-            let eff_protocols = resolve_protocols(sub, &protocols, &persisted.protocols);
-            let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
-
-            if is_explicit(sub, "domain") {
-                persisted.domain = Some(domain.clone());
-            }
-            if is_explicit(sub, "protocols") {
-                persisted.protocols =
-                    Some(protocols.split(',').map(|s| s.trim().to_string()).collect());
-            }
-            if is_explicit(sub, "dns") {
-                persisted.dns = Some(dns.clone());
-            }
-            blockcheckw::persist::save(&persisted);
-
-            let protocols = match blockcheckw::config::parse_protocols(&eff_protocols) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("ERROR: {e}");
-                    std::process::exit(1);
+                if is_explicit(sub, "domain") {
+                    persisted.domain = Some(domain.clone());
                 }
-            };
-            let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("ERROR: {e}");
-                    std::process::exit(1);
+                if is_explicit(sub, "dns") {
+                    persisted.dns = Some(dns.clone());
                 }
-            };
-            cmd::scan::run_scan(cmd::scan::ScanParams {
-                workers: eff_workers as usize,
-                domain: &eff_domain,
-                protocols: &protocols,
-                dns_mode,
-                timeout_secs: timeout,
-                top_n: top,
-                output: output.as_deref(),
-                from_file: from_file.as_deref(),
-                via: via.as_ref(),
-            })
-            .await;
-        }
-        Some(Command::Universal {
-            domain_list,
-            protocols,
-            dns,
-            sample,
-            output,
-        }) => {
-            let sub = matches
-                .subcommand_matches("universal")
-                .expect("clap guarantees subcommand");
+                blockcheckw::persist::save(&persisted);
 
-            let eff_protocols = resolve_protocols(sub, &protocols, &persisted.protocols);
-            let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
-
-            if is_explicit(sub, "domain_list") {
-                persisted.domain_list = Some(domain_list.clone());
-            }
-            if is_explicit(sub, "protocols") {
-                persisted.protocols =
-                    Some(protocols.split(',').map(|s| s.trim().to_string()).collect());
-            }
-            if is_explicit(sub, "dns") {
-                persisted.dns = Some(dns.clone());
-            }
-            blockcheckw::persist::save(&persisted);
-
-            let protocols = match blockcheckw::config::parse_protocols(&eff_protocols) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("ERROR: {e}");
+                // Determine input source: --from-file, pre-read stdin pipe, or error
+                let (source, stdin_tmp) = if let Some(path) = from_file {
+                    (path, None)
+                } else if let Some(ref data) = stdin_data {
+                    // Write pre-read stdin to temp file for load_tagged_strategies
+                    let tmp = std::env::temp_dir().join("blockcheckw_stdin.json");
+                    if let Err(e) = std::fs::write(&tmp, data) {
+                        eprintln!("ERROR: cannot write temp file: {e}");
+                        std::process::exit(1);
+                    }
+                    (tmp.to_string_lossy().into_owned(), Some(tmp))
+                } else {
+                    eprintln!("ERROR: no input — provide --from-file or pipe data to stdin");
                     std::process::exit(1);
-                }
-            };
-            let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("ERROR: {e}");
-                    std::process::exit(1);
-                }
-            };
-            cmd::universal::run_universal(
-                eff_workers as usize,
-                &domain_list,
-                &protocols,
-                dns_mode,
-                sample,
-                output.as_deref(),
-                via.as_ref(),
-            )
-            .await;
-        }
-        Some(Command::Status {
-            domain_list,
-            dns,
-            timeout,
-            output,
-        }) => {
-            let sub = matches
-                .subcommand_matches("status")
-                .expect("clap guarantees subcommand");
+                };
 
-            let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
+                let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("ERROR: {e}");
+                        std::process::exit(1);
+                    }
+                };
 
-            if is_explicit(sub, "dns") {
-                persisted.dns = Some(dns.clone());
+                cmd::check::run_check_cmd(cmd::check::CheckParams {
+                    domain: &eff_domain,
+                    from_file: &source,
+                    dns_mode,
+                    timeout,
+                    take,
+                    passes: passes as usize,
+                    output: output.as_deref(),
+                    via: via.as_ref(),
+                })
+                .await;
+
+                // Clean up temp file from stdin pipe
+                if let Some(tmp) = stdin_tmp {
+                    let _ = std::fs::remove_file(tmp);
+                }
             }
-            blockcheckw::persist::save(&persisted);
-
-            let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("ERROR: {e}");
-                    std::process::exit(1);
-                }
-            };
-
-            cmd::status::run_status_cmd(cmd::status::StatusParams {
-                domain_list: &domain_list,
-                dns_mode,
+            Some(Command::Scan {
+                domain,
+                protocols,
+                dns,
                 timeout,
-                output: output.as_deref(),
-                via: via.as_ref(),
-            })
-            .await;
+                top,
+                output,
+                from_file,
+            }) => {
+                let sub = matches
+                    .subcommand_matches("scan")
+                    .expect("clap guarantees subcommand");
+
+                let eff_domain = resolve_str(sub, "domain", &domain, &persisted.domain);
+                let eff_protocols = resolve_protocols(sub, &protocols, &persisted.protocols);
+                let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
+
+                if is_explicit(sub, "domain") {
+                    persisted.domain = Some(domain.clone());
+                }
+                if is_explicit(sub, "protocols") {
+                    persisted.protocols =
+                        Some(protocols.split(',').map(|s| s.trim().to_string()).collect());
+                }
+                if is_explicit(sub, "dns") {
+                    persisted.dns = Some(dns.clone());
+                }
+                blockcheckw::persist::save(&persisted);
+
+                let protocols = match blockcheckw::config::parse_protocols(&eff_protocols) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("ERROR: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("ERROR: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                cmd::scan::run_scan(cmd::scan::ScanParams {
+                    workers: eff_workers as usize,
+                    domain: &eff_domain,
+                    protocols: &protocols,
+                    dns_mode,
+                    timeout_secs: timeout,
+                    top_n: top,
+                    output: output.as_deref(),
+                    from_file: from_file.as_deref(),
+                    via: via.as_ref(),
+                })
+                .await;
+            }
+            Some(Command::Universal {
+                domain_list,
+                protocols,
+                dns,
+                sample,
+                output,
+            }) => {
+                let sub = matches
+                    .subcommand_matches("universal")
+                    .expect("clap guarantees subcommand");
+
+                let eff_protocols = resolve_protocols(sub, &protocols, &persisted.protocols);
+                let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
+
+                if is_explicit(sub, "domain_list") {
+                    persisted.domain_list = Some(domain_list.clone());
+                }
+                if is_explicit(sub, "protocols") {
+                    persisted.protocols =
+                        Some(protocols.split(',').map(|s| s.trim().to_string()).collect());
+                }
+                if is_explicit(sub, "dns") {
+                    persisted.dns = Some(dns.clone());
+                }
+                blockcheckw::persist::save(&persisted);
+
+                let protocols = match blockcheckw::config::parse_protocols(&eff_protocols) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("ERROR: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("ERROR: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                cmd::universal::run_universal(
+                    eff_workers as usize,
+                    &domain_list,
+                    &protocols,
+                    dns_mode,
+                    sample,
+                    output.as_deref(),
+                    via.as_ref(),
+                )
+                .await;
+            }
+            Some(Command::Status {
+                domain_list,
+                dns,
+                timeout,
+                output,
+            }) => {
+                let sub = matches
+                    .subcommand_matches("status")
+                    .expect("clap guarantees subcommand");
+
+                let eff_dns = resolve_str(sub, "dns", &dns, &persisted.dns);
+
+                if is_explicit(sub, "dns") {
+                    persisted.dns = Some(dns.clone());
+                }
+                blockcheckw::persist::save(&persisted);
+
+                let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("ERROR: {e}");
+                        std::process::exit(1);
+                    }
+                };
+
+                cmd::status::run_status_cmd(cmd::status::StatusParams {
+                    domain_list: &domain_list,
+                    dns_mode,
+                    timeout,
+                    output: output.as_deref(),
+                    via: via.as_ref(),
+                })
+                .await;
+            }
+            Some(Command::Completions { .. }) => unreachable!("handled above"),
+            None => {
+                let _ = Cli::command().print_help();
+            }
         }
-        Some(Command::Completions { .. }) => unreachable!("handled above"),
-        None => {
-            let _ = Cli::command().print_help();
-        }
+    }
+    .instrument(root)
+    .await;
+
+    // bcw.root закрыт (.instrument уронил span по завершении фьючи). Принудительно
+    // выгружаем OTLP-буфер до выхода: blockcheckw короткоживущий, batch-экспортёр
+    // флашит по 5с-таймеру, процесс уходит раньше → span'ы теряются. force_flush
+    // через spawn_blocking — синхронный дренаж без deadlock'а в async-main.
+    // Пути std::process::exit (ошибки prereq) сюда не доходят — их span'ы не нужны.
+    if let Some(provider) = _otel_guard {
+        let _ = tokio::task::spawn_blocking(move || provider.force_flush()).await;
     }
 }
 

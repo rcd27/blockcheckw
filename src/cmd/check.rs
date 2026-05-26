@@ -24,7 +24,14 @@ pub struct CheckParams<'a> {
     pub via: Option<&'a Via>,
 }
 
+#[tracing::instrument(
+    name = "bcw.check",
+    skip(params),
+    fields(domain = %params.domain, take = params.take, passes = params.passes, working = tracing::field::Empty)
+)]
 pub async fn run_check_cmd(params: CheckParams<'_>) {
+    // Привязка к trace'у демона — единым стежком на bcw.root в main.rs. bcw.check
+    // наследует контекст от bcw.root; повторный set_parent осиротил бы bcw.root.
     let CheckParams {
         domain,
         from_file,
@@ -94,6 +101,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         }
         Err(e) => {
             screen.error(&e.to_string());
+            // TODO(BL-041): process::exit минует force_flush в main → span'ы сбоя теряются.
             std::process::exit(1);
         }
     };
@@ -138,6 +146,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         &mut screen,
     )
     .await;
+    tracing::Span::current().record("working", report.working);
 
     // Summary
     screen.newline();

@@ -351,6 +351,19 @@ async fn main() {
         persisted.workers = Some(cli.workers);
     }
 
+    // Корневой span команды под родителем из TRACEPARENT (если демон прислал) —
+    // так bcw.scan/bcw.check висят детьми selection-span'а демона. Без env
+    // set_parent получает пустой контекст → bcw.root сам себе корень (standalone).
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let cmd_name = match &cli.command {
+        Some(Command::Scan { .. }) => "bcw.scan",
+        Some(Command::Check { .. }) => "bcw.check",
+        _ => "bcw.cmd",
+    };
+    let root = tracing::info_span!("bcw.root", cmd = cmd_name);
+    root.set_parent(tracing_otel::parent_context_from_env());
+    let _root_enter = root.enter();
+
     match cli.command {
         Some(Command::Benchmark {
             time,

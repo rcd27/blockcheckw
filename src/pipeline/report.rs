@@ -141,7 +141,7 @@ pub fn rank_by_coverage(hits: HashMap<String, usize>) -> Vec<(Vec<String>, usize
             (args, count)
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|b| std::cmp::Reverse(b.1));
     ranked
 }
 

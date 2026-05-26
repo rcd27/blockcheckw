@@ -357,7 +357,7 @@ pub fn compute_stats(pass_results: &[PassResult]) -> StrategyStats {
         *error_map.entry(r.verdict.clone()).or_insert(0) += 1;
     }
     let mut error_distribution: Vec<(String, usize)> = error_map.into_iter().collect();
-    error_distribution.sort_by(|a, b| b.1.cmp(&a.1));
+    error_distribution.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     StrategyStats {
         total_passes: total,

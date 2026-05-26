@@ -38,32 +38,45 @@ pub fn set_parent_from_env(span: &tracing::Span) {
     }
 }
 
-/// Инициализация: stderr-`fmt` всегда + OTLP-слой, если задан endpoint.
-/// Возвращает provider-guard (флаш при Drop).
+/// Инициализация: stderr-`fmt` всегда + OTLP-слой, если задан endpoint и
+/// экспортёр собрался. Фильтры пер-слойные: stderr на унаследованном RUST_LOG
+/// (тихий), OTLP форсит `blockcheckw=info`. Возвращает provider-guard; флаш —
+/// явным `force_flush` в конце main (Drop провайдера НЕ флашит batch-буфер в
+/// opentelemetry_sdk 0.27).
 pub fn init() -> Option<opentelemetry_sdk::trace::TracerProvider> {
-    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-    // Форсим собственные span'ы blockcheckw на INFO независимо от унаследованного
-    // RUST_LOG: демон отдаёт `nevod=debug,reflex_linux=info`, где нет директивы
-    // для target `blockcheckw` → иначе его span'ы падают на дефолт EnvFilter и
-    // отсекаются ещё до OTLP-слоя (зеркалит daemon, который форсит `nevod=debug`).
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn"))
-        .add_directive("blockcheckw=info".parse().unwrap());
+    use tracing_subscriber::Layer;
 
-    match std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok() {
+    // stderr остаётся на унаследованном RUST_LOG (дефолт warn) — интерактивный
+    // вывод не зашумляем INFO-событиями blockcheckw.
+    let stderr_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(stderr_filter);
+
+    // Телеметрия best-effort: нет endpoint'а → без OTLP; ошибка сборки экспортёра
+    // (битый endpoint) НЕ роняет процесс, а откатывает на stderr-only.
+    let exporter = match std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok() {
+        None => None,
+        Some(_) => match opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .build()
+        {
+            Ok(e) => Some(e),
+            Err(e) => {
+                eprintln!("OTEL: OTLP-экспортёр не собрался ({e:?}); трейсинг отключён");
+                None
+            }
+        },
+    };
+
+    match exporter {
         None => {
-            tracing_subscriber::registry()
-                .with(env_filter)
-                .with(fmt_layer)
-                .init();
+            tracing_subscriber::registry().with(fmt_layer).init();
             None
         }
-        Some(_) => {
+        Some(exporter) => {
             opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-            let exporter = opentelemetry_otlp::SpanExporter::builder()
-                .with_tonic()
-                .build()
-                .expect("OTLP exporter");
             let provider = opentelemetry_sdk::trace::TracerProvider::builder()
                 .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
                 .with_resource(opentelemetry_sdk::Resource::new(vec![
@@ -71,9 +84,17 @@ pub fn init() -> Option<opentelemetry_sdk::trace::TracerProvider> {
                 ]))
                 .build();
             let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, SERVICE_NAME);
-            let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+            // Форсим blockcheckw=info ТОЛЬКО для OTLP-слоя: демон отдаёт
+            // RUST_LOG=nevod=debug,reflex_linux=info без директивы для target
+            // `blockcheckw` → иначе span'ы режутся до экспорта. На stderr это
+            // не влияет (у fmt-слоя свой фильтр).
+            let otel_filter = EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("warn"))
+                .add_directive("blockcheckw=info".parse().unwrap());
+            let otel_layer = tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(otel_filter);
             tracing_subscriber::registry()
-                .with(env_filter)
                 .with(fmt_layer)
                 .with(otel_layer)
                 .init();

@@ -39,9 +39,10 @@ pub struct ScanParams<'a> {
     fields(domain = %params.domain, workers = params.workers, found = tracing::field::Empty)
 )]
 pub async fn run_scan(params: ScanParams<'_>) {
-    // Привязка к trace'у демона: span bcw.scan становится ребёнком его
-    // selection-span'а (если прислан TRACEPARENT). Без env — сам себе корень.
-    crate::tracing_otel::set_parent_from_env(&tracing::Span::current());
+    // Привязка к trace'у демона — единым стежком на bcw.root в main.rs (через
+    // .instrument(root) + set_parent_from_env). bcw.scan наследует контекст от
+    // bcw.root как обычный tracing-ребёнок; повторный set_parent здесь
+    // переподвешивал бы его к selection и осиротил bcw.root.
     let ScanParams {
         workers,
         domain,
@@ -182,6 +183,9 @@ pub async fn run_scan(params: ScanParams<'_>) {
         if let Some(ref mgr) = stopped_service {
             restore_service(mgr, &nft_backup, &screen).await;
         }
+        // Легитимный исход «ничего не заблокировано» — пишем found=0, иначе
+        // span bcw.scan уходит без поля и неотличим от обрыва инструментации.
+        tracing::Span::current().record("found", 0_usize);
         return;
     }
 

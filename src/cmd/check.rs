@@ -101,6 +101,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         }
         Err(e) => {
             screen.error(&e.to_string());
+            // TODO(BL-041): process::exit минует force_flush в main → span'ы сбоя теряются.
             std::process::exit(1);
         }
     };

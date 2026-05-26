@@ -595,6 +595,18 @@ async fn main() {
             let _ = Cli::command().print_help();
         }
     }
+
+    // Закрываем bcw.root и принудительно выгружаем OTLP-буфер до выхода.
+    // blockcheckw короткоживущий: batch-экспортёр флашит по 5с-таймеру, процесс
+    // уходит раньше → span'ы теряются (демон спасается долгим временем жизни).
+    // force_flush через spawn_blocking — синхронный дренаж без deadlock'а в
+    // async-main. Пути std::process::exit (ошибки prereq) сюда не доходят — их
+    // span'ы и не нужны.
+    drop(_root_enter);
+    drop(root);
+    if let Some(provider) = _otel_guard {
+        let _ = tokio::task::spawn_blocking(move || provider.force_flush()).await;
+    }
 }
 
 /// Print current version and check GitHub for updates.

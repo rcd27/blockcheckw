@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.8.7](https://github.com/rcd27/blockcheckw/compare/v0.8.6...v0.8.7) (2026-05-26)
+
+
+### Features
+
+* layered tracing init (stderr-fmt + OTLP env-gated) ([68332fe](https://github.com/rcd27/blockcheckw/commit/68332fea0d9ada925e483cad3cc70a3b6a4dcb8e))
+* span'ы bcw.check + bcw.check.strategy (status/reason) ([ea5c216](https://github.com/rcd27/blockcheckw/commit/ea5c21675dd3eae79041ec805150d27aae7e8a0d))
+* span'ы bcw.scan / bcw.baseline / bcw.scan.protocol с исходами ([308b539](https://github.com/rcd27/blockcheckw/commit/308b539f20c60d63d2733a45ce17e805b9b90172))
+* tracing_otel — OTLP init (env-gated) + parent из TRACEPARENT ([5bb821c](https://github.com/rcd27/blockcheckw/commit/5bb821cce6896baf2a92919b1c82c870739e0bb3))
+* корневой span bcw.root под TRACEPARENT демона ([5617494](https://github.com/rcd27/blockcheckw/commit/56174945d7aca4409b21b48d0597b5e5f7b56309))
+
+
+### Bug Fixes
+
+* **clippy:** sort_by → sort_by_key(Reverse) — unnecessary_sort_by ([26f8c00](https://github.com/rcd27/blockcheckw/commit/26f8c00ce5491d6dc1aac08913eca3107b4d2834))
+* **clippy:** sort_by → sort_by_key(Reverse) — unnecessary_sort_by ([ee76900](https://github.com/rcd27/blockcheckw/commit/ee769005aa3c59b03a90b2260818bd7f54cfc4ee))
+* code-review — graceful OTLP, единый стежок, found на early-return ([70c8e38](https://github.com/rcd27/blockcheckw/commit/70c8e381fa15246e938c36a21b891df57fbc35b5))
+* force_flush OTLP-буфера до выхода blockcheckw ([69665f4](https://github.com/rcd27/blockcheckw/commit/69665f4bfb46a7d774e6dc982e13825106c99837))
+* единый trace в standalone — conditional set_parent от env ([d2451ac](https://github.com/rcd27/blockcheckw/commit/d2451ac8df895a5716d4d649a10d70052d2a1ba5))
+* форс blockcheckw=info в EnvFilter — span'ы не зависят от RUST_LOG демона ([08189aa](https://github.com/rcd27/blockcheckw/commit/08189aa79b5d9c8ed0f1736296875720e4a62f02))
+
 ## [0.8.6](https://github.com/rcd27/blockcheckw/compare/v0.8.5...v0.8.6) (2026-04-04)
 
 

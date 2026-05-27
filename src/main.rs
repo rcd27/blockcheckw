@@ -339,8 +339,8 @@ async fn main() {
         drop(console);
     }
 
-    // Init tracing: stderr-fmt всегда + OTLP-слой, если задан endpoint.
-    let _otel_guard = tracing_otel::init();
+    // Init tracing: stderr-fmt всегда + OTLP-слой, если задан endpoint (feature otel).
+    let otel_guard = tracing_otel::init();
 
     // Load persisted config
     let mut persisted = blockcheckw::persist::load();
@@ -606,13 +606,9 @@ async fn main() {
     .await;
 
     // bcw.root закрыт (.instrument уронил span по завершении фьючи). Принудительно
-    // выгружаем OTLP-буфер до выхода: blockcheckw короткоживущий, batch-экспортёр
-    // флашит по 5с-таймеру, процесс уходит раньше → span'ы теряются. force_flush
-    // через spawn_blocking — синхронный дренаж без deadlock'а в async-main.
-    // Пути std::process::exit (ошибки prereq) сюда не доходят — их span'ы не нужны.
-    if let Some(provider) = _otel_guard {
-        let _ = tokio::task::spawn_blocking(move || provider.force_flush()).await;
-    }
+    // выгружаем OTLP-буфер до выхода (см. OtelGuard::shutdown). Без feature otel —
+    // no-op. Пути std::process::exit (ошибки prereq) сюда не доходят — их span'ы не нужны.
+    otel_guard.shutdown().await;
 }
 
 /// Print current version and check GitHub for updates.

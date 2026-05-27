@@ -20,8 +20,11 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo test --lib
+      # Линтим оба пути: дефолтный (stderr-only, как в release-сборках router-
+      # таргетов) и --features otel (OTLP-стек tonic/tower, см. Cargo.toml).
       - run: cargo clippy -- -D warnings
+      - run: cargo clippy --features otel -- -D warnings
+      - run: cargo test --lib --bins --features otel
 
   integration:
     needs: test

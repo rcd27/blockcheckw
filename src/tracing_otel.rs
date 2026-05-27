@@ -1,16 +1,69 @@
 //! OTLP-трейсинг blockcheckw (край IO). Экспорт env-gated. Если демон прислал
 //! `TRACEPARENT` — span'ы становятся детьми его контекста (единый trace пути
 //! домена). Иначе blockcheckw сам себе корень (ручной `scan | check`).
+//!
+//! OTLP-стек (tonic/tower) живёт за feature `otel`, выключенной по умолчанию: на
+//! router-таргетах (mips/ppc/riscv, сборка через `-Zbuild-std`) tonic не
+//! компилируется и там не нужен. Без фичи остаётся только stderr-`fmt`-слой, а
+//! [`set_parent_from_env`]/[`OtelGuard::shutdown`] вырождаются в no-op.
 
+/// Guard от [`init`]. С фичей `otel` хранит provider и дренирует OTLP-буфер в
+/// [`OtelGuard::shutdown`]; без фичи — пустышка с no-op shutdown.
+pub struct OtelGuard {
+    #[cfg(feature = "otel")]
+    provider: Option<opentelemetry_sdk::trace::TracerProvider>,
+}
+
+impl OtelGuard {
+    /// Принудительный флаш OTLP-буфера до выхода: blockcheckw короткоживущий,
+    /// batch-экспортёр флашит по 5с-таймеру, процесс уходит раньше → span'ы
+    /// теряются. `force_flush` через `spawn_blocking` — синхронный дренаж без
+    /// deadlock'а в async-main. Без фичи `otel` — no-op.
+    pub async fn shutdown(self) {
+        #[cfg(feature = "otel")]
+        if let Some(provider) = self.provider {
+            let _ = tokio::task::spawn_blocking(move || provider.force_flush()).await;
+        }
+    }
+}
+
+// ───────────────────────────── без фичи `otel` ─────────────────────────────
+
+/// stderr-`fmt` на унаследованном `RUST_LOG` (дефолт `warn`). OTLP отсутствует.
+#[cfg(not(feature = "otel"))]
+pub fn init() -> OtelGuard {
+    use tracing_subscriber::EnvFilter;
+    let stderr_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(stderr_filter)
+        .init();
+    OtelGuard {}
+}
+
+/// no-op: без OTLP родительский контекст не нужен.
+#[cfg(not(feature = "otel"))]
+pub fn set_parent_from_env(_span: &tracing::Span) {}
+
+// ───────────────────────────── с фичей `otel` ──────────────────────────────
+
+#[cfg(feature = "otel")]
 use opentelemetry::propagation::TextMapPropagator;
+#[cfg(feature = "otel")]
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+#[cfg(feature = "otel")]
 use tracing_subscriber::layer::SubscriberExt;
+#[cfg(feature = "otel")]
 use tracing_subscriber::util::SubscriberInitExt;
+#[cfg(feature = "otel")]
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "otel")]
 const SERVICE_NAME: &str = "blockcheckw";
 
 /// Родительский контекст из строки `traceparent` (для тестов и из env).
+#[cfg(feature = "otel")]
 pub fn parent_context_from_str(tp: Option<String>) -> opentelemetry::Context {
     let mut carrier = std::collections::HashMap::new();
     if let Some(tp) = tp {
@@ -20,6 +73,7 @@ pub fn parent_context_from_str(tp: Option<String>) -> opentelemetry::Context {
 }
 
 /// Родительский контекст из env `TRACEPARENT`.
+#[cfg(feature = "otel")]
 pub fn parent_context_from_env() -> opentelemetry::Context {
     parent_context_from_str(std::env::var("TRACEPARENT").ok())
 }
@@ -29,6 +83,7 @@ pub fn parent_context_from_env() -> opentelemetry::Context {
 /// отвязывает span от его tracing-родителя и выдаёт новый trace_id → дерево
 /// разлетается по отдельным одно-span'овым трейсам. Без вызова span остаётся
 /// под своим естественным tracing-родителем (единый trace и в standalone).
+#[cfg(feature = "otel")]
 pub fn set_parent_from_env(span: &tracing::Span) {
     use opentelemetry::trace::TraceContextExt;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -40,10 +95,11 @@ pub fn set_parent_from_env(span: &tracing::Span) {
 
 /// Инициализация: stderr-`fmt` всегда + OTLP-слой, если задан endpoint и
 /// экспортёр собрался. Фильтры пер-слойные: stderr на унаследованном RUST_LOG
-/// (тихий), OTLP форсит `blockcheckw=info`. Возвращает provider-guard; флаш —
-/// явным `force_flush` в конце main (Drop провайдера НЕ флашит batch-буфер в
+/// (тихий), OTLP форсит `blockcheckw=info`. Возвращает [`OtelGuard`]; флаш —
+/// явным `shutdown` в конце main (Drop провайдера НЕ флашит batch-буфер в
 /// opentelemetry_sdk 0.27).
-pub fn init() -> Option<opentelemetry_sdk::trace::TracerProvider> {
+#[cfg(feature = "otel")]
+pub fn init() -> OtelGuard {
     use tracing_subscriber::Layer;
 
     // stderr остаётся на унаследованном RUST_LOG (дефолт warn) — интерактивный
@@ -73,7 +129,7 @@ pub fn init() -> Option<opentelemetry_sdk::trace::TracerProvider> {
     match exporter {
         None => {
             tracing_subscriber::registry().with(fmt_layer).init();
-            None
+            OtelGuard { provider: None }
         }
         Some(exporter) => {
             opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
@@ -98,12 +154,14 @@ pub fn init() -> Option<opentelemetry_sdk::trace::TracerProvider> {
                 .with(fmt_layer)
                 .with(otel_layer)
                 .init();
-            Some(provider)
+            OtelGuard {
+                provider: Some(provider),
+            }
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "otel"))]
 mod tests {
     use super::*;
     use opentelemetry::trace::TraceContextExt;

@@ -177,6 +177,12 @@ pub async fn run_scan(params: ScanParams<'_>) {
             "{}",
             style("All protocols are available without bypass. Nothing to scan.").green()
         ));
+        // Машиночитаемый исход в stdout: структурный отчёт с blocked=[] —
+        // отличает «не заблокирован» от «заблокирован, но обход не найден»
+        // (оба дают пустой strategies). Без этого демон видит пустой stdout
+        // и ошибочно гонит check на пустом файле.
+        let (scan_json, _) = report::build_scan_report(domain, &blocked_protocols, &[]);
+        super::print_stdout_graceful(&scan_json, &screen);
         // Restore routes + zapret2 before early return
         if let Some(v) = via {
             v.cleanup().await;
@@ -391,7 +397,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
         )),
     }
 
-    let (content, count) = report::build_scan_report(domain, &summary);
+    let (content, count) = report::build_scan_report(domain, &blocked_protocols, &summary);
     let scan_path = format!("{now}_scan.json");
     match write_report(&scan_path, &content) {
         Ok(()) => screen.println(&format!(
@@ -407,7 +413,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
     }
 
     // 7. JSON to stdout (for pipe support) — after artifacts are saved
-    let (scan_json, _) = report::build_scan_report(domain, &summary);
+    let (scan_json, _) = report::build_scan_report(domain, &blocked_protocols, &summary);
     super::print_stdout_graceful(&scan_json, &screen);
     screen.newline();
 

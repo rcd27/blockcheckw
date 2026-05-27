@@ -22,7 +22,11 @@ pub struct ProtocolSummary {
 }
 
 /// Build scan JSON report from intermediate results. Returns (json, strategy_count).
-pub fn build_scan_report(domain: &str, summary: &[ProtocolSummary]) -> (String, usize) {
+pub fn build_scan_report(
+    domain: &str,
+    blocked: &[Protocol],
+    summary: &[ProtocolSummary],
+) -> (String, usize) {
     let timestamp = test_report::chrono_like_timestamp();
     let mut total = 0;
 
@@ -61,6 +65,7 @@ pub fn build_scan_report(domain: &str, summary: &[ProtocolSummary]) -> (String, 
         timestamp,
         total,
         working: total,
+        blocked: blocked.iter().map(|p| p.to_string()).collect(),
         protocols,
         strategies,
     };
@@ -203,4 +208,46 @@ pub fn build_cleaned_domain_list(
         .join("\n");
 
     Some(cleaned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_report_not_blocked_has_empty_blocked_list() {
+        let (json, count) = build_scan_report("example.com", &[], &[]);
+        assert_eq!(count, 0);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["blocked"].as_array().unwrap().len(), 0);
+        assert_eq!(v["strategies"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn scan_report_blocked_no_strategies_lists_blocked_protocols() {
+        // Заблокирован TLS1.2, но рабочих стратегий нет: strategies пуст,
+        // blocked непуст — это и отличает «заблокирован» от «не заблокирован».
+        let summary = vec![ProtocolSummary {
+            protocol: Protocol::HttpsTls12,
+            strategies: vec![],
+        }];
+        let (json, count) = build_scan_report("example.com", &[Protocol::HttpsTls12], &summary);
+        assert_eq!(count, 0);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["blocked"], serde_json::json!(["HTTPS/TLS1.2"]));
+        assert_eq!(v["strategies"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn scan_report_blocked_with_strategies_populates_both() {
+        let summary = vec![ProtocolSummary {
+            protocol: Protocol::HttpsTls12,
+            strategies: vec![vec!["--payload=tls_client_hello".to_string()]],
+        }];
+        let (json, count) = build_scan_report("example.com", &[Protocol::HttpsTls12], &summary);
+        assert_eq!(count, 1);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["blocked"], serde_json::json!(["HTTPS/TLS1.2"]));
+        assert_eq!(v["strategies"].as_array().unwrap().len(), 1);
+    }
 }

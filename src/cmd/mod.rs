@@ -654,13 +654,29 @@ pub fn check_prerequisites(con: &blockcheckw::ui::Console) {
     }
 }
 
+/// Check whether `name` is an executable on `PATH`.
+///
+/// We walk `$PATH` ourselves instead of shelling out to the `which` command:
+/// on minimal targets (busybox / OpenWrt routers) `which` is often absent, and
+/// the spawn then fails — which previously got misreported as "not found".
 fn which(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    std::env::var_os("PATH")
+        .map(|path| which_in(name, &path))
+        .unwrap_or(false)
+}
+
+fn which_in(name: &str, path: &std::ffi::OsStr) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    std::env::split_paths(path).any(|dir| is_executable_file(&dir.join(name)))
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 fn nft_has_queue_support() -> bool {
@@ -671,6 +687,68 @@ fn nft_has_queue_support() -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+#[cfg(test)]
+mod which_tests {
+    use super::which_in;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("bcw_which_{tag}_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &Path, name: &str, mode: u32) {
+        let p = dir.join(name);
+        fs::write(&p, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn finds_executable_in_path() {
+        let dir = tmp_dir("found");
+        write_file(&dir, "faketool", 0o755);
+        let path = OsString::from(&dir);
+        assert!(which_in("faketool", &path));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_binary_returns_false() {
+        let dir = tmp_dir("missing");
+        let path = OsString::from(&dir);
+        assert!(!which_in("nope_not_here", &path));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn non_executable_file_returns_false() {
+        let dir = tmp_dir("nonexec");
+        write_file(&dir, "plain", 0o644);
+        let path = OsString::from(&dir);
+        assert!(!which_in("plain", &path));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn searches_multiple_path_entries() {
+        let a = tmp_dir("multi_a");
+        let b = tmp_dir("multi_b");
+        write_file(&b, "tool", 0o755);
+        let path = std::env::join_paths([&a, &b]).unwrap();
+        assert!(which_in("tool", &path));
+        fs::remove_dir_all(&a).ok();
+        fs::remove_dir_all(&b).ok();
+    }
 }
 
 /// Generate a local-time prefix for report filenames: "2026-03-20_18-30"

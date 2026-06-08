@@ -201,6 +201,7 @@ pub async fn run_verification(
             external_pb: Some(screen.pb()),
             mode: HttpTestMode::Standard,
             deadline: None,
+            success_sink: None,
         })
         .await;
 
@@ -273,6 +274,7 @@ pub async fn run_verification(
                 min_bytes: dt_config.min_bytes,
             },
             deadline: None,
+            success_sink: None,
         })
         .await;
 

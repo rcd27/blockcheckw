@@ -50,6 +50,9 @@ pub struct RunParams<'a> {
     pub external_pb: Option<&'a ProgressBar>,
     pub mode: HttpTestMode,
     pub deadline: Option<Instant>,
+    /// Optional sink that each AVAILABLE strategy's args are pushed into as soon
+    /// as it is found, so an interrupt mid-run never loses results.
+    pub success_sink: Option<Arc<std::sync::Mutex<Vec<Vec<String>>>>>,
 }
 
 /// Run strategies in parallel batches using worker slots.
@@ -68,6 +71,7 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
         external_pb,
         mode,
         deadline,
+        success_sink,
     } = params;
 
     let start = Instant::now();
@@ -189,7 +193,13 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
             match join_result {
                 Ok((strategy_args, task_result)) => {
                     match &task_result {
-                        TaskResult::Success { .. } => successes += 1,
+                        TaskResult::Success { .. } => {
+                            successes += 1;
+                            // Persist the win immediately so an interrupt can't lose it.
+                            if let Some(sink) = &success_sink {
+                                sink.lock().unwrap().push(strategy_args.clone());
+                            }
+                        }
                         TaskResult::Failed { .. } => failures += 1,
                         TaskResult::Error { .. } => errors += 1,
                     }

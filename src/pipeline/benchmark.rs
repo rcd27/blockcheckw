@@ -388,6 +388,7 @@ pub async fn run_benchmark(
             external_pb: None,
             mode: HttpTestMode::Standard,
             deadline: Some(deadline),
+            success_sink: None,
         })
         .await;
 

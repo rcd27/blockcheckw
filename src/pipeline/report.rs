@@ -16,6 +16,7 @@ use crate::pipeline::test_report;
 // ── Scan report building ─────────────────────────────────────────────────────
 
 /// Intermediate per-protocol scan results (I/O-free data).
+#[derive(Clone)]
 pub struct ProtocolSummary {
     pub protocol: Protocol,
     pub strategies: Vec<Vec<String>>,

@@ -166,6 +166,7 @@ pub async fn run_universal(
                 external_pb: Some(screen.pb()),
                 mode: HttpTestMode::Standard,
                 deadline: None,
+                success_sink: None,
             })
             .await;
 

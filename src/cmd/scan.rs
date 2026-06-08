@@ -18,7 +18,7 @@ use tracing::{info_span, Instrument};
 
 use super::{
     chrono_local_prefix, handle_bypass_conflicts, resolve_bypass_conflicts_if_any, restore_service,
-    set_nft_backup, set_stopped_service, spawn_cleanup_handler,
+    set_nft_backup, set_scan_progress, set_stopped_service, spawn_cleanup_handler, ScanProgress,
 };
 
 pub struct ScanParams<'a> {
@@ -60,6 +60,11 @@ pub async fn run_scan(params: ScanParams<'_>) {
     });
 
     let cleanup = spawn_cleanup_handler(&config.nft_table);
+
+    // Result accumulator visible to the signal handler — found strategies survive
+    // a Ctrl+C / SIGTERM / timeout mid-scan (#41).
+    let progress = ScanProgress::new(domain.to_string(), output.map(String::from));
+    set_scan_progress(&cleanup, progress.clone()).await;
 
     let mut screen = ui::Console::new();
 
@@ -250,6 +255,9 @@ pub async fn run_scan(params: ScanParams<'_>) {
                 success = tracing::field::Empty,
                 failed = tracing::field::Empty,
             );
+            // Hand the sink to run_parallel so each AVAILABLE strategy is captured
+            // the instant it is found, not only at the end of the protocol.
+            let sink = progress.lock().unwrap().begin_protocol(protocol);
             let (results, stats) = run_parallel(RunParams {
                 config: &config,
                 domain,
@@ -260,6 +268,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
                 external_pb: Some(screen.pb()),
                 mode: HttpTestMode::Standard,
                 deadline: None,
+                success_sink: Some(sink),
             })
             .instrument(proto_span.clone())
             .await;
@@ -288,6 +297,8 @@ pub async fn run_scan(params: ScanParams<'_>) {
                 protocol,
                 strategies: working,
             });
+            // Fold this protocol into the interrupt-safe accumulator.
+            progress.lock().unwrap().finish_protocol();
         }
     };
 
@@ -295,6 +306,9 @@ pub async fn run_scan(params: ScanParams<'_>) {
         let deadline = std::time::Duration::from_secs(timeout_secs);
         if tokio::time::timeout(deadline, scan_future).await.is_err() {
             timed_out = true;
+            // scan_future was cancelled mid-protocol — recover everything found so
+            // far, including the in-progress protocol's partial results (#41).
+            summary = progress.lock().unwrap().snapshot();
             nftables::drop_table(&config.nft_table).await;
             screen.newline();
             screen.println(&format!(
@@ -444,4 +458,35 @@ fn write_report(path: &str, content: &str) -> std::io::Result<()> {
     std::fs::write(path, content)?;
     blockcheckw::system::elevate::chown_to_caller(path);
     Ok(())
+}
+
+/// Paths and count produced by [`write_scan_reports`].
+pub(crate) struct WrittenReports {
+    pub scan_path: String,
+    pub count: usize,
+}
+
+/// Write the scan artifacts (optional strategies file, vanilla report, scan JSON)
+/// from a summary. Used by the signal handler to persist partial results on
+/// interrupt; the normal path (steps 5–7 above) keeps its own richer printing.
+pub(crate) fn write_scan_reports(
+    domain: &str,
+    output: Option<&str>,
+    summary: &[ProtocolSummary],
+) -> std::io::Result<WrittenReports> {
+    let now = chrono_local_prefix();
+
+    if let Some(path) = output {
+        let (content, _) = report::build_strategies_file(domain, summary);
+        write_report(path, &content)?;
+    }
+
+    let (content, _) = report::build_vanilla_report(domain, summary);
+    write_report(&format!("{now}_report_vanilla.txt"), &content)?;
+
+    let (content, count) = report::build_scan_report(domain, summary);
+    let scan_path = format!("{now}_scan.json");
+    write_report(&scan_path, &content)?;
+
+    Ok(WrittenReports { scan_path, count })
 }

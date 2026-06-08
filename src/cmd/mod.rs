@@ -387,6 +387,131 @@ pub struct CleanupInfo {
     pub stopped_service: Option<ServiceManager>,
     /// Full nft ruleset backup taken before we stopped zapret2.
     pub nft_backup: Option<String>,
+    /// Strategies found so far, so a Ctrl+C / SIGTERM mid-scan still writes them.
+    pub scan_progress: Option<ScanProgressState>,
+}
+
+// ── Scan progress (interrupt-safe result accumulator) ────────────────────────
+
+/// Sink that `run_parallel` pushes each AVAILABLE strategy's args into as it is
+/// discovered, so found strategies are never lost to an interrupt.
+pub type SuccessSink = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
+
+/// Shared, signal-handler-visible view of what a scan has found so far.
+pub type ScanProgressState = Arc<std::sync::Mutex<ScanProgress>>;
+
+struct CurrentProto {
+    protocol: blockcheckw::config::Protocol,
+    found: SuccessSink,
+}
+
+/// Accumulates scan results across protocols. The signal handler reads
+/// [`snapshot`](ScanProgress::snapshot) to write a report before exiting, so an
+/// interrupt mid-protocol still persists everything found up to that point.
+pub struct ScanProgress {
+    pub domain: String,
+    pub output: Option<String>,
+    completed: Vec<blockcheckw::pipeline::report::ProtocolSummary>,
+    current: Option<CurrentProto>,
+}
+
+impl ScanProgress {
+    pub fn new(domain: String, output: Option<String>) -> ScanProgressState {
+        Arc::new(std::sync::Mutex::new(ScanProgress {
+            domain,
+            output,
+            completed: Vec::new(),
+            current: None,
+        }))
+    }
+
+    /// Start a protocol; returns the sink to hand to `run_parallel`.
+    pub fn begin_protocol(&mut self, protocol: blockcheckw::config::Protocol) -> SuccessSink {
+        let found: SuccessSink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        self.current = Some(CurrentProto {
+            protocol,
+            found: found.clone(),
+        });
+        found
+    }
+
+    /// Fold the in-progress protocol into the completed set (called when it
+    /// finishes normally). Empty protocols are kept to mirror the summary shown.
+    pub fn finish_protocol(&mut self) {
+        if let Some(c) = self.current.take() {
+            let strategies = c.found.lock().unwrap().clone();
+            self.completed
+                .push(blockcheckw::pipeline::report::ProtocolSummary {
+                    protocol: c.protocol,
+                    strategies,
+                });
+        }
+    }
+
+    /// Everything found so far, including the in-progress protocol's partial
+    /// results. This is what makes an interrupted scan still produce a report.
+    pub fn snapshot(&self) -> Vec<blockcheckw::pipeline::report::ProtocolSummary> {
+        let mut out = self.completed.clone();
+        if let Some(c) = &self.current {
+            let found = c.found.lock().unwrap().clone();
+            if !found.is_empty() {
+                out.push(blockcheckw::pipeline::report::ProtocolSummary {
+                    protocol: c.protocol,
+                    strategies: found,
+                });
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod scan_progress_tests {
+    use super::ScanProgress;
+    use blockcheckw::config::Protocol;
+
+    fn args(s: &str) -> Vec<String> {
+        s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn snapshot_empty_when_nothing_found() {
+        let p = ScanProgress::new("ex.com".into(), None);
+        assert!(p.lock().unwrap().snapshot().is_empty());
+    }
+
+    #[test]
+    fn snapshot_includes_completed_protocol() {
+        let p = ScanProgress::new("ex.com".into(), None);
+        {
+            let mut g = p.lock().unwrap();
+            let sink = g.begin_protocol(Protocol::HttpsTls12);
+            sink.lock().unwrap().push(args("--dpi-desync=fake"));
+            g.finish_protocol();
+        }
+        let snap = p.lock().unwrap().snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].strategies, vec![args("--dpi-desync=fake")]);
+    }
+
+    #[test]
+    fn snapshot_includes_in_progress_partial() {
+        // THE #41 bug: interrupted mid-protocol must still expose found strategies.
+        let p = ScanProgress::new("ex.com".into(), None);
+        let sink = p.lock().unwrap().begin_protocol(Protocol::HttpsTls12);
+        sink.lock().unwrap().push(args("--dpi-desync=split2"));
+        // deliberately NO finish_protocol — simulating an interrupt
+        let snap = p.lock().unwrap().snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].strategies, vec![args("--dpi-desync=split2")]);
+    }
+
+    #[test]
+    fn snapshot_skips_empty_in_progress() {
+        let p = ScanProgress::new("ex.com".into(), None);
+        let _sink = p.lock().unwrap().begin_protocol(Protocol::HttpsTls12);
+        assert!(p.lock().unwrap().snapshot().is_empty());
+    }
 }
 
 /// Create shared cleanup state and spawn signal handlers (SIGINT + SIGTERM) that will:
@@ -397,6 +522,7 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
         nft_table: nft_table.to_string(),
         stopped_service: None,
         nft_backup: None,
+        scan_progress: None,
     }));
 
     // Panic hook: restore zapret2 synchronously if we crash.
@@ -477,6 +603,27 @@ async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i3
 
     blockcheckw::network::via::Via::cleanup_all().await;
     let info = state.lock().await;
+
+    // Persist whatever the scan found *before* tearing anything down, so an
+    // interrupt mid-scan still leaves a report on disk (#41).
+    if let Some(progress) = &info.scan_progress {
+        let (domain, output, summary) = {
+            let p = progress.lock().unwrap();
+            (p.domain.clone(), p.output.clone(), p.snapshot())
+        };
+        if !summary.is_empty() {
+            match scan::write_scan_reports(&domain, output.as_deref(), &summary) {
+                Ok(w) => eprintln!(
+                    "  {} partial results saved: {} strategies → {}",
+                    style("OK").green().bold(),
+                    w.count,
+                    style(&w.scan_path).cyan(),
+                ),
+                Err(e) => eprintln!("  {}failed to save partial results: {e}", WARN),
+            }
+        }
+    }
+
     blockcheckw::firewall::nftables::drop_table(&info.nft_table).await;
     eprintln!(
         "  {} nft table '{}' dropped",
@@ -514,6 +661,12 @@ pub async fn set_stopped_service(state: &CleanupState, mgr: ServiceManager) {
 /// Record nft ruleset backup, so cleanup handlers can restore it.
 pub async fn set_nft_backup(state: &CleanupState, backup: Option<String>) {
     state.lock().await.nft_backup = backup;
+}
+
+/// Register the scan's result accumulator so the signal handler can write a
+/// report from whatever was found if the scan is interrupted.
+pub async fn set_scan_progress(state: &CleanupState, progress: ScanProgressState) {
+    state.lock().await.scan_progress = Some(progress);
 }
 
 /// Restart zapret2 service, then restore nft ruleset from backup. Call at graceful exit.
@@ -654,13 +807,29 @@ pub fn check_prerequisites(con: &blockcheckw::ui::Console) {
     }
 }
 
+/// Check whether `name` is an executable on `PATH`.
+///
+/// We walk `$PATH` ourselves instead of shelling out to the `which` command:
+/// on minimal targets (busybox / OpenWrt routers) `which` is often absent, and
+/// the spawn then fails — which previously got misreported as "not found".
 fn which(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    std::env::var_os("PATH")
+        .map(|path| which_in(name, &path))
+        .unwrap_or(false)
+}
+
+fn which_in(name: &str, path: &std::ffi::OsStr) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    std::env::split_paths(path).any(|dir| is_executable_file(&dir.join(name)))
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 fn nft_has_queue_support() -> bool {
@@ -671,6 +840,68 @@ fn nft_has_queue_support() -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+#[cfg(test)]
+mod which_tests {
+    use super::which_in;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("bcw_which_{tag}_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &Path, name: &str, mode: u32) {
+        let p = dir.join(name);
+        fs::write(&p, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn finds_executable_in_path() {
+        let dir = tmp_dir("found");
+        write_file(&dir, "faketool", 0o755);
+        let path = OsString::from(&dir);
+        assert!(which_in("faketool", &path));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_binary_returns_false() {
+        let dir = tmp_dir("missing");
+        let path = OsString::from(&dir);
+        assert!(!which_in("nope_not_here", &path));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn non_executable_file_returns_false() {
+        let dir = tmp_dir("nonexec");
+        write_file(&dir, "plain", 0o644);
+        let path = OsString::from(&dir);
+        assert!(!which_in("plain", &path));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn searches_multiple_path_entries() {
+        let a = tmp_dir("multi_a");
+        let b = tmp_dir("multi_b");
+        write_file(&b, "tool", 0o755);
+        let path = std::env::join_paths([&a, &b]).unwrap();
+        assert!(which_in("tool", &path));
+        fs::remove_dir_all(&a).ok();
+        fs::remove_dir_all(&b).ok();
+    }
 }
 
 /// Generate a local-time prefix for report filenames: "2026-03-20_18-30"

@@ -40,7 +40,7 @@ jobs:
           - { arch: arm64,  target: aarch64-unknown-linux-musl,  upx: true }
           - { arch: arm,    target: arm-unknown-linux-musleabi,   upx: true }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cross
 
@@ -49,13 +49,13 @@ jobs:
 
       - name: Compress with UPX
         if: matrix.upx
-        uses: crazy-max/ghaction-upx@v3
+        uses: crazy-max/ghaction-upx@v4
         with:
           version: latest
           files: target/${{ matrix.target }}/release/blockcheckw
           args: --best --lzma
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: blockcheckw-linux-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/blockcheckw
@@ -74,7 +74,7 @@ jobs:
           - { arch: mipsel, target: mipsel-unknown-linux-musl,      upx: true  }
           - { arch: mips64, target: mips64-unknown-linux-muslabi64,  upx: false }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
@@ -85,13 +85,13 @@ jobs:
 
       - name: Compress with UPX
         if: matrix.upx
-        uses: crazy-max/ghaction-upx@v3
+        uses: crazy-max/ghaction-upx@v4
         with:
           version: latest
           files: target/${{ matrix.target }}/release/blockcheckw
           args: --best --lzma
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: blockcheckw-linux-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/blockcheckw
@@ -117,7 +117,7 @@ jobs:
             musl_name: riscv64-unknown-linux-musl
             linker_env: CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
@@ -135,13 +135,13 @@ jobs:
 
       - name: Compress with UPX
         if: matrix.upx
-        uses: crazy-max/ghaction-upx@v3
+        uses: crazy-max/ghaction-upx@v4
         with:
           version: latest
           files: target/${{ matrix.target }}/release/blockcheckw
           args: --best --lzma
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: blockcheckw-linux-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/blockcheckw
@@ -152,7 +152,7 @@ jobs:
     needs: [release-please, build-stable, build-nightly, build-musl-cross]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: blockcheckw-*
           path: artifacts

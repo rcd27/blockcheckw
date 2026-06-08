@@ -318,6 +318,15 @@ async fn main() {
     blockcheckw::system::elevate::tune_tcp();
     blockcheckw::system::elevate::raise_nofile_limit();
 
+    // `--workers` is global, but `check` verifies strategies sequentially by design —
+    // warn (once, post-elevation) so users don't expect it to change `check` throughput (#33).
+    if is_explicit(&matches, "workers") && matches!(cli.command, Some(Command::Check { .. })) {
+        eprintln!(
+            "{}--workers has no effect on `check` (it verifies strategies sequentially by design)",
+            blockcheckw::ui::WARN,
+        );
+    }
+
     // Pre-read stdin for check in pipe mode (before acquiring lock,
     // so the upstream pipe command can finish and release its lock first)
     let stdin_data = {

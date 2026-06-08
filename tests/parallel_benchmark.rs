@@ -101,6 +101,7 @@ async fn parallel_scaling_bench() {
             external_pb: None,
             mode: HttpTestMode::Standard,
             deadline: None,
+            success_sink: None,
         })
         .await;
 

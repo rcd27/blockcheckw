@@ -118,3 +118,13 @@ SYN/ACK (incoming)
 
 Проект основан на [zapret2](https://github.com/bol-van/zapret2) — оригинальном инструменте обхода DPI от bol-van. Все
 стратегии и логика их генерации взяты из blockcheck2.
+
+<a id="donate"></a>
+
+## Поддержать разработчика. Donations
+
+Если вы считаете проект полезным и желаете поддержать разработку, направляйте пожертвования на криптокошелёк :
+
+If you find this project useful and wish to donate here is a crypto wallet :
+
+BTC  `bc1qnry3qcl34qhf33469j7aaes4kp9e89v729s2x2`

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.9](https://github.com/rcd27/blockcheckw/compare/v0.8.8...v0.8.9) (2026-06-08)
+
+
+### Bug Fixes
+
+* **check:** warn что --workers не влияет на check — последовательная верификация by design ([#33](https://github.com/rcd27/blockcheckw/issues/33)) ([aae465e](https://github.com/rcd27/blockcheckw/commit/aae465e9d457912a469cb2d71aa086acf3f74b68))
+* **check:** which ищет по $PATH сам — на busybox/OpenWrt внешней which нет ([#44](https://github.com/rcd27/blockcheckw/issues/44)) ([567cdae](https://github.com/rcd27/blockcheckw/commit/567cdaebe8374db78e4b4f3194afeb4eee9230fd))
+* **scan:** не терять стратегии при Ctrl+C/таймауте — sink + snapshot в отчёт ([#41](https://github.com/rcd27/blockcheckw/issues/41), [#2](https://github.com/rcd27/blockcheckw/issues/2)) ([d1f9e94](https://github.com/rcd27/blockcheckw/commit/d1f9e94c2fc2af0f856e74878f7fadbc2cb8563e))
+* which/$PATH ([#44](https://github.com/rcd27/blockcheckw/issues/44)), resilience скана ([#41](https://github.com/rcd27/blockcheckw/issues/41),[#2](https://github.com/rcd27/blockcheckw/issues/2)), --workers warn ([#33](https://github.com/rcd27/blockcheckw/issues/33)) + node24 actions ([4817671](https://github.com/rcd27/blockcheckw/commit/4817671179c4364cd944bd768bda6d4f02690805))
+
 ## [0.8.8](https://github.com/rcd27/blockcheckw/compare/v0.8.7...v0.8.8) (2026-05-27)
 
 

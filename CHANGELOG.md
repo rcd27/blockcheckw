@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.8](https://github.com/rcd27/blockcheckw/compare/v0.8.7...v0.8.8) (2026-05-27)
+
+
+### Bug Fixes
+
+* **build:** OTEL за опциональной feature otel — чинит release под -Zbuild-std (tonic/tower не тянутся на mips/ppc/riscv) ([e94b10e](https://github.com/rcd27/blockcheckw/commit/e94b10e8dc3c9b19d4c31dec8a75f67c66742b72))
+
 ## [0.8.7](https://github.com/rcd27/blockcheckw/compare/v0.8.6...v0.8.7) (2026-05-26)
 
 

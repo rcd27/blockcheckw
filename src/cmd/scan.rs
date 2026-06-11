@@ -201,6 +201,11 @@ pub async fn run_scan(params: ScanParams<'_>) {
         return;
     }
 
+    progress
+        .lock()
+        .unwrap()
+        .set_blocked(blocked_protocols.clone());
+
     let blocked_names: Vec<String> = blocked_protocols.iter().map(|p| p.to_string()).collect();
     screen.newline();
     screen.println(&ui::blocked_list(&blocked_names.join(", ")));
@@ -478,6 +483,7 @@ pub(crate) struct WrittenReports {
 pub(crate) fn write_scan_reports(
     domain: &str,
     output: Option<&str>,
+    blocked: &[blockcheckw::config::Protocol],
     summary: &[ProtocolSummary],
 ) -> std::io::Result<WrittenReports> {
     let now = chrono_local_prefix();
@@ -490,7 +496,7 @@ pub(crate) fn write_scan_reports(
     let (content, _) = report::build_vanilla_report(domain, summary);
     write_report(&format!("{now}_report_vanilla.txt"), &content)?;
 
-    let (content, count) = report::build_scan_report(domain, summary);
+    let (content, count) = report::build_scan_report(domain, blocked, summary);
     let scan_path = format!("{now}_scan.json");
     write_report(&scan_path, &content)?;
 

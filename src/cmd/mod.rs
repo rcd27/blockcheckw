@@ -427,6 +427,7 @@ struct CurrentProto {
 pub struct ScanProgress {
     pub domain: String,
     pub output: Option<String>,
+    blocked: Vec<blockcheckw::config::Protocol>,
     completed: Vec<blockcheckw::pipeline::report::ProtocolSummary>,
     current: Option<CurrentProto>,
 }
@@ -436,9 +437,16 @@ impl ScanProgress {
         Arc::new(std::sync::Mutex::new(ScanProgress {
             domain,
             output,
+            blocked: Vec::new(),
             completed: Vec::new(),
             current: None,
         }))
+    }
+
+    /// Record the blocked protocols detected at baseline, so an interrupted
+    /// scan persists the same `blocked` list as a completed run (#49).
+    pub fn set_blocked(&mut self, blocked: Vec<blockcheckw::config::Protocol>) {
+        self.blocked = blocked;
     }
 
     /// Start a protocol; returns the sink to hand to `run_parallel`.
@@ -623,12 +631,17 @@ async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i3
     // Persist whatever the scan found *before* tearing anything down, so an
     // interrupt mid-scan still leaves a report on disk (#41).
     if let Some(progress) = &info.scan_progress {
-        let (domain, output, summary) = {
+        let (domain, output, blocked, summary) = {
             let p = progress.lock().unwrap();
-            (p.domain.clone(), p.output.clone(), p.snapshot())
+            (
+                p.domain.clone(),
+                p.output.clone(),
+                p.blocked.clone(),
+                p.snapshot(),
+            )
         };
         if !summary.is_empty() {
-            match scan::write_scan_reports(&domain, output.as_deref(), &summary) {
+            match scan::write_scan_reports(&domain, output.as_deref(), &blocked, &summary) {
                 Ok(w) => eprintln!(
                     "  {} partial results saved: {} strategies → {}",
                     style("OK").green().bold(),

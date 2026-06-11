@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.10](https://github.com/rcd27/blockcheckw/compare/v0.8.9...v0.8.10) (2026-06-11)
+
+
+### Features
+
+* --no-conflict-cleanup — embedded-режим, чужие nft-таблицы/nfqws2 не трогать ([7cfacf3](https://github.com/rcd27/blockcheckw/commit/7cfacf3228926c20b938889333b712ea5458275c))
+
+
+### Bug Fixes
+
+* восстановить сборку main — проброс blocked в write_scan_reports ([#49](https://github.com/rcd27/blockcheckw/issues/49)) ([87e1aff](https://github.com/rcd27/blockcheckw/commit/87e1aff6b3ba802ba70731422788a4dbc01dd504))
+* сборка main — проброс blocked в write_scan_reports ([#49](https://github.com/rcd27/blockcheckw/issues/49)) ([8376984](https://github.com/rcd27/blockcheckw/commit/8376984fd0741bd708d8998bcd8b39484a0c07e4))
+
 ## [0.8.9](https://github.com/rcd27/blockcheckw/compare/v0.8.8...v0.8.9) (2026-06-08)
 
 

@@ -31,6 +31,10 @@ pub struct ScanReport {
     pub timestamp: String,
     pub total: usize,
     pub working: usize,
+    /// Protocols that failed the no-bypass baseline (i.e. are DPI-blocked).
+    /// Empty ⟺ domain is not blocked. Distinguishes "not blocked" from
+    /// "blocked but no working strategy" — both yield empty `strategies`.
+    pub blocked: Vec<String>,
     pub protocols: Vec<ScanProtocolResult>,
     /// Flat list of all working strategies for interchange with check.
     pub strategies: Vec<StrategyEntry>,

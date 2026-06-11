@@ -35,6 +35,16 @@ pub fn set_auto_yes(yes: bool) {
     AUTO_YES.store(yes, Ordering::Relaxed);
 }
 
+/// Global flag: skip detection/cleanup of foreign DPI-bypass nft tables and nfqws2 processes.
+/// For embedded use (an orchestrator owns the nft state and installs its own queue tables);
+/// without it blockcheckw deletes any non-own table with queue rules on 443 + kills nfqws2.
+static SKIP_CONFLICT_CLEANUP: AtomicBool = AtomicBool::new(false);
+
+/// Enable embedded mode: leave foreign nft tables/processes untouched (called from main).
+pub fn set_skip_conflict_cleanup(skip: bool) {
+    SKIP_CONFLICT_CLEANUP.store(skip, Ordering::Relaxed);
+}
+
 // ── Zapret2 service management ──────────────────────────────────────────────
 
 /// How zapret2 service is managed on this system.
@@ -186,6 +196,9 @@ pub async fn handle_bypass_conflicts(
     own_table: &str,
     con: &blockcheckw::ui::Console,
 ) -> Result<Option<(ServiceManager, Option<String>)>, ()> {
+    if SKIP_CONFLICT_CLEANUP.load(Ordering::Relaxed) {
+        return Ok(None); // embedded: оркестратор владеет nft-состоянием, чужие трубы не трогаем
+    }
     let conflicts = detect_bypass_conflicts(own_table).await;
     if conflicts.is_empty() {
         return Ok(None);
@@ -283,6 +296,9 @@ async fn resolve_bypass_conflicts_manual(conflicts: &BypassConflicts) {
 
 /// Re-check and resolve conflicts silently (used between protocol scans).
 pub async fn resolve_bypass_conflicts_if_any(own_table: &str) {
+    if SKIP_CONFLICT_CLEANUP.load(Ordering::Relaxed) {
+        return; // embedded: чужие трубы/процессы не трогаем
+    }
     let conflicts = detect_bypass_conflicts(own_table).await;
     if !conflicts.is_empty() {
         resolve_bypass_conflicts_manual(&conflicts).await;

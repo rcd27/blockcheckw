@@ -54,6 +54,11 @@ struct Cli {
     #[arg(long, global = true)]
     via: Option<String>,
 
+    /// Embedded mode: do NOT detect/cleanup foreign DPI-bypass nft tables or nfqws2 processes
+    /// (the caller owns the nft state). Without this, scan deletes any non-own queue-on-443 table.
+    #[arg(long, global = true)]
+    no_conflict_cleanup: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -307,6 +312,7 @@ async fn main() {
     }
 
     cmd::set_auto_yes(cli.auto);
+    cmd::set_skip_conflict_cleanup(cli.no_conflict_cleanup);
     let via = cli.via.map(|raw| {
         blockcheckw::network::via::Via::parse(&raw).unwrap_or_else(|e| {
             eprintln!("ERROR: --via: {e}");

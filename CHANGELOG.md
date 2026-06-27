@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0](https://github.com/rcd27/blockcheckw/compare/v0.8.10...v0.9.0) (2026-06-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **scan:** BlockType переименован Available→NotBlocked и Dead→HostDead. Команда `status` теперь выдаёт block_type "not_blocked" (было "available") и UI-текст "not blocked"/"host dead". Парсеры status-JSON, ждущие "available", сломаются. ScanReport получил поля block_type и dns_spoofed (аддитивно).
+
+### Features
+
+* **scan:** block_type + dns_spoofed в ScanReport — сетевой вердикт блокировки ([7060ca5](https://github.com/rcd27/blockcheckw/commit/7060ca5165067ffd392a0b55d0b0bc5593c38fad))
+
 ## [0.8.10](https://github.com/rcd27/blockcheckw/compare/v0.8.9...v0.8.10) (2026-06-11)
 
 

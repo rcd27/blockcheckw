@@ -33,15 +33,6 @@ struct ProbeResult {
     speed_kbps: Option<f64>,
 }
 
-/// Try TCP connect to IP:443. Returns true if connection succeeds (IP not blocked).
-async fn tcp_reachable(ip: &str, timeout_secs: u64) -> bool {
-    let addr = format!("{ip}:443");
-    let timeout = std::time::Duration::from_secs(timeout_secs);
-    tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr))
-        .await
-        .is_ok_and(|r| r.is_ok())
-}
-
 /// Resolve + classify + probe a single domain.
 /// When `via` is set, adds a route for resolved IPs through the remote gateway.
 async fn resolve_and_probe(
@@ -78,17 +69,8 @@ async fn resolve_and_probe(
     }
 
     // Step 2: TCP connect — IP blocked?
-    let ip_reachable = match via {
-        Some(v) if v.is_proxy() => {
-            let addr: std::net::SocketAddr = format!("{ip}:443").parse().unwrap();
-            let timeout = std::time::Duration::from_secs(timeout_secs);
-            tokio::time::timeout(timeout, v.tcp_connect(addr))
-                .await
-                .is_ok_and(|r| r.is_ok())
-        }
-        _ => tcp_reachable(ip, timeout_secs).await,
-    };
-    if !ip_reachable {
+    let ip_ok = blockcheckw::network::reachability::ip_reachable(ip, timeout_secs, via).await;
+    if !ip_ok {
         return ProbeResult {
             domain: domain.to_string(),
             block_type: BlockType::IpBlocked,
@@ -129,7 +111,7 @@ async fn resolve_and_probe(
         };
         ProbeResult {
             domain: domain.to_string(),
-            block_type: BlockType::Available,
+            block_type: BlockType::NotBlocked,
             speed_kbps,
         }
     } else {
@@ -275,10 +257,13 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
     let mut sorted = results;
     sorted.sort_by(|a, b| {
         let order = |bt: &BlockType| match bt {
-            BlockType::Available => 0,
-            BlockType::SniBlocked => 1,
-            BlockType::IpBlocked => 2,
-            BlockType::DnsFailed => 3,
+            BlockType::NotBlocked => 0,
+            BlockType::Throttled => 1,
+            BlockType::SniBlocked => 2,
+            BlockType::IpBlocked => 3,
+            BlockType::SynBlocked => 4,
+            BlockType::HostDead => 5,
+            BlockType::DnsFailed => 6,
         };
         order(&a.block_type)
             .cmp(&order(&b.block_type))
@@ -293,7 +278,7 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
     // ── Aggregate counters ───────────────────────────────────────────────
     let available = sorted
         .iter()
-        .filter(|r| r.block_type == BlockType::Available)
+        .filter(|r| r.block_type == BlockType::NotBlocked)
         .count();
     let sni_blocked = sorted
         .iter()
@@ -354,8 +339,14 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
 
     for r in &sorted {
         let (status_str, speed_str) = match r.block_type {
-            BlockType::Available => (
-                format!("{} {}", CHECKMARK, style("available").green()),
+            BlockType::NotBlocked => (
+                format!("{} {}", CHECKMARK, style("not blocked").green()),
+                r.speed_kbps
+                    .map(|s| format!("{:.0} Kbps", s))
+                    .unwrap_or_default(),
+            ),
+            BlockType::Throttled => (
+                format!("{} {}", CROSS, style("throttled").yellow()),
                 r.speed_kbps
                     .map(|s| format!("{:.0} Kbps", s))
                     .unwrap_or_default(),
@@ -366,6 +357,14 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
             ),
             BlockType::IpBlocked => (
                 format!("{} {}", CROSS, style("IP blocked").red()),
+                String::new(),
+            ),
+            BlockType::SynBlocked => (
+                format!("{} {}", CROSS, style("SYN blocked").red()),
+                String::new(),
+            ),
+            BlockType::HostDead => (
+                format!("{} {}", CROSS, style("host dead").dim()),
                 String::new(),
             ),
             BlockType::DnsFailed => (
@@ -382,7 +381,7 @@ pub async fn run_status_cmd(params: StatusParams<'_>) {
     // Footer: totals + actionable hints
     con.println(&separator);
     con.println(&format!(
-        "  available: {} | SNI blocked: {} | IP blocked: {} | DNS failed: {} | elapsed: {:.1}s{}",
+        "  not blocked: {} | SNI blocked: {} | IP blocked: {} | DNS failed: {} | elapsed: {:.1}s{}",
         style(format!("{available}/{total}")).green().bold(),
         style(sni_blocked).yellow().bold(),
         style(ip_blocked).red().bold(),

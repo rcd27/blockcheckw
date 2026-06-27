@@ -149,7 +149,17 @@ blockcheckw -w 256 scan -d rutracker.org --top 10
 
 # Кастомные стратегии из файла (вместо встроенного корпуса):
 blockcheckw -w 256 scan -d rutracker.org --from-file my_strategies.txt
+
+# Уточнить IP-блокировку через прокси (syn_blocked vs host_dead):
+# scan идёт напрямую, прокси используется ТОЛЬКО для проверки живости IP-blocked хоста.
+blockcheckw -w 256 scan -d rr3---sn-x.googlevideo.com --alive-via socks5://127.0.0.1:1080
 ```
+
+Вывод `block_type` (см. [README](../README.md#классификация-блокировки-block_type)):
+`not_blocked` / `throttled` / `sni_blocked` / `ip_blocked` / `syn_blocked` / `host_dead` / `dns_failed`.
+Плюс отдельный флаг `dns_spoofed: bool` (system-DNS отравлен; ортогонален `block_type`).
+Без `--alive-via` прямой SYN-дроп остаётся `ip_blocked`; с ним уточняется в
+`syn_blocked` (хост жив через прокси) либо `host_dead`.
 
 Pipe в check (scan → проверка с data transfer):
 
@@ -168,6 +178,7 @@ blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --
 | `--top <N>`              | Показать top N стратегий на протокол (0 = все, по умолчанию 5) |
 | `-o, --output <FILE>`    | Сохранить в указанный файл                                     |
 | `--from-file <FILE>`     | Загрузить стратегии из файла вместо встроенных                 |
+| `--alive-via <PROXY>`    | Прокси ТОЛЬКО для проверки живости IP-blocked хоста (не маршрутизирует скан) → `syn_blocked` vs `host_dead` |
 
 ### 3. Проверка стратегий (check)
 

@@ -37,6 +37,15 @@ pub async fn test_baseline(
     BaselineResult { protocol, verdict }
 }
 
+/// True when a data-transfer verdict carries the DPI throttle signature: the
+/// download is cut in the ~16-19KB DPI-cap range ([`HttpVerdict::DpiDataLimit`]).
+/// Deliberately NOT [`HttpVerdict::DataTransferFailed`] — that also fires on a
+/// legitimately small page (a 1.2KB site downloads fully in <32KB), which is not
+/// throttled. Sub-cap stalls are missed; the cap range is the canonical signal.
+pub fn is_throttle_verdict(verdict: &HttpVerdict) -> bool {
+    matches!(verdict, HttpVerdict::DpiDataLimit { .. })
+}
+
 pub fn format_baseline_verdict(result: &BaselineResult) -> String {
     match &result.verdict {
         HttpVerdict::Available => {
@@ -134,5 +143,27 @@ mod tests {
         let s = format_baseline_verdict(&r);
         assert!(s.contains("available without bypass"));
         assert!(s.contains("HTTPS/TLS1.3"));
+    }
+
+    #[test]
+    fn dpi_data_limit_verdict_is_throttle() {
+        assert!(is_throttle_verdict(&HttpVerdict::DpiDataLimit {
+            size_download: 18_000
+        }));
+    }
+
+    #[test]
+    fn small_page_is_not_throttled() {
+        // A legitimately small page (e.g. example.com ≈ 1.2KB) downloads fully but
+        // under min_bytes → DataTransferFailed. That is NOT a throttle — guarding
+        // against the false positive of flagging every small site as throttled.
+        assert!(!is_throttle_verdict(&HttpVerdict::DataTransferFailed {
+            size_download: 1_200
+        }));
+    }
+
+    #[test]
+    fn available_verdict_is_not_throttle() {
+        assert!(!is_throttle_verdict(&HttpVerdict::Available));
     }
 }

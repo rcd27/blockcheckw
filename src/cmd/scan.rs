@@ -3,9 +3,13 @@ use std::sync::Arc;
 use console::style;
 
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
+use blockcheckw::dto::BlockType;
 use blockcheckw::error::TaskResult;
 use blockcheckw::firewall::nftables;
 use blockcheckw::network::dns::DnsSpoofResult;
+use blockcheckw::network::http_client::{
+    http_test_data, interpret_data_transfer_result, BodyMode, DATA_TRANSFER_MIN_BYTES,
+};
 use blockcheckw::network::{dns, isp, via::Via};
 use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::report::{self, ProtocolSummary};
@@ -21,6 +25,10 @@ use super::{
     set_nft_backup, set_scan_progress, set_stopped_service, spawn_cleanup_handler, ScanProgress,
 };
 
+/// Timeout for the throttle data probe. Generous so a slow-but-honest link
+/// isn't mislabelled as throttled — a real DPI cap stalls near-zero well within.
+const DATA_PROBE_TIMEOUT_SECS: u64 = 10;
+
 pub struct ScanParams<'a> {
     pub workers: usize,
     pub domain: &'a str,
@@ -31,6 +39,10 @@ pub struct ScanParams<'a> {
     pub output: Option<&'a str>,
     pub from_file: Option<&'a str>,
     pub via: Option<&'a Via>,
+    /// Proxy used ONLY to verify aliveness of IP-blocked hosts (not to route the
+    /// scan). Splits `IpBlocked` into `SynBlocked` (alive via this proxy) vs
+    /// `HostDead`. Validated as a proxy by the caller; reachability checked here.
+    pub alive_via: Option<&'a Via>,
 }
 
 #[tracing::instrument(
@@ -53,6 +65,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
         output,
         from_file,
         via,
+        alive_via,
     } = params;
     let config = Arc::new(CoreConfig {
         worker_count: workers,
@@ -79,7 +92,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
         "  dns mode: {}",
         style(dns_mode.to_string()).bold()
     ));
-    let ips = match dns::resolve_domain(domain, dns_mode).await {
+    let (ips, dns_spoofed) = match dns::resolve_domain(domain, dns_mode).await {
         Ok(resolution) => {
             screen.println(&format!(
                 "  {} {} {} (via {})",
@@ -125,7 +138,10 @@ pub async fn run_scan(params: ScanParams<'_>) {
             );
             screen.add_info_line(&dns_status);
 
-            resolution.ips
+            // Orthogonal to block_type: system DNS poisoned but the scan continues
+            // on the clean (DoH) IPs resolve_domain fell back to. Reported as a flag.
+            let spoofed = dns::is_dns_spoofed(resolution.spoof_result.as_ref());
+            (resolution.ips, spoofed)
         }
         Err(e) => {
             screen.error(&e.to_string());
@@ -133,6 +149,8 @@ pub async fn run_scan(params: ScanParams<'_>) {
             std::process::exit(1);
         }
     };
+
+    progress.lock().unwrap().set_dns_spoofed(dns_spoofed);
 
     // 1b. Remote gateway route setup
     if let Some(v) = via {
@@ -177,16 +195,50 @@ pub async fn run_scan(params: ScanParams<'_>) {
     baseline_span.record("blocked", blocked_protocols.len());
 
     if blocked_protocols.is_empty() {
+        // HEAD passed for every protocol — but a throttled host returns HEAD 200
+        // while capping the actual download. One data probe (GET up to 64KB)
+        // distinguishes NotBlocked from Throttled before declaring "nothing to scan".
+        let block_type = match ips.first() {
+            Some(ip) => {
+                let proto = protocols.first().copied().unwrap_or(Protocol::HttpsTls12);
+                let result = http_test_data(
+                    proto,
+                    domain,
+                    ip,
+                    0,
+                    DATA_PROBE_TIMEOUT_SECS,
+                    BodyMode::LimitedTo(DATA_TRANSFER_MIN_BYTES * 2),
+                    None,
+                )
+                .await;
+                let verdict =
+                    interpret_data_transfer_result(&result, domain, DATA_TRANSFER_MIN_BYTES);
+                if baseline::is_throttle_verdict(&verdict) {
+                    BlockType::Throttled
+                } else {
+                    BlockType::NotBlocked
+                }
+            }
+            None => BlockType::NotBlocked,
+        };
+
         screen.newline();
-        screen.println(&format!(
-            "{}",
-            style("All protocols are available without bypass. Nothing to scan.").green()
-        ));
+        screen.println(&match block_type {
+            BlockType::Throttled => style(
+                "All protocols pass HEAD, but data transfer is throttled (DPI data cap). Nothing to scan.",
+            )
+            .yellow()
+            .to_string(),
+            _ => style("All protocols are available without bypass. Nothing to scan.")
+                .green()
+                .to_string(),
+        });
         // Машиночитаемый исход в stdout: структурный отчёт с blocked=[] —
         // отличает «не заблокирован» от «заблокирован, но обход не найден»
         // (оба дают пустой strategies). Без этого демон видит пустой stdout
         // и ошибочно гонит check на пустом файле.
-        let (scan_json, _) = report::build_scan_report(domain, &blocked_protocols, &[]);
+        let (scan_json, _) =
+            report::build_scan_report(domain, block_type, dns_spoofed, &blocked_protocols, &[]);
         super::print_stdout_graceful(&scan_json, &screen);
         // Restore routes + zapret2 before early return
         if let Some(v) = via {
@@ -205,6 +257,56 @@ pub async fn run_scan(params: ScanParams<'_>) {
         .lock()
         .unwrap()
         .set_blocked(blocked_protocols.clone());
+
+    // Verify the --alive-via proxy before trusting it: a dead proxy would mislabel
+    // every IP-blocked host as host-dead. Unreachable → drop it (fall back to the
+    // unrefined IpBlocked). Only matters now that a domain is actually blocked.
+    let alive_via = match alive_via {
+        Some(av) => {
+            screen.println(&format!(
+                "  {} --alive-via: probing IP-blocked hosts through the proxy ONLY to split \
+                 SYN-blocked (host alive) vs host-dead — the scan itself is not routed through it",
+                ui::ARROW,
+            ));
+            if av.check_reachable(&screen).await {
+                Some(av)
+            } else {
+                screen.println(&format!(
+                    "  {} --alive-via proxy unreachable → IP-blocked hosts stay IpBlocked \
+                     (no SYN-blocked / host-dead split)",
+                    ui::WARN,
+                ));
+                None
+            }
+        }
+        None => None,
+    };
+
+    // Classify the block kind once: a dropped direct SYN = IpBlocked (desync can't
+    // help — no handshake); a completed handshake with a blocked verdict =
+    // SniBlocked (desync applies). With --alive-via, a dropped direct SYN is
+    // refined into SynBlocked (host alive via the proxy) vs HostDead. Reported so
+    // a consumer routes on network-truth without re-probing.
+    let block_type = match ips.first() {
+        None => BlockType::classify(true, false, false, None),
+        Some(ip) => {
+            let direct =
+                blockcheckw::network::reachability::tcp_reachable(ip, config.request_timeout).await;
+            let proxy_reachable = match (direct, alive_via) {
+                (false, Some(av)) => Some(
+                    blockcheckw::network::reachability::ip_reachable(
+                        ip,
+                        config.request_timeout,
+                        Some(av),
+                    )
+                    .await,
+                ),
+                _ => None,
+            };
+            BlockType::classify(true, direct, false, proxy_reachable)
+        }
+    };
+    progress.lock().unwrap().set_block_type(block_type);
 
     let blocked_names: Vec<String> = blocked_protocols.iter().map(|p| p.to_string()).collect();
     screen.newline();
@@ -416,7 +518,13 @@ pub async fn run_scan(params: ScanParams<'_>) {
         )),
     }
 
-    let (content, count) = report::build_scan_report(domain, &blocked_protocols, &summary);
+    let (content, count) = report::build_scan_report(
+        domain,
+        block_type,
+        dns_spoofed,
+        &blocked_protocols,
+        &summary,
+    );
     let scan_path = format!("{now}_scan.json");
     match write_report(&scan_path, &content) {
         Ok(()) => screen.println(&format!(
@@ -432,7 +540,13 @@ pub async fn run_scan(params: ScanParams<'_>) {
     }
 
     // 7. JSON to stdout (for pipe support) — after artifacts are saved
-    let (scan_json, _) = report::build_scan_report(domain, &blocked_protocols, &summary);
+    let (scan_json, _) = report::build_scan_report(
+        domain,
+        block_type,
+        dns_spoofed,
+        &blocked_protocols,
+        &summary,
+    );
     super::print_stdout_graceful(&scan_json, &screen);
     screen.newline();
 
@@ -483,6 +597,8 @@ pub(crate) struct WrittenReports {
 pub(crate) fn write_scan_reports(
     domain: &str,
     output: Option<&str>,
+    block_type: BlockType,
+    dns_spoofed: bool,
     blocked: &[blockcheckw::config::Protocol],
     summary: &[ProtocolSummary],
 ) -> std::io::Result<WrittenReports> {
@@ -496,7 +612,8 @@ pub(crate) fn write_scan_reports(
     let (content, _) = report::build_vanilla_report(domain, summary);
     write_report(&format!("{now}_report_vanilla.txt"), &content)?;
 
-    let (content, count) = report::build_scan_report(domain, blocked, summary);
+    let (content, count) =
+        report::build_scan_report(domain, block_type, dns_spoofed, blocked, summary);
     let scan_path = format!("{now}_scan.json");
     write_report(&scan_path, &content)?;
 

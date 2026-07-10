@@ -344,6 +344,70 @@ async fn tls13_config_only_allows_tls13() {
     assert!(config.alpn_protocols.contains(&b"http/1.1".to_vec()));
 }
 
+// ── Test 6b: capturing probe keeps partial size on a stalled transfer ────────
+
+/// #60: a DPI that passes headers then caps/stalls the body must yield the
+/// partial byte count, not a bare timeout — so baseline can label it a data cap.
+/// Server sends 200 + 5000 bytes (promising more via Content-Length) then hangs;
+/// the capturing probe should return ~5000 downloaded with no error.
+#[tokio::test]
+async fn capturing_probe_keeps_partial_on_stall() {
+    if !is_root() {
+        eprintln!("SKIPPED: binds 127.0.0.1:80, requires root");
+        return;
+    }
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:80").await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("SKIPPED: cannot bind :80 ({e})");
+            return;
+        }
+    };
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let _ = stream.read(&mut buf).await;
+        // Promise 100000 bytes, send only 5000, then hang (never close).
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n")
+            .await
+            .unwrap();
+        stream.write_all(&vec![b'x'; 5000]).await.unwrap();
+        stream.flush().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    });
+
+    // connect budget 2s, stall 1s between chunks, limit 32KB.
+    let result = http_client::http_test_data_capturing(
+        Protocol::Http,
+        "testhost.example",
+        "127.0.0.1",
+        0,
+        2,
+        1,
+        32_768,
+    )
+    .await;
+
+    assert!(
+        result.error.is_none(),
+        "expected no error, got {:?}",
+        result.error
+    );
+    assert_eq!(result.status_code, Some(200));
+    assert_eq!(
+        result.size_download,
+        Some(5000),
+        "should keep the partial 5000 bytes read before the stall"
+    );
+
+    server.abort();
+}
+
 // ── Test 7: Worker slot fwmark isolation ─────────────────────────────────────
 
 #[test]

@@ -1,9 +1,14 @@
 use crate::config::Protocol;
 use crate::network::http_client::{
-    http_test, http_test_data, interpret_data_transfer_result, interpret_http_result,
-    pick_random_ip, BodyMode, HttpResult, HttpVerdict, DATA_TRANSFER_MIN_BYTES,
+    http_test, http_test_data_capturing, interpret_data_transfer_result, interpret_http_result,
+    pick_random_ip, HttpResult, HttpVerdict, DATA_TRANSFER_MIN_BYTES,
 };
 use crate::ui;
+
+/// Seconds to wait for the next HTTPS body chunk before declaring the transfer
+/// stalled. A DPI hard-cap plateaus (no further data), so a short wait catches
+/// it while tolerating normal chunk gaps on a working connection.
+const BASELINE_STALL_SECS: u64 = 2;
 
 /// Judge a baseline (no-bypass) probe result.
 ///
@@ -57,21 +62,22 @@ pub async fn test_baseline(
     //
     // HTTPS: GET, downloading up to the threshold. A DPI that caps data transfer
     // (while passing the handshake) registers as blocked, same as check/verify/
-    // status — yet a large, genuinely-available page still finishes within the
-    // short baseline timeout instead of being truncated into a false block. #60.
+    // status. The capturing probe keeps the partial byte count when the transfer
+    // stalls, so a hard cap surfaces as "DPI data limit" rather than a bare
+    // timeout — while a genuinely-available page reaches the threshold and passes.
     //
     // HTTP: headers-only probe (redirect/status is what matters; a redirect to
     // HTTPS legitimately carries no body, so the data threshold does not apply).
     let result = match protocol {
         Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
-            http_test_data(
+            http_test_data_capturing(
                 protocol,
                 domain,
                 ip,
                 0,
                 timeout_secs,
-                BodyMode::LimitedTo(DATA_TRANSFER_MIN_BYTES),
-                None,
+                BASELINE_STALL_SECS,
+                DATA_TRANSFER_MIN_BYTES,
             )
             .await
         }

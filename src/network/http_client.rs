@@ -181,7 +181,7 @@ pub async fn http_test(
 
     match tokio::time::timeout(
         timeout,
-        http_test_inner(protocol, domain, ip, fwmark, BodyMode::Head, via),
+        http_test_inner(protocol, domain, ip, fwmark, BodyMode::Head, via, None),
     )
     .await
     {
@@ -209,7 +209,52 @@ pub async fn http_test_data(
 
     match tokio::time::timeout(
         timeout,
-        http_test_inner(protocol, domain, ip, fwmark, mode, via),
+        http_test_inner(protocol, domain, ip, fwmark, mode, via, None),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => HttpResult {
+            status_code: None,
+            headers: String::new(),
+            error: Some("timeout".to_string()),
+            size_download: None,
+        },
+    }
+}
+
+/// Perform an HTTP(S) GET that preserves the partial download size when the
+/// transfer stalls (throttled or hard-capped by DPI) rather than discarding it
+/// as a bare timeout. `stall_secs` bounds the wait between body chunks; connect
+/// and handshake are bounded by `connect_timeout_secs`. Unlike `http_test_data`
+/// (all-or-nothing), a capped transfer yields its partial byte count here, so a
+/// caller can classify it as a DPI data limit. Baseline-only — strategy checks
+/// keep the strict timeout. See #60.
+pub async fn http_test_data_capturing(
+    protocol: Protocol,
+    domain: &str,
+    ip: &str,
+    fwmark: u32,
+    connect_timeout_secs: u64,
+    stall_secs: u64,
+    limit: u64,
+) -> HttpResult {
+    // Outer bound protects against a hung connect/handshake; the body read
+    // returns early via `stall`, so this rarely fires for a reachable host.
+    let outer = Duration::from_secs(connect_timeout_secs + stall_secs + 1);
+    let stall = Some(Duration::from_secs(stall_secs));
+
+    match tokio::time::timeout(
+        outer,
+        http_test_inner(
+            protocol,
+            domain,
+            ip,
+            fwmark,
+            BodyMode::LimitedTo(limit),
+            None,
+            stall,
+        ),
     )
     .await
     {
@@ -232,8 +277,9 @@ async fn http_test_inner(
     fwmark: u32,
     mode: BodyMode,
     via: Option<&crate::network::via::Via>,
+    stall: Option<Duration>,
 ) -> HttpResult {
-    let result = http_single_request(protocol, domain, ip, fwmark, mode, via).await;
+    let result = http_single_request(protocol, domain, ip, fwmark, mode, via, stall).await;
 
     // Follow one redirect if it points to the same domain
     if let Some(code) = result.status_code {
@@ -248,6 +294,7 @@ async fn http_test_inner(
                             fwmark,
                             mode,
                             via,
+                            stall,
                         )
                         .await;
                     }
@@ -268,6 +315,7 @@ async fn http_single_request(
     fwmark: u32,
     mode: BodyMode,
     via: Option<&crate::network::via::Via>,
+    stall: Option<Duration>,
 ) -> HttpResult {
     let port = protocol.port();
     let addr: SocketAddr = match format!("{ip}:{port}").parse() {
@@ -310,7 +358,7 @@ async fn http_single_request(
 
     // Step 2: Optionally wrap in TLS
     match protocol {
-        Protocol::Http => do_http_request(TokioIo::new(tcp_stream), domain, mode).await,
+        Protocol::Http => do_http_request(TokioIo::new(tcp_stream), domain, mode, stall).await,
         Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
             let tls_config = make_tls_config(protocol);
             let connector = TlsConnector::from(tls_config);
@@ -338,7 +386,7 @@ async fn http_single_request(
                 }
             };
 
-            do_http_request_https(TokioIo::new(tls_stream), domain, mode).await
+            do_http_request_https(TokioIo::new(tls_stream), domain, mode, stall).await
         }
     }
 }
@@ -370,7 +418,12 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 
 /// Send HTTP/1.1 request over a plain TCP connection (HTTP).
 /// Always uses GET for HTTP (need to see redirects/body).
-async fn do_http_request<IO>(io: IO, domain: &str, mode: BodyMode) -> HttpResult
+async fn do_http_request<IO>(
+    io: IO,
+    domain: &str,
+    mode: BodyMode,
+    stall: Option<Duration>,
+) -> HttpResult
 where
     IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -397,12 +450,17 @@ where
         .body(Empty::<Bytes>::new())
         .expect("static request build");
 
-    send_and_parse(sender.send_request(req).await, mode).await
+    send_and_parse(sender.send_request(req).await, mode, stall).await
 }
 
 /// Send HTTP/1.1 request over a TLS connection (HTTPS).
 /// Uses HEAD unless mode is GET (data transfer test).
-async fn do_http_request_https<IO>(io: IO, domain: &str, mode: BodyMode) -> HttpResult
+async fn do_http_request_https<IO>(
+    io: IO,
+    domain: &str,
+    mode: BodyMode,
+    stall: Option<Duration>,
+) -> HttpResult
 where
     IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -432,7 +490,7 @@ where
         .body(Empty::<Bytes>::new())
         .expect("static request build");
 
-    send_and_parse(sender.send_request(req).await, mode).await
+    send_and_parse(sender.send_request(req).await, mode, stall).await
 }
 
 /// Parse hyper response into HttpResult.
@@ -440,6 +498,7 @@ where
 async fn send_and_parse(
     result: Result<hyper::Response<hyper::body::Incoming>, hyper::Error>,
     mode: BodyMode,
+    stall: Option<Duration>,
 ) -> HttpResult {
     let response = match result {
         Ok(r) => r,
@@ -473,9 +532,19 @@ async fn send_and_parse(
         let limit = mode.max_bytes();
         let mut total: u64 = 0;
         let mut body = response.into_body();
-        while let Some(chunk) = body.frame().await {
-            match chunk {
-                Ok(frame) => {
+        loop {
+            // With `stall` set, a body that hangs (throttled / capped by DPI)
+            // stops the read and keeps the partial byte count, instead of
+            // letting an outer timeout discard it. See #60.
+            let next = match stall {
+                Some(d) => match tokio::time::timeout(d, body.frame()).await {
+                    Ok(chunk) => chunk,
+                    Err(_) => break,
+                },
+                None => body.frame().await,
+            };
+            match next {
+                Some(Ok(frame)) => {
                     if let Some(data) = frame.data_ref() {
                         total += data.len() as u64;
                         if total >= limit {
@@ -483,7 +552,8 @@ async fn send_and_parse(
                         }
                     }
                 }
-                Err(_) => break,
+                Some(Err(_)) => break,
+                None => break,
             }
         }
         Some(total)

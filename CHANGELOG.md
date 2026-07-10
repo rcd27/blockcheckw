@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.1](https://github.com/rcd27/blockcheckw/compare/v0.9.0...v0.9.1) (2026-07-10)
+
+
+### Features
+
+* dev-контейнер для e2e (bcw + zapret2) ([60bd91d](https://github.com/rcd27/blockcheckw/commit/60bd91d01a98676a710761b14b58d50a7d135473))
+
+
+### Bug Fixes
+
+* baseline HTTPS проверяет передачу данных, а не только хендшейк ([#60](https://github.com/rcd27/blockcheckw/issues/60)) ([1837357](https://github.com/rcd27/blockcheckw/commit/18373573c3f8d55bdc1feb79cf8964d3560bab6e))
+* baseline пишет «DPI data limit» вместо timeout при троттлинге ([#60](https://github.com/rcd27/blockcheckw/issues/60)) ([d0e5e8a](https://github.com/rcd27/blockcheckw/commit/d0e5e8af9d0a46d7de9b06b3abf1da13c3f3c55a))
+
 ## [0.9.0](https://github.com/rcd27/blockcheckw/compare/v0.8.10...v0.9.0) (2026-06-27)
 
 

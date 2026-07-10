@@ -248,4 +248,28 @@ mod tests {
             "HTTP redirect to HTTPS must stay Available, got {verdict:?}"
         );
     }
+
+    // ── is_throttle_verdict: only the DPI-cap range counts as throttling ──
+
+    #[test]
+    fn throttle_verdict_true_for_dpi_data_limit() {
+        assert!(is_throttle_verdict(&HttpVerdict::DpiDataLimit {
+            size_download: 15_000
+        }));
+    }
+
+    #[test]
+    fn throttle_verdict_false_for_data_transfer_failed() {
+        assert!(!is_throttle_verdict(&HttpVerdict::DataTransferFailed {
+            size_download: 1_200
+        }));
+    }
+
+    #[test]
+    fn throttle_verdict_false_for_unavailable_and_available() {
+        assert!(!is_throttle_verdict(&HttpVerdict::Unavailable {
+            reason: "timeout".to_string()
+        }));
+        assert!(!is_throttle_verdict(&HttpVerdict::Available));
+    }
 }

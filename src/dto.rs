@@ -29,6 +29,14 @@ pub struct ScanProtocolResult {
 pub struct ScanReport {
     pub domain: String,
     pub timestamp: String,
+    /// Network-layer verdict (IP-blackhole vs SNI-block vs available/dns-failed).
+    /// Lets a consumer route on the block kind without re-probing: `IpBlocked`
+    /// means desync can't help (no handshake), `SniBlocked` means it can.
+    pub block_type: BlockType,
+    /// System resolver confirmed poisoned (system DNS diverged from DoH). Orthogonal
+    /// to `block_type`, which is measured on the clean (DoH) IPs: a domain can be
+    /// `dns_spoofed` yet `not_blocked`. Signals "don't trust system DNS, use DoH".
+    pub dns_spoofed: bool,
     pub total: usize,
     pub working: usize,
     /// Protocols that failed the no-bypass baseline (i.e. are DPI-blocked).
@@ -107,20 +115,58 @@ pub struct UniversalReport {
 #[serde(rename_all = "snake_case")]
 pub enum BlockType {
     /// Domain is accessible
-    Available,
-    /// TCP connect fails → IP-level block, zapret can't help
+    NotBlocked,
+    /// Handshake and HEAD succeed, but bulk data is throttled — capped after a
+    /// few KB (DPI data limit) or otherwise choked. The page loads; video and
+    /// downloads stall. Desync may help if SNI-triggered; per-IP throttle needs
+    /// a different egress.
+    Throttled,
+    /// Direct TCP connect fails, with no proxy probe to refine the cause →
+    /// IP-level block of unknown kind. Desync can't help (no handshake).
     IpBlocked,
+    /// Direct SYN dropped, yet the IP is reachable via a proxy → the SYN is
+    /// filtered on this path while the host is alive. Changing egress bypasses it.
+    SynBlocked,
+    /// Unreachable both directly and via a proxy → the host is down everywhere.
+    HostDead,
     /// TCP connects but TLS/data fails → DPI/SNI block, zapret can bypass
     SniBlocked,
     /// DNS resolution failed
     DnsFailed,
 }
 
+impl BlockType {
+    /// Classify a domain from stepped probe outcomes (DNS → direct TCP → response,
+    /// plus an optional proxy reachability probe). When the direct SYN fails, a
+    /// proxy comparison splits IP-level failure into [`SynBlocked`](Self::SynBlocked)
+    /// (alive elsewhere, path-filtered) and [`HostDead`](Self::HostDead) (down everywhere);
+    /// without a proxy it stays the unrefined [`IpBlocked`](Self::IpBlocked).
+    /// `proxy_reachable`: `None` = no proxy probe, `Some(true/false)` = proxy result.
+    pub fn classify(
+        dns_ok: bool,
+        direct_reachable: bool,
+        got_response: bool,
+        proxy_reachable: Option<bool>,
+    ) -> BlockType {
+        match (dns_ok, direct_reachable, got_response, proxy_reachable) {
+            (false, _, _, _) => BlockType::DnsFailed,
+            (true, true, true, _) => BlockType::NotBlocked,
+            (true, true, false, _) => BlockType::SniBlocked,
+            (true, false, _, None) => BlockType::IpBlocked,
+            (true, false, _, Some(true)) => BlockType::SynBlocked,
+            (true, false, _, Some(false)) => BlockType::HostDead,
+        }
+    }
+}
+
 impl std::fmt::Display for BlockType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BlockType::Available => write!(f, "available"),
+            BlockType::NotBlocked => write!(f, "not blocked"),
+            BlockType::Throttled => write!(f, "throttled"),
             BlockType::IpBlocked => write!(f, "IP blocked"),
+            BlockType::SynBlocked => write!(f, "SYN blocked"),
+            BlockType::HostDead => write!(f, "host dead"),
             BlockType::SniBlocked => write!(f, "SNI blocked"),
             BlockType::DnsFailed => write!(f, "DNS failed"),
         }
@@ -179,4 +225,67 @@ pub struct StrategyStats {
     pub latency_min_ms: u64,
     pub latency_max_ms: u64,
     pub error_distribution: Vec<(String, usize)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_dns_failure_is_dns_failed() {
+        assert_eq!(
+            BlockType::classify(false, false, false, None),
+            BlockType::DnsFailed
+        );
+    }
+
+    #[test]
+    fn classify_tcp_unreachable_without_proxy_is_ip_blocked() {
+        assert_eq!(
+            BlockType::classify(true, false, false, None),
+            BlockType::IpBlocked
+        );
+    }
+
+    #[test]
+    fn classify_handshake_but_no_response_is_sni_blocked() {
+        assert_eq!(
+            BlockType::classify(true, true, false, None),
+            BlockType::SniBlocked
+        );
+    }
+
+    #[test]
+    fn classify_response_received_is_not_blocked() {
+        assert_eq!(
+            BlockType::classify(true, true, true, None),
+            BlockType::NotBlocked
+        );
+    }
+
+    #[test]
+    fn classify_syn_dropped_but_alive_via_proxy_is_syn_blocked() {
+        // Direct SYN never answered, yet the IP serves through a proxy: the SYN is
+        // dropped on this path while the host is alive. Fixable by changing egress.
+        assert_eq!(
+            BlockType::classify(true, false, false, Some(true)),
+            BlockType::SynBlocked
+        );
+    }
+
+    #[test]
+    fn classify_unreachable_everywhere_is_host_dead() {
+        assert_eq!(
+            BlockType::classify(true, false, false, Some(false)),
+            BlockType::HostDead
+        );
+    }
+
+    #[test]
+    fn classify_direct_fail_without_proxy_stays_ip_blocked() {
+        assert_eq!(
+            BlockType::classify(true, false, false, None),
+            BlockType::IpBlocked
+        );
+    }
 }

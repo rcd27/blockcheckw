@@ -23,6 +23,13 @@ pub enum DnsSpoofResult {
     CheckFailed { reason: String },
 }
 
+/// True only when the system resolver is confirmed poisoned (system DNS diverges
+/// from DoH on a known-blocked domain). `CheckFailed` (couldn't compare) and
+/// `Clean` are NOT spoofing — an unverifiable check must never raise a false alarm.
+pub fn is_dns_spoofed(spoof: Option<&DnsSpoofResult>) -> bool {
+    matches!(spoof, Some(DnsSpoofResult::Spoofed { .. }))
+}
+
 #[derive(Debug)]
 pub struct DnsResolution {
     pub ips: Vec<String>,
@@ -264,5 +271,30 @@ mod tests {
         assert!(!is_ipv4(".1.2.3"));
         assert!(!is_ipv4("rutracker.org"));
         assert!(!is_ipv4("STREAM"));
+    }
+
+    #[test]
+    fn spoofed_is_dns_spoofed() {
+        assert!(is_dns_spoofed(Some(&DnsSpoofResult::Spoofed {
+            details: "system≠doh".to_string()
+        })));
+    }
+
+    #[test]
+    fn clean_is_not_dns_spoofed() {
+        assert!(!is_dns_spoofed(Some(&DnsSpoofResult::Clean)));
+    }
+
+    #[test]
+    fn check_failed_is_not_dns_spoofed() {
+        // Couldn't verify ≠ poisoned — must not raise a false spoofing alarm.
+        assert!(!is_dns_spoofed(Some(&DnsSpoofResult::CheckFailed {
+            reason: "no DoH server".to_string()
+        })));
+    }
+
+    #[test]
+    fn absent_check_is_not_dns_spoofed() {
+        assert!(!is_dns_spoofed(None));
     }
 }

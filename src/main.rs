@@ -159,6 +159,13 @@ enum Command {
         /// Load strategies from file instead of using built-in corpus
         #[arg(long)]
         from_file: Option<String>,
+
+        /// Verify aliveness of IP-blocked hosts through this egress ONLY (does NOT
+        /// route the scan). When the direct SYN is dropped, a probe through this
+        /// proxy splits the verdict into SYN-blocked (host alive elsewhere) vs
+        /// host-dead. Same endpoint format as --via (e.g. socks5://host:1080).
+        #[arg(long)]
+        alive_via: Option<String>,
     },
 
     /// Show zapret2 effectiveness: compare access with and without the service
@@ -478,6 +485,7 @@ async fn main() {
                 top,
                 output,
                 from_file,
+                alive_via,
             }) => {
                 let sub = matches
                     .subcommand_matches("scan")
@@ -513,6 +521,24 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
+                // --alive-via: a proxy used ONLY to verify aliveness of IP-blocked
+                // hosts (not to route the scan). Must be a proxy we can tcp-connect
+                // through; reachability is verified later in run_scan.
+                let alive_via_proxy = alive_via.as_ref().map(|raw| {
+                    let v = blockcheckw::network::via::Via::parse(raw).unwrap_or_else(|e| {
+                        eprintln!("ERROR: --alive-via: {e}");
+                        std::process::exit(1);
+                    });
+                    if !v.is_proxy() {
+                        eprintln!(
+                            "ERROR: --alive-via must be a proxy (e.g. socks5://host:1080) — it is \
+                             used only to tcp-connect through for an aliveness probe, not to route"
+                        );
+                        std::process::exit(1);
+                    }
+                    v
+                });
+
                 cmd::scan::run_scan(cmd::scan::ScanParams {
                     workers: eff_workers as usize,
                     domain: &eff_domain,
@@ -523,6 +549,7 @@ async fn main() {
                     output: output.as_deref(),
                     from_file: from_file.as_deref(),
                     via: via.as_ref(),
+                    alive_via: alive_via_proxy.as_ref(),
                 })
                 .await;
             }
@@ -694,6 +721,39 @@ async fn run_upgrade() {
         }
         None => {
             con.ok(&format!("v{current} is the latest version"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_accepts_alive_via_flag() {
+        let cli = Cli::try_parse_from([
+            "blockcheckw",
+            "scan",
+            "-d",
+            "example.com",
+            "--alive-via",
+            "socks5://127.0.0.1:1080",
+        ])
+        .expect("parse");
+        match cli.command {
+            Some(Command::Scan { alive_via, .. }) => {
+                assert_eq!(alive_via.as_deref(), Some("socks5://127.0.0.1:1080"));
+            }
+            _ => panic!("expected Scan command"),
+        }
+    }
+
+    #[test]
+    fn scan_alive_via_defaults_to_none() {
+        let cli = Cli::try_parse_from(["blockcheckw", "scan", "-d", "example.com"]).expect("parse");
+        match cli.command {
+            Some(Command::Scan { alive_via, .. }) => assert_eq!(alive_via, None),
+            _ => panic!("expected Scan command"),
         }
     }
 }

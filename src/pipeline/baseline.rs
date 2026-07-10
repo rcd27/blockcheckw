@@ -81,6 +81,15 @@ pub async fn test_baseline(
     BaselineResult { protocol, verdict }
 }
 
+/// True when a data-transfer verdict carries the DPI throttle signature: the
+/// download is cut in the ~16-19KB DPI-cap range ([`HttpVerdict::DpiDataLimit`]).
+/// Deliberately NOT [`HttpVerdict::DataTransferFailed`] — that also fires on a
+/// legitimately small page (a 1.2KB site downloads fully in <32KB), which is not
+/// throttled. Sub-cap stalls are missed; the cap range is the canonical signal.
+pub fn is_throttle_verdict(verdict: &HttpVerdict) -> bool {
+    matches!(verdict, HttpVerdict::DpiDataLimit { .. })
+}
+
 pub fn format_baseline_verdict(result: &BaselineResult) -> String {
     match &result.verdict {
         HttpVerdict::Available => {

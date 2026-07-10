@@ -20,6 +20,22 @@
 `cargo build --release` проверяет **только** компиляцию. Код может собираться, но падать на CI из-за clippy warnings или
 неотформатированного кода.
 
+## Dev-контейнер
+
+Запуск `blockcheckw` локально требует root, nftables и собранный nfqws2. Чтобы не засорять хост — dev-контейнер
+со всеми зависимостями (тот же образ, что в CI):
+
+```bash
+./scripts/dev-container.sh build   # образ: nfqws2 + nftables + rust toolchain
+./scripts/dev-container.sh up      # долгоживущий контейнер bcw-dev (--privileged)
+./scripts/dev-container.sh run scan -d cloudflare.com   # cargo run -- <args> внутри
+./scripts/dev-container.sh shell   # bash внутри контейнера
+./scripts/dev-container.sh down
+```
+
+Исходники монтируются с хоста: правишь код — `run` пересобирает инкрементально, образ пересобирать не нужно.
+Первая сборка внутри контейнера небыстрая (свой `target/` в docker volume).
+
 ## Флоу коммита
 
 1. Пишешь код

@@ -1,6 +1,28 @@
 use crate::config::Protocol;
-use crate::network::http_client::{http_test, interpret_http_result, pick_random_ip, HttpVerdict};
+use crate::network::http_client::{
+    http_test, http_test_data, interpret_data_transfer_result, interpret_http_result,
+    pick_random_ip, BodyMode, HttpResult, HttpVerdict, DATA_TRANSFER_MIN_BYTES,
+};
 use crate::ui;
+
+/// Judge a baseline (no-bypass) probe result.
+///
+/// For HTTPS, baseline uses the same yardstick as strategy success (check/verify/
+/// worker): a domain is "available without bypass" only if it actually transfers
+/// data, not merely completes a handshake. See #60 — a DPI that permits the TLS
+/// handshake but resets during data transfer is invisible to a headers-only probe.
+///
+/// For plain HTTP the data yardstick does not apply: a legitimate redirect to
+/// HTTPS carries no body, so blocking is judged by redirect target / status code
+/// (interpret_http_result), matching how verify limits its data check to HTTPS.
+fn interpret_baseline(result: &HttpResult, domain: &str, protocol: Protocol) -> HttpVerdict {
+    match protocol {
+        Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
+            interpret_data_transfer_result(result, domain, DATA_TRANSFER_MIN_BYTES)
+        }
+        Protocol::Http => interpret_http_result(result, domain),
+    }
+}
 
 pub struct BaselineResult {
     pub protocol: Protocol,
@@ -31,9 +53,31 @@ pub async fn test_baseline(
         }
     };
 
-    // fwmark=0 — no marking for baseline (no bypass, no nftables rules)
-    let result = http_test(protocol, domain, ip, 0, timeout_secs, None).await;
-    let verdict = interpret_http_result(&result, domain);
+    // fwmark=0 — no marking for baseline (no bypass, no nftables rules).
+    //
+    // HTTPS: GET, downloading up to the threshold. A DPI that caps data transfer
+    // (while passing the handshake) registers as blocked, same as check/verify/
+    // status — yet a large, genuinely-available page still finishes within the
+    // short baseline timeout instead of being truncated into a false block. #60.
+    //
+    // HTTP: headers-only probe (redirect/status is what matters; a redirect to
+    // HTTPS legitimately carries no body, so the data threshold does not apply).
+    let result = match protocol {
+        Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
+            http_test_data(
+                protocol,
+                domain,
+                ip,
+                0,
+                timeout_secs,
+                BodyMode::LimitedTo(DATA_TRANSFER_MIN_BYTES),
+                None,
+            )
+            .await
+        }
+        Protocol::Http => http_test(protocol, domain, ip, 0, timeout_secs, None).await,
+    };
+    let verdict = interpret_baseline(&result, domain, protocol);
     BaselineResult { protocol, verdict }
 }
 
@@ -134,5 +178,59 @@ mod tests {
         let s = format_baseline_verdict(&r);
         assert!(s.contains("available without bypass"));
         assert!(s.contains("HTTPS/TLS1.3"));
+    }
+
+    // ── #60: baseline must catch DPI that passes headers but caps data ──
+
+    /// DPI lets the handshake + response headers through (200 OK) but resets
+    /// during the body — only ~12KB arrives. A headers-only probe calls this
+    /// "available"; baseline must call it blocked, like check/verify/status do.
+    #[test]
+    fn baseline_treats_capped_data_as_blocked() {
+        let result = HttpResult {
+            status_code: Some(200),
+            headers: "HTTP/1.1 200 OK\r\n".to_string(),
+            error: None,
+            size_download: Some(12_000),
+        };
+        let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::HttpsTls12);
+        assert!(
+            !matches!(verdict, HttpVerdict::Available),
+            "capped-data response must not be judged Available, got {verdict:?}"
+        );
+    }
+
+    /// A domain that transfers a full page (>= min bytes) is genuinely available.
+    #[test]
+    fn baseline_treats_full_download_as_available() {
+        let result = HttpResult {
+            status_code: Some(200),
+            headers: "HTTP/1.1 200 OK\r\n".to_string(),
+            error: None,
+            size_download: Some(64_000),
+        };
+        let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::HttpsTls12);
+        assert!(
+            matches!(verdict, HttpVerdict::Available),
+            "full download must be judged Available, got {verdict:?}"
+        );
+    }
+
+    /// Plain HTTP that redirects to HTTPS carries no body — it is available,
+    /// not blocked. The data-transfer threshold must not apply to HTTP.
+    #[test]
+    fn baseline_http_redirect_stays_available() {
+        let result = HttpResult {
+            status_code: Some(301),
+            headers: "HTTP/1.1 301 Moved Permanently\r\nlocation: https://www.cloudflare.com/\r\n"
+                .to_string(),
+            error: None,
+            size_download: Some(0),
+        };
+        let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::Http);
+        assert!(
+            matches!(verdict, HttpVerdict::Available),
+            "HTTP redirect to HTTPS must stay Available, got {verdict:?}"
+        );
     }
 }

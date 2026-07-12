@@ -570,6 +570,7 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Best-effort synchronous cleanup
+        blockcheckw::system::process::start_kill_all_background_processes();
         blockcheckw::network::via::Via::cleanup_sync();
         if let Ok(guard) = panic_state.try_lock() {
             // Drop our nft table
@@ -621,6 +622,7 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
             tokio::spawn(async {
                 if tokio::signal::ctrl_c().await.is_ok() {
                     eprintln!("\n  force quit");
+                    blockcheckw::system::process::kill_all_background_processes().await;
                     std::process::exit(137);
                 }
             });
@@ -633,6 +635,10 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
 
 /// Shared graceful cleanup logic for SIGINT and SIGTERM.
 async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i32) {
+    // Make shutdown atomic with BackgroundProcess::spawn. No worker may start a
+    // new nfqws2 after this point.
+    blockcheckw::system::process::begin_background_shutdown();
+
     eprintln!(
         "\n{}",
         style(format!("=== {signal_name} — cleaning up ==="))
@@ -683,6 +689,9 @@ async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i3
         style("OK").green().bold(),
         info.nft_table,
     );
+    // With queue rules gone, explicitly kill and reap every child we spawned.
+    // process::exit below skips destructors, so kill_on_drop alone is not enough.
+    blockcheckw::system::process::kill_all_background_processes().await;
     if let Some(ref mgr) = info.stopped_service {
         if start_service(mgr).await {
             eprintln!(

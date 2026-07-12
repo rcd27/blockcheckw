@@ -163,7 +163,7 @@ async fn nfqws2_receives_marked_traffic() {
     let mut nfqws2 = start_nfqws2(&config, slot.qnum, &strategy).expect("start nfqws2");
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
-        nfqws2.try_wait().is_none(),
+        nfqws2.try_wait().await.is_none(),
         "nfqws2 should still be running"
     );
 
@@ -179,7 +179,7 @@ async fn nfqws2_receives_marked_traffic() {
     .await;
 
     assert!(
-        nfqws2.try_wait().is_none(),
+        nfqws2.try_wait().await.is_none(),
         "nfqws2 should still be running after processing traffic"
     );
 
@@ -238,7 +238,7 @@ async fn autottl_prenat_captures_synack() {
     .await;
 
     assert!(
-        nfqws2.try_wait().is_none(),
+        nfqws2.try_wait().await.is_none(),
         "nfqws2 should still be running after autottl flow"
     );
 

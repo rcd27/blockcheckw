@@ -1,5 +1,7 @@
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::error::BlockcheckError;
@@ -86,9 +88,48 @@ pub async fn run_process_stdin(
     })
 }
 
-/// A background process handle. Wraps a tokio::process::Child.
+#[derive(Default)]
+struct BackgroundRegistry {
+    shutting_down: bool,
+    children: Vec<Weak<Mutex<tokio::process::Child>>>,
+}
+
+fn background_registry() -> &'static StdMutex<BackgroundRegistry> {
+    static REGISTRY: OnceLock<StdMutex<BackgroundRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| StdMutex::new(BackgroundRegistry::default()))
+}
+
+/// Prevent new background children from being spawned during shutdown.
+pub fn begin_background_shutdown() {
+    background_registry().lock().unwrap().shutting_down = true;
+}
+
+fn registered_children() -> Vec<Arc<Mutex<tokio::process::Child>>> {
+    let mut registry = background_registry().lock().unwrap();
+    registry.shutting_down = true;
+    registry.children.retain(|child| child.strong_count() > 0);
+    registry.children.iter().filter_map(Weak::upgrade).collect()
+}
+
+/// Kill and reap every live child spawned through [`BackgroundProcess`].
+pub async fn kill_all_background_processes() {
+    for child in registered_children() {
+        let _ = child.lock().await.kill().await;
+    }
+}
+
+/// Best-effort synchronous kill initiation for panic hooks.
+pub fn start_kill_all_background_processes() {
+    for child in registered_children() {
+        if let Ok(mut child) = child.try_lock() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+/// A registered background process handle. Wraps a tokio process child.
 pub struct BackgroundProcess {
-    child: tokio::process::Child,
+    child: Arc<Mutex<tokio::process::Child>>,
 }
 
 impl BackgroundProcess {
@@ -100,6 +141,16 @@ impl BackgroundProcess {
                     reason: "empty command".to_string(),
                 })?;
 
+        // Holding the registry lock across spawn makes registration atomic with
+        // begin_background_shutdown(): cleanup cannot miss a concurrently
+        // created child, and no child can start after shutdown begins.
+        let mut registry = background_registry().lock().unwrap();
+        if registry.shutting_down {
+            return Err(BlockcheckError::ProcessSpawn {
+                reason: "shutdown in progress".to_string(),
+            });
+        }
+
         let child = Command::new(program)
             .args(cmd_args)
             .stdout(std::process::Stdio::null())
@@ -110,18 +161,22 @@ impl BackgroundProcess {
                 reason: e.to_string(),
             })?;
 
+        let child = Arc::new(Mutex::new(child));
+        registry.children.retain(|child| child.strong_count() > 0);
+        registry.children.push(Arc::downgrade(&child));
+
         Ok(Self { child })
     }
 
     /// Kill the process (SIGKILL) and wait to reap the zombie.
     pub async fn kill(&mut self) {
         // best-effort — process may have already exited
-        let _ = self.child.kill().await;
+        let _ = self.child.lock().await.kill().await;
     }
 
     /// Check if the process is still running.
-    pub fn try_wait(&mut self) -> Option<i32> {
-        match self.child.try_wait() {
+    pub async fn try_wait(&mut self) -> Option<i32> {
+        match self.child.lock().await.try_wait() {
             Ok(Some(status)) => Some(status.code().unwrap_or(-1)),
             _ => None,
         }
@@ -131,9 +186,28 @@ impl BackgroundProcess {
     /// Returns `Ok(())` if alive after delay, `Err(exit_code)` if it exited early.
     pub async fn wait_for_ready(&mut self, delay_ms: u64) -> Result<(), i32> {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        match self.try_wait() {
+        match self.try_wait().await {
             Some(code) => Err(code),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_kills_registered_children_and_blocks_new_spawns() {
+        let mut process = BackgroundProcess::spawn(&["sleep", "30"]).expect("spawn sleep");
+        assert!(process.try_wait().await.is_none());
+
+        kill_all_background_processes().await;
+
+        assert!(process.try_wait().await.is_some());
+        let error = BackgroundProcess::spawn(&["sleep", "30"])
+            .err()
+            .expect("spawn during shutdown must fail");
+        assert!(error.to_string().contains("shutdown in progress"));
     }
 }

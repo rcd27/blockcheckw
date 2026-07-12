@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/rcd27/blockcheckw/compare/v0.9.1...v0.9.2) (2026-07-12)
+
+
+### Bug Fixes
+
+* завершать nfqws2 при прерывании через Ctrl+C ([#62](https://github.com/rcd27/blockcheckw/issues/62)) ([5fcd746](https://github.com/rcd27/blockcheckw/commit/5fcd746bc0e7153dad7b6001d066a38fa3a7ef26))
+
 ## [0.9.1](https://github.com/rcd27/blockcheckw/compare/v0.9.0...v0.9.1) (2026-07-10)
 
 

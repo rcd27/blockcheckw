@@ -140,10 +140,10 @@ pub fn init() -> OtelGuard {
                 ]))
                 .build();
             let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, SERVICE_NAME);
-            // Форсим blockcheckw=info ТОЛЬКО для OTLP-слоя: демон отдаёт
-            // RUST_LOG=nevod=debug,reflex_linux=info без директивы для target
-            // `blockcheckw` → иначе span'ы режутся до экспорта. На stderr это
-            // не влияет (у fmt-слоя свой фильтр).
+            // Форсим blockcheckw=info ТОЛЬКО для OTLP-слоя: вызывающий процесс
+            // задаёт RUST_LOG под СВОИ target'ы, и директивы для `blockcheckw`
+            // там обычно нет → иначе span'ы режутся фильтром до экспорта. На
+            // stderr это не влияет (у fmt-слоя свой фильтр).
             let otel_filter = EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("warn"))
                 .add_directive("blockcheckw=info".parse().unwrap());

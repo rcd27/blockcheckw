@@ -65,7 +65,10 @@ HOSTFAKE=
 for script in "$TESTDIR/"*.sh; do
     basename="$(basename "$script")"
 
-    # Skip quic for now
+    # QUIC вне корпуса НАМЕРЕННО: v1 движка подбора — TCP-only desync (решение от 20.06.2026).
+    # Цена решения замерена 17.08.2026 и записана в rcd27/nevod#135: nfqws2 распознаёт 13
+    # протоколов потока, корпус покрывает 2 (http, tls); в полевых профилях 45 % правил — UDP.
+    # Снимать этот continue — вместе с FAKE_*/SEQOVL_PATTERN_* выше, они обнулены той же границей.
     [[ "$basename" == *quic* ]] && continue
 
     echo "# === $basename ==="

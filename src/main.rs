@@ -262,7 +262,12 @@ async fn main() {
     std::panic::set_hook(Box::new(move |info| {
         blockcheckw::network::via::Via::cleanup_sync();
         if let Ok(mut child) = std::process::Command::new("nft")
-            .args(["delete", "table", "inet", "zapret"])
+            .args([
+                "delete",
+                "table",
+                "inet",
+                blockcheckw::config::DEFAULT_NFT_TABLE,
+            ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

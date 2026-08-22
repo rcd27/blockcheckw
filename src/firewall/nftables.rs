@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_parse_handle_multiline() {
-        let output = "table inet zapret {\n}\nadd rule ... # handle 137\n";
+        let output = "table inet blockcheckw {\n}\nadd rule ... # handle 137\n";
         let handle = parse_handle(output).unwrap();
         assert_eq!(handle.0, 137);
     }

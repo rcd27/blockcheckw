@@ -4,6 +4,11 @@ pub const DESYNC_MARK: u32 = 0x10000000;
 pub const WORKER_MARK_BASE: u32 = 0x20000000;
 pub const NFQWS2_INIT_DELAY_MS: u64 = 100;
 
+/// Имя нашей nft-таблицы. Не должно совпадать с чужими: "zapret" занято zapret1,
+/// "zapret2" — zapret2 (см. common/nft.sh), иначе их таблицы попадают под наш
+/// cleanup и при этом не видны детекту конфликтов.
+pub const DEFAULT_NFT_TABLE: &str = "blockcheckw";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsMode {
     Auto,
@@ -49,7 +54,7 @@ impl Default for CoreConfig {
         Self {
             worker_count: 8,
             base_qnum: 200,
-            nft_table: "zapret".to_string(),
+            nft_table: DEFAULT_NFT_TABLE.to_string(),
             nfqws2_path: detect_nfqws2_path("/opt/zapret2"),
             request_timeout: 2,
             // FIXME: zapret_base is hardcoded; add CLI option to override
@@ -224,6 +229,15 @@ pub fn parse_protocols(s: &str) -> Result<Vec<Protocol>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_nft_table_does_not_collide_with_foreign_ones() {
+        // issue #66: имя "zapret" принадлежит zapret1
+        for foreign in ["zapret", "zapret2", "fw4"] {
+            assert_ne!(DEFAULT_NFT_TABLE, foreign);
+        }
+        assert_eq!(CoreConfig::default().nft_table, DEFAULT_NFT_TABLE);
+    }
 
     #[test]
     fn test_parse_protocols_all() {

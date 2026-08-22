@@ -57,7 +57,13 @@ blockcheckw -w 512 universal --domain-list blocked.txt | blockcheckw check -d ru
 | `--version` | Текущая версия + проверка обновлений на GitHub          |
 | `--upgrade` | Обновление до последнего релиза                         |
 
-[Quickstart](./docs/QUICKSTART.md) — установка, использование, решение проблем.
+У каждой команды свои флаги — таймауты, DNS-режим, число проходов:
+
+```bash
+blockcheckw <command> --help
+```
+
+[Quickstart](./docs/QUICKSTART.md#использование) — таблицы всех флагов по командам, установка, решение проблем.
 
 ## Классификация блокировки (`block_type`)
 

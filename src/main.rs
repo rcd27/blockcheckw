@@ -27,10 +27,25 @@ const fn help_styles() -> clap::builder::styling::Styles {
         .placeholder(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan))))
 }
 
+/// Верхнеуровневая справка перечисляет только команды: таймауты, DNS-режим и
+/// число проходов задаются флагами конкретной команды (#66).
+const AFTER_HELP: &str = "\
+Examples:
+  blockcheckw scan -d rutracker.org                скан домена на работающие страты
+  blockcheckw scan -d example.com -p tls12         проверка только TLS 1.2
+  blockcheckw scan -d example.com -o report.json   сохранить отчёт в файл
+  blockcheckw check --from-file report.json        проверка найденных страт
+  blockcheckw universal --domain-list domains.txt  подбор пересекающихся страт для разных доменов
+  blockcheckw status --domain-list domains.txt     оценка эффективности работающего zapret2
+
+Per-command flags (timeouts, DNS mode, passes, worker count):
+  blockcheckw <command> --help";
+
 #[derive(Parser)]
 #[command(
     name = "blockcheckw",
     about = "Parallel DPI bypass strategy scanner",
+    after_help = AFTER_HELP,
     styles = help_styles(),
 )]
 struct Cli {
@@ -320,6 +335,15 @@ async fn main() {
         } else {
             cmd::completions::generate_completions(shell, &mut Cli::command());
         }
+        return;
+    }
+
+    // Без команды — печатаем справку и выходим. Это должно случиться до
+    // require_root() и prereq-проверок: иначе голый `blockcheckw` поднимает
+    // права через sudo и выдаёт диагностику окружения вместо help (#66).
+    if cli.command.is_none() {
+        let _ = Cli::command().print_help();
+        println!();
         return;
     }
 
@@ -644,9 +668,7 @@ async fn main() {
                 .await;
             }
             Some(Command::Completions { .. }) => unreachable!("handled above"),
-            None => {
-                let _ = Cli::command().print_help();
-            }
+            None => unreachable!("справка без команды печатается до elevation"),
         }
     }
     .instrument(root)

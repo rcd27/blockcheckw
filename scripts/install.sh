@@ -3,7 +3,7 @@
 # Определяет архитектуру, скачивает бинарь из GitHub Releases, проверяет SHA256.
 #
 # Использование:
-#   curl -fsSL https://raw.githubusercontent.com/rcd27/blockcheckw/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/rcd27/blockcheckw/main/scripts/install.sh | sudo sh
 #
 # Переменные окружения:
 #   INSTALL_DIR  — каталог установки (по умолчанию /usr/local/bin)
@@ -40,7 +40,17 @@ detect_arch() {
         armv7*|armv6*|arm*)     echo "arm"      ;;
         mips64*)                echo "mips64"   ;;
         mipsel*|mipsle*)        echo "mipsel"   ;;
-        mips*)                  echo "mips"     ;;
+        mips*)
+            command -v dd >/dev/null 2>&1 ||
+                die "Не удалось определить byte order MIPS: нужен dd"
+            elf_data=$(dd if=/proc/self/exe bs=1 skip=5 count=1 2>/dev/null) ||
+                die "Не удалось прочитать ELF-заголовок /proc/self/exe"
+            case "$elf_data" in
+                "$(printf '\001')") echo "mipsel" ;;
+                "$(printf '\002')") echo "mips"   ;;
+                *) die "Не удалось определить byte order MIPS по ELF-заголовку" ;;
+            esac
+            ;;
         ppc|powerpc)            echo "ppc"      ;;
         riscv64*)               echo "riscv64"  ;;
         *)  die "Неизвестная архитектура: $machine. Поддерживаются: x86_64, x86, arm64, arm, mips, mipsel, mips64, ppc, riscv64" ;;
@@ -94,7 +104,10 @@ download "${BASE_URL}/SHA256SUMS.txt" "${TMPDIR}/SHA256SUMS.txt" || \
 
 info "Проверяю SHA256..."
 cd "$TMPDIR"
-grep "$TARBALL" SHA256SUMS.txt | sha256sum -c --quiet - || \
+checksum_line=$(grep -F "  $TARBALL" SHA256SUMS.txt | head -n 1)
+[ -n "$checksum_line" ] || \
+    die "В SHA256SUMS.txt нет контрольной суммы для ${TARBALL}"
+printf '%s\n' "$checksum_line" | sha256sum -c - >/dev/null 2>&1 || \
     die "Контрольная сумма не совпала! Файл мог быть повреждён при скачивании."
 
 # --- Установка ---

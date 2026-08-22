@@ -418,6 +418,30 @@ pub struct CleanupInfo {
     pub scan_progress: Option<ScanProgressState>,
 }
 
+fn emergency_cleanup_sync(info: &CleanupInfo) {
+    // Drop queue rules before terminating their listeners so packets are not
+    // sent to an unbound NFQUEUE during emergency shutdown.
+    let _ = std::process::Command::new("nft")
+        .args(["delete", "table", "inet", &info.nft_table])
+        .status();
+    blockcheckw::system::process::start_kill_all_background_processes();
+
+    if let Some(ref mgr) = info.stopped_service {
+        let _ = match mgr {
+            ServiceManager::Systemd { unit } => std::process::Command::new("systemctl")
+                .args(["start", unit])
+                .status(),
+            ServiceManager::InitD { script } => {
+                std::process::Command::new(script).arg("start").status()
+            }
+        };
+    }
+    if let Some(ref dump) = info.nft_backup {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        restore_nft_ruleset_sync(dump);
+    }
+}
+
 // ── Scan progress (interrupt-safe result accumulator) ────────────────────────
 
 /// Sink that `run_parallel` pushes each AVAILABLE strategy's args into as it is
@@ -581,31 +605,14 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Best-effort synchronous cleanup
-        blockcheckw::system::process::start_kill_all_background_processes();
         blockcheckw::network::via::Via::cleanup_sync();
         if let Ok(guard) = panic_state.try_lock() {
-            // Drop our nft table
-            let _ = std::process::Command::new("nft")
-                .args(["delete", "table", "inet", &guard.nft_table])
-                .status();
-            // Restart zapret2
-            if let Some(ref mgr) = guard.stopped_service {
-                let _ = match mgr {
-                    ServiceManager::Systemd { unit } => std::process::Command::new("systemctl")
-                        .args(["start", unit])
-                        .status(),
-                    ServiceManager::InitD { script } => {
-                        std::process::Command::new(script).arg("start").status()
-                    }
-                };
+            emergency_cleanup_sync(&guard);
+            if guard.stopped_service.is_some() {
                 eprintln!(
                     "\n  {} zapret2 restored after panic",
                     style("OK").green().bold(),
                 );
-            }
-            // Restore nft ruleset from backup
-            if let Some(ref dump) = guard.nft_backup {
-                restore_nft_ruleset_sync(dump);
             }
         }
         prev_hook(info);
@@ -628,13 +635,22 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
             // Spawn force-quit listener + delayed hint
             tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                eprintln!("  {} press Ctrl+C again to force quit", style("→").dim());
+                eprintln!(
+                    "  {} press Ctrl+C again for emergency cleanup",
+                    style("→").dim()
+                );
             });
-            tokio::spawn(async {
+            let force_state = sigint_state.clone();
+            tokio::spawn(async move {
                 if tokio::signal::ctrl_c().await.is_ok() {
-                    eprintln!("\n  force quit");
-                    blockcheckw::system::process::kill_all_background_processes().await;
-                    std::process::exit(137);
+                    blockcheckw::system::process::begin_background_shutdown();
+                    blockcheckw::network::via::Via::cleanup_sync();
+                    if let Ok(guard) = force_state.try_lock() {
+                        eprintln!("\n  emergency cleanup");
+                        emergency_cleanup_sync(&guard);
+                        std::process::exit(137);
+                    }
+                    eprintln!("\n  network cleanup already in progress; waiting for safe shutdown");
                 }
             });
             graceful_cleanup("Ctrl+C", &sigint_state, 130).await;
@@ -660,8 +676,38 @@ async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i3
     blockcheckw::network::via::Via::cleanup_all().await;
     let info = state.lock().await;
 
-    // Persist whatever the scan found *before* tearing anything down, so an
-    // interrupt mid-scan still leaves a report on disk (#41).
+    blockcheckw::firewall::nftables::drop_table(&info.nft_table).await;
+    eprintln!(
+        "  {} nft table '{}' dropped",
+        style("OK").green().bold(),
+        info.nft_table,
+    );
+    // With queue rules gone, explicitly kill and reap every child we spawned.
+    // process::exit below skips destructors, so kill_on_drop alone is not enough.
+    blockcheckw::system::process::kill_all_background_processes().await;
+    if let Some(ref mgr) = info.stopped_service {
+        if start_service(mgr).await {
+            eprintln!(
+                "  {} zapret2 restarted via {mgr}",
+                style("OK").green().bold(),
+            );
+        } else {
+            eprintln!(
+                "  {}failed to restart zapret2 via {mgr}, please start manually",
+                WARN,
+            );
+        }
+    }
+    // Restore user's nft ruleset from backup
+    if let Some(ref dump) = info.nft_backup {
+        // Small delay to let zapret2 finish creating its tables
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let cleanup_con = blockcheckw::ui::Console::new();
+        restore_nft_ruleset(dump, &cleanup_con).await;
+    }
+
+    // Persist partial results only after network state is safe. A second Ctrl+C
+    // may skip the report, but must never leave queue rules or zapret2 altered.
     if let Some(progress) = &info.scan_progress {
         let (domain, output, block_type, dns_spoofed, blocked, summary) = {
             let p = progress.lock().unwrap();
@@ -692,36 +738,6 @@ async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i3
                 Err(e) => eprintln!("  {}failed to save partial results: {e}", WARN),
             }
         }
-    }
-
-    blockcheckw::firewall::nftables::drop_table(&info.nft_table).await;
-    eprintln!(
-        "  {} nft table '{}' dropped",
-        style("OK").green().bold(),
-        info.nft_table,
-    );
-    // With queue rules gone, explicitly kill and reap every child we spawned.
-    // process::exit below skips destructors, so kill_on_drop alone is not enough.
-    blockcheckw::system::process::kill_all_background_processes().await;
-    if let Some(ref mgr) = info.stopped_service {
-        if start_service(mgr).await {
-            eprintln!(
-                "  {} zapret2 restarted via {mgr}",
-                style("OK").green().bold(),
-            );
-        } else {
-            eprintln!(
-                "  {}failed to restart zapret2 via {mgr}, please start manually",
-                WARN,
-            );
-        }
-    }
-    // Restore user's nft ruleset from backup
-    if let Some(ref dump) = info.nft_backup {
-        // Small delay to let zapret2 finish creating its tables
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let cleanup_con = blockcheckw::ui::Console::new();
-        restore_nft_ruleset(dump, &cleanup_con).await;
     }
     std::process::exit(exit_code);
 }

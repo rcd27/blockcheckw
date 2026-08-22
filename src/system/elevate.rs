@@ -48,15 +48,6 @@ pub fn require_root() {
     std::process::exit(2);
 }
 
-/// Enable tcp_tw_reuse so TIME_WAIT ports can be reused for new outgoing connections.
-/// With fwmark-based routing (no fixed port ranges), TIME_WAIT is less of an issue,
-/// but this still helps ephemeral port recycling under heavy load.
-pub fn tune_tcp() {
-    if let Err(e) = std::fs::write("/proc/sys/net/ipv4/tcp_tw_reuse", "1") {
-        tracing::warn!("failed to set tcp_tw_reuse: {e} (SELinux/AppArmor?)");
-    }
-}
-
 /// Raise RLIMIT_NOFILE so that many parallel workers don't hit "Too many open files".
 /// Each worker needs ~6-8 fd (nfqws2 process + TCP socket + nft calls).
 /// Default soft limit is often 1024 — not enough for 256+ workers.

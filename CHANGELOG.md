@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.3](https://github.com/rcd27/blockcheckw/compare/v0.9.2...v0.9.3) (2026-08-22)
+
+
+### Bug Fixes
+
+* **config:** добавлены проверки архитектур, FIXES [#66](https://github.com/rcd27/blockcheckw/issues/66) ([168ef31](https://github.com/rcd27/blockcheckw/commit/168ef312d1dc31d2b6f8c17a0629429b3a404733))
+* **config:** нэйминг для `bcw` правил, исключающий конфликты ([6ef57dc](https://github.com/rcd27/blockcheckw/commit/6ef57dc6c8c926f52d8dba29f52ea52cd068e7a7))
+* **config:** проверки на конфликтующие nft правила ([482d46d](https://github.com/rcd27/blockcheckw/commit/482d46d83d48c55c9caf3e4d6769d1190a509e20))
+
 ## [0.9.2](https://github.com/rcd27/blockcheckw/compare/v0.9.1...v0.9.2) (2026-07-12)
 
 

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::LazyLock;
 
 use tokio::sync::Mutex;
@@ -9,6 +10,11 @@ use crate::network::doh;
 use crate::system::process::run_process;
 
 const DNS_TIMEOUT_MS: u64 = 10_000;
+const COMMAND_UNKNOWN: u8 = 0;
+const COMMAND_AVAILABLE: u8 = 1;
+const COMMAND_UNAVAILABLE: u8 = 2;
+
+static GETENT_AVAILABILITY: AtomicU8 = AtomicU8::new(COMMAND_UNKNOWN);
 
 /// DNS resolution cache — avoids redundant queries and TOCTOU races.
 static DNS_CACHE: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
@@ -41,9 +47,45 @@ pub(crate) fn is_ipv4(s: &str) -> bool {
     s.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
+fn command_exists_in_path(command: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|directory| directory.join(command).is_file())
+    })
+}
+
+fn cached_command_available(state: &AtomicU8, command: &str) -> bool {
+    match state.load(Ordering::Relaxed) {
+        COMMAND_AVAILABLE => true,
+        COMMAND_UNAVAILABLE => false,
+        _ => {
+            let available = command_exists_in_path(command);
+            state.store(
+                if available {
+                    COMMAND_AVAILABLE
+                } else {
+                    COMMAND_UNAVAILABLE
+                },
+                Ordering::Relaxed,
+            );
+            available
+        }
+    }
+}
+
 async fn resolve_with_getent(domain: &str) -> Option<Vec<String>> {
+    if !cached_command_available(&GETENT_AVAILABILITY, "getent") {
+        return None;
+    }
+
     let args = vec!["getent", "ahostsv4", domain];
-    let result = run_process(&args, DNS_TIMEOUT_MS).await.ok()?;
+    let result = match run_process(&args, DNS_TIMEOUT_MS).await {
+        Ok(result) => result,
+        Err(BlockcheckError::ProcessSpawn { .. }) => {
+            GETENT_AVAILABILITY.store(COMMAND_UNAVAILABLE, Ordering::Relaxed);
+            return None;
+        }
+        Err(_) => return None,
+    };
     if result.exit_code != 0 {
         return None;
     }
@@ -271,6 +313,15 @@ mod tests {
         assert!(!is_ipv4(".1.2.3"));
         assert!(!is_ipv4("rutracker.org"));
         assert!(!is_ipv4("STREAM"));
+    }
+
+    #[test]
+    fn unavailable_command_is_cached() {
+        let state = AtomicU8::new(COMMAND_UNKNOWN);
+        let command = "blockcheckw-command-that-does-not-exist";
+        assert!(!cached_command_available(&state, command));
+        assert_eq!(state.load(Ordering::Relaxed), COMMAND_UNAVAILABLE);
+        assert!(!cached_command_available(&state, command));
     }
 
     #[test]

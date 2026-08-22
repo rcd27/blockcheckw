@@ -371,18 +371,7 @@ fn extract_redirect_location(headers: &str) -> String {
 }
 
 fn timestamp_iso() -> String {
-    use std::process::Command;
-    let output = Command::new("date").arg("--iso-8601=seconds").output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => {
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            format!("{secs}")
-        }
-    }
+    crate::pipeline::test_report::chrono_like_timestamp()
 }
 
 #[cfg(test)]
@@ -407,6 +396,15 @@ mod tests {
             0.0
         };
         assert_eq!(speed, 0.0);
+    }
+
+    #[test]
+    fn timestamp_is_utc_iso_8601() {
+        let timestamp = timestamp_iso();
+        assert_eq!(timestamp.len(), 20);
+        assert_eq!(&timestamp[10..11], "T");
+        assert!(timestamp.ends_with('Z'));
+        assert!(!timestamp[..19].chars().all(|ch| ch.is_ascii_digit()));
     }
 
     #[test]

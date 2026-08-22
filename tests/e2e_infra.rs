@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
 
-use blockcheckw::config::{CoreConfig, Protocol, DESYNC_MARK, WORKER_MARK_BASE};
+use blockcheckw::config::{CoreConfig, Protocol, DEFAULT_NFT_TABLE, DESYNC_MARK, WORKER_MARK_BASE};
 use blockcheckw::firewall::nftables;
 use blockcheckw::network::http_client;
 use blockcheckw::system::process::run_process;
@@ -431,4 +431,80 @@ fn worker_fwmarks_are_unique() {
     marks.sort();
     marks.dedup();
     assert_eq!(marks.len(), 512, "all 512 fwmarks should be unique");
+}
+
+// ── Test 8: чужая nft-таблица переживает наш цикл ────────────────────────────
+
+/// Существует ли таблица `inet <name>`.
+async fn nft_table_exists(name: &str) -> bool {
+    run_process(&["nft", "list", "table", "inet", name], 5000)
+        .await
+        .map(|r| r.exit_code == 0)
+        .unwrap_or(false)
+}
+
+/// issue #66: имя нашей таблицы совпадало с таблицей zapret1, и наш cleanup
+/// сносил чужую рабочую конфигурацию.
+#[tokio::test]
+async fn foreign_zapret1_table_survives_our_cleanup() {
+    if !is_root() {
+        eprintln!("SKIPPED: requires root");
+        return;
+    }
+
+    const FOREIGN: &str = "zapret";
+
+    // Имитация работающего zapret1: очередь на 80/443 в таблице "zapret"
+    run_process(&["nft", "delete", "table", "inet", FOREIGN], 5000)
+        .await
+        .ok();
+    for args in [
+        vec!["nft", "add", "table", "inet", FOREIGN],
+        vec![
+            "nft",
+            "add",
+            "chain",
+            "inet",
+            FOREIGN,
+            "postrouting",
+            "{ type filter hook postrouting priority 101; }",
+        ],
+        vec![
+            "nft",
+            "add",
+            "rule",
+            "inet",
+            FOREIGN,
+            "postrouting",
+            "meta l4proto tcp tcp dport { 80, 443 } queue num 200 bypass",
+        ],
+    ] {
+        let r = run_process(&args, 5000).await.expect("nft setup");
+        assert_eq!(r.exit_code, 0, "setup failed: {args:?}\n{}", r.stderr);
+    }
+    assert!(
+        nft_table_exists(FOREIGN).await,
+        "фикстура zapret1 не создалась"
+    );
+
+    // Полный цикл blockcheckw: снести своё старое, поднять, снести за собой
+    nftables::drop_table(DEFAULT_NFT_TABLE).await;
+    nftables::prepare_table(DEFAULT_NFT_TABLE)
+        .await
+        .expect("prepare_table");
+    nftables::drop_table(DEFAULT_NFT_TABLE).await;
+
+    let foreign_alive = nft_table_exists(FOREIGN).await;
+    let own_gone = !nft_table_exists(DEFAULT_NFT_TABLE).await;
+
+    // Убираем фикстуру до ассертов, чтобы падение теста не оставило мусор
+    run_process(&["nft", "delete", "table", "inet", FOREIGN], 5000)
+        .await
+        .ok();
+
+    assert!(
+        foreign_alive,
+        "таблица zapret1 '{FOREIGN}' снесена нашим cleanup (наша таблица: '{DEFAULT_NFT_TABLE}')"
+    );
+    assert!(own_gone, "наша таблица '{DEFAULT_NFT_TABLE}' не убрана");
 }

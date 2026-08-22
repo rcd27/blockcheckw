@@ -138,6 +138,29 @@ impl BypassConflicts {
     }
 }
 
+/// Таблицы из вывода `nft list tables`, которые могут принадлежать чужому bypass:
+/// всё, кроме нашей собственной и обвязки OpenWrt (fw4).
+fn foreign_table_candidates(list_stdout: &str, own_table: &str) -> Vec<(String, String)> {
+    list_stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            match parts.as_slice() {
+                ["table", family, name, ..] => Some((*family, *name)),
+                _ => None,
+            }
+        })
+        .filter(|(_, name)| *name != own_table && *name != "fw4")
+        .map(|(family, name)| (family.to_string(), name.to_string()))
+        .collect()
+}
+
+/// Похоже ли содержимое таблицы на DPI bypass: очередь на HTTPS-порт.
+fn table_has_bypass_rules(table_content: &str) -> bool {
+    table_content.contains("queue")
+        && (table_content.contains("dport 443") || table_content.contains("dport { 80, 443"))
+}
+
 /// Detect conflicting DPI bypass processes and nftables tables.
 pub async fn detect_bypass_conflicts(own_table: &str) -> BypassConflicts {
     use blockcheckw::system::process::run_process;
@@ -161,25 +184,13 @@ pub async fn detect_bypass_conflicts(own_table: &str) -> BypassConflicts {
     // Check for other nftables tables with queue rules on ports 80/443
     if let Ok(result) = run_process(&["nft", "list", "tables"], 3_000).await {
         if result.exit_code == 0 {
-            for line in result.stdout.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 && parts[0] == "table" {
-                    let family = parts[1];
-                    let table_name = parts[2];
-                    if table_name != own_table && table_name != "fw4" {
-                        if let Ok(table_content) =
-                            run_process(&["nft", "list", "table", family, table_name], 3_000).await
-                        {
-                            if table_content.exit_code == 0
-                                && table_content.stdout.contains("queue")
-                                && (table_content.stdout.contains("dport 443")
-                                    || table_content.stdout.contains("dport { 80, 443"))
-                            {
-                                conflicts
-                                    .conflicting_tables
-                                    .push((family.to_string(), table_name.to_string()));
-                            }
-                        }
+            for (family, table_name) in foreign_table_candidates(&result.stdout, own_table) {
+                if let Ok(table_content) =
+                    run_process(&["nft", "list", "table", &family, &table_name], 3_000).await
+                {
+                    if table_content.exit_code == 0 && table_has_bypass_rules(&table_content.stdout)
+                    {
+                        conflicts.conflicting_tables.push((family, table_name));
                     }
                 }
             }
@@ -979,5 +990,86 @@ pub fn chrono_local_prefix() -> String {
                 .as_secs();
             format!("{secs}")
         }
+    }
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::{foreign_table_candidates, table_has_bypass_rules};
+
+    /// Роутер с OpenWrt, zapret1 и zapret2 одновременно.
+    const TABLE_LIST: &str = "\
+table inet fw4
+table inet zapret
+table inet zapret2
+table ip nat
+";
+
+    /// Таблица zapret1: очередь на 80/443.
+    const ZAPRET1_TABLE: &str = "\
+table inet zapret {
+	chain postrouting {
+		type filter hook postrouting priority 101; policy accept;
+		meta l4proto tcp tcp dport { 80, 443 } queue num 200 bypass
+	}
+}
+";
+
+    #[test]
+    fn zapret1_table_is_foreign_when_we_use_our_own_name() {
+        let found = foreign_table_candidates(TABLE_LIST, "blockcheckw");
+        assert!(
+            found.contains(&("inet".to_string(), "zapret".to_string())),
+            "таблица zapret1 должна попадать в кандидаты: {found:?}"
+        );
+    }
+
+    #[test]
+    fn own_table_is_never_reported_as_foreign() {
+        // issue #66: пока own_table == "zapret", таблица zapret1 невидима
+        // для детекта конфликтов — и молча сносится нашим cleanup
+        let found = foreign_table_candidates(TABLE_LIST, "zapret");
+        assert!(
+            !found.contains(&("inet".to_string(), "zapret".to_string())),
+            "своя таблица не может быть чужой: {found:?}"
+        );
+    }
+
+    #[test]
+    fn openwrt_fw4_table_is_skipped() {
+        let found = foreign_table_candidates(TABLE_LIST, "blockcheckw");
+        assert!(
+            !found.iter().any(|(_, t)| t == "fw4"),
+            "fw4 — обвязка OpenWrt, не bypass: {found:?}"
+        );
+    }
+
+    #[test]
+    fn non_table_lines_are_ignored() {
+        let noise = "garbage\ntable\ntable inet\n\ntable ip nat\n";
+        let found = foreign_table_candidates(noise, "blockcheckw");
+        assert_eq!(found, vec![("ip".to_string(), "nat".to_string())]);
+    }
+
+    #[test]
+    fn queue_on_https_port_looks_like_bypass() {
+        assert!(table_has_bypass_rules(ZAPRET1_TABLE));
+        assert!(table_has_bypass_rules(
+            "\t\ttcp dport 443 queue num 100 bypass\n"
+        ));
+    }
+
+    #[test]
+    fn table_without_queue_is_not_bypass() {
+        let nat =
+            "table ip nat {\n\tchain prerouting {\n\t\ttcp dport 443 dnat to 10.0.0.1\n\t}\n}\n";
+        assert!(!table_has_bypass_rules(nat));
+    }
+
+    #[test]
+    fn queue_on_other_port_is_not_bypass() {
+        let dns =
+            "table inet mydns {\n\tchain output {\n\t\tudp sport 53 queue num 300 bypass\n\t}\n}\n";
+        assert!(!table_has_bypass_rules(dns));
     }
 }

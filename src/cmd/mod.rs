@@ -161,6 +161,10 @@ fn table_has_bypass_rules(table_content: &str) -> bool {
         && (table_content.contains("dport 443") || table_content.contains("dport { 80, 443"))
 }
 
+fn pgrep_has_matches(exit_code: i32, stdout: &str) -> bool {
+    exit_code == 0 && !stdout.trim().is_empty()
+}
+
 /// Detect conflicting DPI bypass processes and nftables tables.
 pub async fn detect_bypass_conflicts(own_table: &str) -> BypassConflicts {
     use blockcheckw::system::process::run_process;
@@ -171,14 +175,8 @@ pub async fn detect_bypass_conflicts(own_table: &str) -> BypassConflicts {
     };
 
     // Check for other nfqws2 processes
-    if let Ok(result) = run_process(&["pgrep", "-c", "nfqws2"], 3_000).await {
-        if result.exit_code == 0 {
-            if let Ok(count) = result.stdout.trim().parse::<u32>() {
-                if count > 0 {
-                    conflicts.has_nfqws2_processes = true;
-                }
-            }
-        }
+    if let Ok(result) = run_process(&["pgrep", "-x", "nfqws2"], 3_000).await {
+        conflicts.has_nfqws2_processes = pgrep_has_matches(result.exit_code, &result.stdout);
     }
 
     // Check for other nftables tables with queue rules on ports 80/443
@@ -287,7 +285,7 @@ async fn resolve_bypass_conflicts_manual(conflicts: &BypassConflicts) {
 
     if conflicts.has_nfqws2_processes {
         // Kill by PID instead of killall — safer, only kills processes we detected
-        if let Ok(result) = run_process(&["pgrep", "nfqws2"], 3_000).await {
+        if let Ok(result) = run_process(&["pgrep", "-x", "nfqws2"], 3_000).await {
             if result.exit_code == 0 {
                 for pid in result.stdout.lines() {
                     let pid = pid.trim();
@@ -995,7 +993,7 @@ pub fn chrono_local_prefix() -> String {
 
 #[cfg(test)]
 mod conflict_tests {
-    use super::{foreign_table_candidates, table_has_bypass_rules};
+    use super::{foreign_table_candidates, pgrep_has_matches, table_has_bypass_rules};
 
     /// Роутер с OpenWrt, zapret1 и zapret2 одновременно.
     const TABLE_LIST: &str = "\
@@ -1071,5 +1069,17 @@ table inet zapret {
         let dns =
             "table inet mydns {\n\tchain output {\n\t\tudp sport 53 queue num 300 bypass\n\t}\n}\n";
         assert!(!table_has_bypass_rules(dns));
+    }
+
+    #[test]
+    fn pgrep_success_with_pid_means_process_found() {
+        assert!(pgrep_has_matches(0, "1234\n"));
+    }
+
+    #[test]
+    fn pgrep_empty_or_failed_means_process_not_found() {
+        assert!(!pgrep_has_matches(0, "\n"));
+        assert!(!pgrep_has_matches(1, ""));
+        assert!(!pgrep_has_matches(1, "unexpected output\n"));
     }
 }

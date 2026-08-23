@@ -40,7 +40,17 @@ detect_arch() {
         armv7*|armv6*|arm*)     echo "arm"      ;;
         mips64*)                echo "mips64"   ;;
         mipsel*|mipsle*)        echo "mipsel"   ;;
-        mips*)                  echo "mips"     ;;
+        mips*)
+            command -v dd >/dev/null 2>&1 ||
+                die "Не удалось определить byte order MIPS: нужен dd"
+            elf_data=$(dd if=/proc/self/exe bs=1 skip=5 count=1 2>/dev/null) ||
+                die "Не удалось прочитать ELF-заголовок /proc/self/exe"
+            case "$elf_data" in
+                "$(printf '\001')") echo "mipsel" ;;
+                "$(printf '\002')") echo "mips"   ;;
+                *) die "Не удалось определить byte order MIPS по ELF-заголовку" ;;
+            esac
+            ;;
         ppc|powerpc)            echo "ppc"      ;;
         riscv64*)               echo "riscv64"  ;;
         *)  die "Неизвестная архитектура: $machine. Поддерживаются: x86_64, x86, arm64, arm, mips, mipsel, mips64, ppc, riscv64" ;;

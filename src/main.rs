@@ -357,7 +357,6 @@ async fn main() {
     });
 
     blockcheckw::system::elevate::require_root();
-    blockcheckw::system::elevate::tune_tcp();
     blockcheckw::system::elevate::raise_nofile_limit();
 
     // `--workers` is global, but `check` verifies strategies sequentially by design —

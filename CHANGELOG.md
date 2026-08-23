@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.4](https://github.com/rcd27/blockcheckw/compare/v0.9.3...v0.9.4) (2026-08-23)
+
+
+### Bug Fixes
+
+* **cleanup:** восстановлено сетевое состояние при повторном Ctrl+C ([#82](https://github.com/rcd27/blockcheckw/issues/82)) ([4caabb7](https://github.com/rcd27/blockcheckw/commit/4caabb77121e967d8214f761101e96f51a482c46))
+* **compat:** исправлен поиск nfqws2 через BusyBox pgrep ([#77](https://github.com/rcd27/blockcheckw/issues/77)) ([52bef70](https://github.com/rcd27/blockcheckw/commit/52bef70acd3a208e6555c1aee34ce6e219715191))
+* **installer:** добавлена совместимая с BusyBox проверка SHA256 ([#84](https://github.com/rcd27/blockcheckw/issues/84)) ([6eb1d92](https://github.com/rcd27/blockcheckw/commit/6eb1d92ad8916606ddd6f618cd38c39099c1d25c))
+* **installer:** исправлен выбор MIPS-архитектуры ([#83](https://github.com/rcd27/blockcheckw/issues/83)) ([dc16c60](https://github.com/rcd27/blockcheckw/commit/dc16c6064e236424e45fbc64ef74681f01c3cfc6))
+* **report:** унифицирован формат timestamp в check ([#79](https://github.com/rcd27/blockcheckw/issues/79)) ([b4208a1](https://github.com/rcd27/blockcheckw/commit/b4208a16ca9c7b96de2e8fe54fc98aba9846fea9))
+* **system:** сохранено значение tcp_tw_reuse ([#81](https://github.com/rcd27/blockcheckw/issues/81)) ([9add2d4](https://github.com/rcd27/blockcheckw/commit/9add2d4970e3308ddf4cb454b0753d68ca67d9a5))
+* **upgrade:** добавлено обновление через POSIX sh ([#78](https://github.com/rcd27/blockcheckw/issues/78)) ([2633467](https://github.com/rcd27/blockcheckw/commit/263346709ebcda408f746d627c80c9f0e25b7fc7))
+
+
+### Performance Improvements
+
+* **dns:** исключены повторные запуски отсутствующего getent ([#80](https://github.com/rcd27/blockcheckw/issues/80)) ([9a74f94](https://github.com/rcd27/blockcheckw/commit/9a74f949a02724fc1d0eef09d583b6296e3d47d5))
+
 ## [0.9.3](https://github.com/rcd27/blockcheckw/compare/v0.9.2...v0.9.3) (2026-08-22)
 
 

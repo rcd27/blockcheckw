@@ -707,6 +707,39 @@ async fn print_version_and_check() {
     }
 }
 
+const INSTALL_SCRIPT_URL: &str =
+    "https://raw.githubusercontent.com/rcd27/blockcheckw/main/scripts/install.sh";
+
+fn install_dir_from_exe(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    exe.parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+}
+
+fn download_install_script(destination: &std::path::Path) -> Result<(), String> {
+    let curl = std::process::Command::new("curl")
+        .args(["-fSL", "--retry", "3", "-o"])
+        .arg(destination)
+        .arg(INSTALL_SCRIPT_URL)
+        .status();
+    if matches!(curl, Ok(ref status) if status.success()) {
+        return Ok(());
+    }
+
+    let _ = std::fs::remove_file(destination);
+    let wget = std::process::Command::new("wget")
+        .args(["-q", "-O"])
+        .arg(destination)
+        .arg(INSTALL_SCRIPT_URL)
+        .status();
+    if matches!(wget, Ok(ref status) if status.success()) {
+        return Ok(());
+    }
+
+    let _ = std::fs::remove_file(destination);
+    Err("failed to download install script with curl or wget".to_string())
+}
+
 /// Download and install the latest release.
 async fn run_upgrade() {
     use console::style;
@@ -727,12 +760,26 @@ async fn run_upgrade() {
             con.println("  running install script...");
             con.newline();
 
-            let status = std::process::Command::new("bash")
-                .args([
-                    "-c",
-                    "curl -fsSL https://raw.githubusercontent.com/rcd27/blockcheckw/main/scripts/install.sh | bash",
-                ])
+            let install_dir = std::env::current_exe()
+                .ok()
+                .as_deref()
+                .and_then(install_dir_from_exe)
+                .unwrap_or_else(|| {
+                    con.error("cannot determine current install directory");
+                    std::process::exit(1);
+                });
+            let script_path =
+                std::env::temp_dir().join(format!("blockcheckw-install-{}.sh", std::process::id()));
+            if let Err(e) = download_install_script(&script_path) {
+                con.error(&e);
+                std::process::exit(1);
+            }
+
+            let status = std::process::Command::new("/bin/sh")
+                .arg(&script_path)
+                .env("INSTALL_DIR", &install_dir)
                 .status();
+            let _ = std::fs::remove_file(&script_path);
 
             match status {
                 Ok(s) if s.success() => {
@@ -755,6 +802,17 @@ async fn run_upgrade() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrade_uses_current_executable_directory() {
+        let exe = std::path::Path::new("custom")
+            .join("bin")
+            .join("blockcheckw");
+        assert_eq!(
+            install_dir_from_exe(&exe),
+            Some(std::path::Path::new("custom").join("bin"))
+        );
+    }
 
     #[test]
     fn scan_accepts_alive_via_flag() {

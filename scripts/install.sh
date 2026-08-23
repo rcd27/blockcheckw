@@ -104,7 +104,10 @@ download "${BASE_URL}/SHA256SUMS.txt" "${TMPDIR}/SHA256SUMS.txt" || \
 
 info "Проверяю SHA256..."
 cd "$TMPDIR"
-grep "$TARBALL" SHA256SUMS.txt | sha256sum -c --quiet - || \
+checksum_line=$(grep -F "  $TARBALL" SHA256SUMS.txt | head -n 1)
+[ -n "$checksum_line" ] || \
+    die "В SHA256SUMS.txt нет контрольной суммы для ${TARBALL}"
+printf '%s\n' "$checksum_line" | sha256sum -c - >/dev/null 2>&1 || \
     die "Контрольная сумма не совпала! Файл мог быть повреждён при скачивании."
 
 # --- Установка ---

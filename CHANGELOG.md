@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.5](https://github.com/rcd27/blockcheckw/compare/v0.9.4...v0.9.5) (2026-09-05)
+
+
+### Bug Fixes
+
+* **environment:** снос чужих таблиц и рулсетов FIXES [#66](https://github.com/rcd27/blockcheckw/issues/66) ([d9692e3](https://github.com/rcd27/blockcheckw/commit/d9692e328cd0844108f38d57860c02bf8fae4654))
+
 ## [0.9.4](https://github.com/rcd27/blockcheckw/compare/v0.9.3...v0.9.4) (2026-08-23)
 
 

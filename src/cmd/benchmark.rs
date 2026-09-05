@@ -26,10 +26,7 @@ pub async fn run_benchmark_cmd(
         Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
-    let (stopped_service, nft_backup) = match stopped {
-        Some((mgr, backup)) => (Some(mgr), backup),
-        None => (None, None),
-    };
+    let stopped_service = stopped;
 
     let max = max_workers
         .map(|w| w as usize)
@@ -39,6 +36,6 @@ pub async fn run_benchmark_cmd(
 
     // Restore zapret2 if we stopped it
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr, &nft_backup, &con).await;
+        restore_service(mgr, &con).await;
     }
 }

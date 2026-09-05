@@ -22,7 +22,7 @@ use tracing::{info_span, Instrument};
 
 use super::{
     chrono_local_prefix, handle_bypass_conflicts, resolve_bypass_conflicts_if_any, restore_service,
-    set_nft_backup, set_scan_progress, set_stopped_service, spawn_cleanup_handler, ScanProgress,
+    set_scan_progress, set_stopped_service, spawn_cleanup_handler, ScanProgress,
 };
 
 /// Timeout for the throttle data probe. Generous so a slow-but-honest link
@@ -165,13 +165,12 @@ pub async fn run_scan(params: ScanParams<'_>) {
         Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
-    let (stopped_service, nft_backup) = match stopped {
-        Some((mgr, backup)) => {
+    let stopped_service = match stopped {
+        Some(mgr) => {
             set_stopped_service(&cleanup, mgr.clone()).await;
-            set_nft_backup(&cleanup, backup.clone()).await;
-            (Some(mgr), backup)
+            Some(mgr)
         }
-        None => (None, None),
+        None => None,
     };
 
     // 2. Baseline per protocol
@@ -245,7 +244,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
             v.cleanup().await;
         }
         if let Some(ref mgr) = stopped_service {
-            restore_service(mgr, &nft_backup, &screen).await;
+            restore_service(mgr, &screen).await;
         }
         // Легитимный исход «ничего не заблокировано» — пишем found=0, иначе
         // span bcw.scan уходит без поля и неотличим от обрыва инструментации.
@@ -573,7 +572,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
         v.cleanup().await;
     }
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr, &nft_backup, &screen).await;
+        restore_service(mgr, &screen).await;
     }
 }
 

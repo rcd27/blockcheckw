@@ -276,30 +276,16 @@ async fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         blockcheckw::network::via::Via::cleanup_sync();
-        if let Ok(mut child) = std::process::Command::new("nft")
-            .args([
-                "delete",
-                "table",
-                "inet",
+        // Сносим ТОЛЬКО свою таблицу: метку выдаёт firewall-слой, другой
+        // команды из неё не собрать (#66). Таймаут внутри — panic-хук без
+        // него уводил роутеры в перезагрузку.
+        let _ = blockcheckw::firewall::nft::NftRunSync::run(
+            &blockcheckw::firewall::nft::SystemNftSync,
+            blockcheckw::firewall::nft::OwnedTableMarker::planned(
                 blockcheckw::config::DEFAULT_NFT_TABLE,
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            const TIMEOUT_MS: u64 = 3000;
-            const POLL_INTERVAL_MS: u64 = 100;
-            for _ in 0..(TIMEOUT_MS / POLL_INTERVAL_MS) {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => {
-                        std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS))
-                    }
-                    Err(_) => break,
-                }
-            }
-            let _ = child.kill();
-        }
+            )
+            .drop_batch(),
+        );
         default_hook(info);
     }));
 

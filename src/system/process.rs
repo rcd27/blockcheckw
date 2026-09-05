@@ -99,6 +99,13 @@ fn background_registry() -> &'static StdMutex<BackgroundRegistry> {
     REGISTRY.get_or_init(|| StdMutex::new(BackgroundRegistry::default()))
 }
 
+/// Началось ли снятие фоновых процессов. Пайплайн спрашивает об этом перед
+/// каждым батчем: после Ctrl+C cleanup сносит нашу nft-таблицу раньше, чем
+/// пайплайн успевает остановиться (#66).
+pub fn background_shutdown_started() -> bool {
+    background_registry().lock().unwrap().shutting_down
+}
+
 /// Prevent new background children from being spawned during shutdown.
 pub fn begin_background_shutdown() {
     background_registry().lock().unwrap().shutting_down = true;
@@ -201,8 +208,13 @@ mod tests {
     async fn shutdown_kills_registered_children_and_blocks_new_spawns() {
         let mut process = BackgroundProcess::spawn(&["sleep", "30"]).expect("spawn sleep");
         assert!(process.try_wait().await.is_none());
+        assert!(!background_shutdown_started(), "до shutdown флаг снят");
 
         kill_all_background_processes().await;
+
+        // Пайплайн смотрит на этот флаг, чтобы не слать nft-батчи в таблицу,
+        // которую cleanup уже снёс (#66).
+        assert!(background_shutdown_started(), "после shutdown флаг взведён");
 
         assert!(process.try_wait().await.is_some());
         let error = BackgroundProcess::spawn(&["sleep", "30"])

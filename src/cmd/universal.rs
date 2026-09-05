@@ -12,10 +12,7 @@ use blockcheckw::pipeline::worker_task::HttpTestMode;
 use blockcheckw::strategy::generator;
 use blockcheckw::ui;
 
-use super::{
-    handle_bypass_conflicts, restore_service, set_nft_backup, set_stopped_service,
-    spawn_cleanup_handler,
-};
+use super::{handle_bypass_conflicts, restore_service, set_stopped_service, spawn_cleanup_handler};
 
 /// Load domain list from file, filtering out invalid entries.
 fn load_domain_list(path: &str) -> Result<Vec<String>, String> {
@@ -97,13 +94,12 @@ pub async fn run_universal(
         Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
-    let (stopped_service, nft_backup) = match stopped {
-        Some((mgr, backup)) => {
+    let stopped_service = match stopped {
+        Some(mgr) => {
             set_stopped_service(&cleanup, mgr.clone()).await;
-            set_nft_backup(&cleanup, backup.clone()).await;
-            (Some(mgr), backup)
+            Some(mgr)
         }
-        None => (None, None),
+        None => None,
     };
 
     // Shuffle domain list for random sampling
@@ -347,6 +343,6 @@ pub async fn run_universal(
         v.cleanup().await;
     }
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr, &nft_backup, &screen).await;
+        restore_service(mgr, &screen).await;
     }
 }

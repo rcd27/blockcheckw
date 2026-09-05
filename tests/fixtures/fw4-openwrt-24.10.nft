@@ -1,0 +1,237 @@
+table inet fw4 {
+	ct helper amanda {
+		type "amanda" protocol udp
+		l3proto inet
+	}
+
+	ct helper RAS {
+		type "RAS" protocol udp
+		l3proto inet
+	}
+
+	ct helper Q.931 {
+		type "Q.931" protocol tcp
+		l3proto inet
+	}
+
+	ct helper irc {
+		type "irc" protocol tcp
+		l3proto ip
+	}
+
+	ct helper netbios-ns {
+		type "netbios-ns" protocol udp
+		l3proto ip
+	}
+
+	ct helper pptp {
+		type "pptp" protocol tcp
+		l3proto ip
+	}
+
+	ct helper sane {
+		type "sane" protocol tcp
+		l3proto inet
+	}
+
+	ct helper sip {
+		type "sip" protocol udp
+		l3proto inet
+	}
+
+	ct helper snmp {
+		type "snmp" protocol udp
+		l3proto ip
+	}
+
+	ct helper tftp {
+		type "tftp" protocol udp
+		l3proto inet
+	}
+
+	flowtable ft {
+		hook ingress priority filter
+		devices = { eth1, lan1, lan2, lan3, phy0-ap0, phy1-ap0 }
+		flags offload
+		counter
+	}
+
+	chain user_pre_output {
+		type filter hook output priority filter - 1; policy accept;
+		tcp dport 1723 ct helper set "pptp"
+	}
+
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iif "lo" accept comment "!fw4: Accept traffic from loopback"
+		ct state vmap { established : accept, related : accept } comment "!fw4: Handle inbound flows"
+		tcp flags & (fin | syn | rst | ack) == syn jump syn_flood comment "!fw4: Rate limit TCP syn packets"
+		iifname "br-lan" jump input_lan comment "!fw4: Handle lan IPv4/IPv6 input traffic"
+		iifname "eth1" jump input_wan comment "!fw4: Handle wan IPv4/IPv6 input traffic"
+		jump handle_reject
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+		meta l4proto { tcp, udp } ct original packets >= 30 flow add @ft
+		ct state vmap { established : accept, related : accept } comment "!fw4: Handle forwarded flows"
+		iifname "br-lan" jump forward_lan comment "!fw4: Handle lan IPv4/IPv6 forward traffic"
+		iifname "eth1" jump forward_wan comment "!fw4: Handle wan IPv4/IPv6 forward traffic"
+		jump upnp_forward comment "Hook into miniupnpd forwarding chain"
+		jump handle_reject
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		meta mark & 0x00008000 == 0x00008000 counter packets 0 bytes 0 accept
+		oif "lo" accept comment "!fw4: Accept traffic towards loopback"
+		ct state vmap { established : accept, related : accept } comment "!fw4: Handle outbound flows"
+		oifname "br-lan" jump output_lan comment "!fw4: Handle lan IPv4/IPv6 output traffic"
+		oifname "eth1" jump output_wan comment "!fw4: Handle wan IPv4/IPv6 output traffic"
+	}
+
+	chain prerouting {
+		type filter hook prerouting priority filter; policy accept;
+		iifname "br-lan" jump helper_lan comment "!fw4: Handle lan IPv4/IPv6 helper assignment"
+	}
+
+	chain handle_reject {
+		meta l4proto tcp reject with tcp reset comment "!fw4: Reject TCP traffic"
+		reject comment "!fw4: Reject any other traffic"
+	}
+
+	chain syn_flood {
+		limit rate 25/second burst 50 packets return comment "!fw4: Accept SYN packets below rate-limit"
+		drop comment "!fw4: Drop excess packets"
+	}
+
+	chain input_lan {
+		jump accept_from_lan
+	}
+
+	chain output_lan {
+		jump accept_to_lan
+	}
+
+	chain forward_lan {
+		jump accept_to_wan comment "!fw4: Accept lan to wan forwarding"
+		jump accept_to_lan
+	}
+
+	chain helper_lan {
+		udp dport 10080 ct helper set "amanda" comment "!fw4: Amanda backup and archiving proto"
+		udp dport 1719 ct helper set "RAS" comment "!fw4: RAS proto tracking"
+		tcp dport 1720 ct helper set "Q.931" comment "!fw4: Q.931 proto tracking"
+		meta nfproto ipv4 tcp dport 6667 ct helper set "irc" comment "!fw4: IRC DCC connection tracking"
+		meta nfproto ipv4 udp dport 137 ct helper set "netbios-ns" comment "!fw4: NetBIOS name service broadcast tracking"
+		meta nfproto ipv4 tcp dport 1723 ct helper set "pptp" comment "!fw4: PPTP VPN connection tracking"
+		tcp dport 6566 ct helper set "sane" comment "!fw4: SANE scanner connection tracking"
+		udp dport 5060 ct helper set "sip" comment "!fw4: SIP VoIP connection tracking"
+		meta nfproto ipv4 udp dport 161 ct helper set "snmp" comment "!fw4: SNMP monitoring connection tracking"
+		udp dport 69 ct helper set "tftp" comment "!fw4: TFTP connection tracking"
+	}
+
+	chain accept_from_lan {
+		iifname "br-lan" counter packets 237175 bytes 17460213 accept comment "!fw4: accept lan IPv4/IPv6 traffic"
+	}
+
+	chain accept_to_lan {
+		oifname "br-lan" counter packets 76531 bytes 14980456 accept comment "!fw4: accept lan IPv4/IPv6 traffic"
+	}
+
+	chain input_wan {
+		meta nfproto ipv4 udp dport 68 counter packets 0 bytes 0 accept comment "!fw4: Allow-DHCP-Renew"
+		icmp type echo-request counter packets 5 bytes 260 accept comment "!fw4: Allow-Ping"
+		meta nfproto ipv4 meta l4proto igmp counter packets 23426 bytes 749636 accept comment "!fw4: Allow-IGMP"
+		meta nfproto ipv6 udp dport 546 counter packets 0 bytes 0 accept comment "!fw4: Allow-DHCPv6"
+		ip6 saddr fe80::/10 icmpv6 type . icmpv6 code { mld-listener-query . 0, mld-listener-report . 0, mld-listener-done . 0, mld2-listener-report . 0 } counter packets 0 bytes 0 accept comment "!fw4: Allow-MLD"
+		icmpv6 type { destination-unreachable, time-exceeded, echo-request, echo-reply, nd-router-solicit, nd-router-advert } limit rate 1000/second burst 5 packets counter packets 5 bytes 464 accept comment "!fw4: Allow-ICMPv6-Input"
+		icmpv6 type . icmpv6 code { packet-too-big . 0, parameter-problem . 0, nd-neighbor-solicit . 0, nd-neighbor-advert . 0, parameter-problem . 1 } limit rate 1000/second burst 5 packets counter packets 0 bytes 0 accept comment "!fw4: Allow-ICMPv6-Input"
+		jump reject_from_wan
+	}
+
+	chain output_wan {
+		jump accept_to_wan
+	}
+
+	chain forward_wan {
+		icmpv6 type { destination-unreachable, time-exceeded, echo-request, echo-reply } limit rate 1000/second burst 5 packets counter packets 0 bytes 0 accept comment "!fw4: Allow-ICMPv6-Forward"
+		icmpv6 type . icmpv6 code { packet-too-big . 0, parameter-problem . 0, parameter-problem . 1 } limit rate 1000/second burst 5 packets counter packets 0 bytes 0 accept comment "!fw4: Allow-ICMPv6-Forward"
+		meta l4proto esp counter packets 0 bytes 0 jump accept_to_lan comment "!fw4: Allow-IPSec-ESP"
+		udp dport 500 counter packets 0 bytes 0 jump accept_to_lan comment "!fw4: Allow-ISAKMP"
+		jump reject_to_wan
+	}
+
+	chain accept_to_wan {
+		meta nfproto ipv4 oifname "eth1" ct state invalid counter packets 43332 bytes 14255826 drop comment "!fw4: Prevent NAT leakage"
+		oifname "eth1" counter packets 2409972 bytes 639036791 accept comment "!fw4: accept wan IPv4/IPv6 traffic"
+	}
+
+	chain reject_from_wan {
+		iifname "eth1" counter packets 25458 bytes 6516291 jump handle_reject comment "!fw4: reject wan IPv4/IPv6 traffic"
+	}
+
+	chain reject_to_wan {
+		oifname "eth1" counter packets 0 bytes 0 jump handle_reject comment "!fw4: reject wan IPv4/IPv6 traffic"
+	}
+
+	chain dstnat {
+		type nat hook prerouting priority dstnat; policy accept;
+		jump upnp_prerouting comment "Hook into miniupnpd prerouting chain"
+	}
+
+	chain srcnat {
+		type nat hook postrouting priority srcnat; policy accept;
+		oifname "eth1" jump srcnat_wan comment "!fw4: Handle wan IPv4/IPv6 srcnat traffic"
+		jump upnp_postrouting comment "Hook into miniupnpd postrouting chain"
+	}
+
+	chain srcnat_wan {
+		meta nfproto ipv4 masquerade comment "!fw4: Masquerade IPv4 wan traffic"
+	}
+
+	chain raw_prerouting {
+		type filter hook prerouting priority raw; policy accept;
+	}
+
+	chain raw_output {
+		type filter hook output priority raw; policy accept;
+	}
+
+	chain mangle_prerouting {
+		type filter hook prerouting priority mangle; policy accept;
+	}
+
+	chain mangle_postrouting {
+		type filter hook postrouting priority mangle; policy accept;
+		oifname "eth1" tcp flags & (fin | syn | rst) == syn tcp option maxseg size set rt mtu comment "!fw4: Zone wan IPv4/IPv6 egress MTU fixing"
+	}
+
+	chain mangle_input {
+		type filter hook input priority mangle; policy accept;
+	}
+
+	chain mangle_output {
+		type route hook output priority mangle; policy accept;
+	}
+
+	chain mangle_forward {
+		type filter hook forward priority mangle; policy accept;
+		iifname "eth1" tcp flags & (fin | syn | rst) == syn tcp option maxseg size set rt mtu comment "!fw4: Zone wan IPv4/IPv6 ingress MTU fixing"
+	}
+
+	chain upnp_forward {
+	}
+
+	chain upnp_prerouting {
+	}
+
+	chain upnp_postrouting {
+	}
+
+	chain youtubeUnblock {
+		type filter hook postrouting priority mangle - 1; policy accept;
+		tcp dport 443 ct original packets < 20 counter packets 5572261 bytes 1765303438 queue flags bypass to 537
+		meta l4proto udp ct original packets < 9 counter packets 1063127 bytes 159352291 queue flags bypass to 537
+	}
+}

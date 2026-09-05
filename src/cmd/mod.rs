@@ -11,6 +11,9 @@ use std::sync::Arc;
 use console::style;
 use tokio::sync::Mutex;
 
+use blockcheckw::firewall::nft::{
+    self, ForeignTable, NftRun, NftRunSync, OwnedTableMarker, SystemNft, SystemNftSync, UserConsent,
+};
 use blockcheckw::ui::WARN;
 
 /// Write JSON to stdout, silently ignoring BrokenPipe (downstream closed).
@@ -128,8 +131,7 @@ pub async fn start_service(mgr: &ServiceManager) -> bool {
 
 pub struct BypassConflicts {
     pub has_nfqws2_processes: bool,
-    /// (family, table_name) pairs, e.g. ("inet", "zapret2")
-    pub conflicting_tables: Vec<(String, String)>,
+    pub conflicting_tables: Vec<ForeignTable>,
 }
 
 impl BypassConflicts {
@@ -138,20 +140,13 @@ impl BypassConflicts {
     }
 }
 
-/// Таблицы из вывода `nft list tables`, которые могут принадлежать чужому bypass:
-/// всё, кроме нашей собственной и обвязки OpenWrt (fw4).
-fn foreign_table_candidates(list_stdout: &str, own_table: &str) -> Vec<(String, String)> {
-    list_stdout
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            match parts.as_slice() {
-                ["table", family, name, ..] => Some((*family, *name)),
-                _ => None,
-            }
-        })
-        .filter(|(_, name)| *name != own_table && *name != "fw4")
-        .map(|(family, name)| (family.to_string(), name.to_string()))
+/// Таблицы, которые могут принадлежать чужому bypass: всё, кроме нашей
+/// собственной и обвязки OpenWrt (fw4).
+fn foreign_table_candidates(tables: &[(String, String)], own_table: &str) -> Vec<ForeignTable> {
+    tables
+        .iter()
+        .filter(|(_, name)| name != own_table && name != "fw4")
+        .map(|(family, name)| ForeignTable::detected(family.clone(), name.clone()))
         .collect()
 }
 
@@ -180,16 +175,11 @@ pub async fn detect_bypass_conflicts(own_table: &str) -> BypassConflicts {
     }
 
     // Check for other nftables tables with queue rules on ports 80/443
-    if let Ok(result) = run_process(&["nft", "list", "tables"], 3_000).await {
-        if result.exit_code == 0 {
-            for (family, table_name) in foreign_table_candidates(&result.stdout, own_table) {
-                if let Ok(table_content) =
-                    run_process(&["nft", "list", "table", &family, &table_name], 3_000).await
-                {
-                    if table_content.exit_code == 0 && table_has_bypass_rules(&table_content.stdout)
-                    {
-                        conflicts.conflicting_tables.push((family, table_name));
-                    }
+    if let Ok(tables) = SystemNft.table_names().await {
+        for candidate in foreign_table_candidates(&tables, own_table) {
+            if let Ok(content) = SystemNft.dump_foreign(&candidate).await {
+                if table_has_bypass_rules(&content) {
+                    conflicts.conflicting_tables.push(candidate);
                 }
             }
         }
@@ -198,13 +188,17 @@ pub async fn detect_bypass_conflicts(own_table: &str) -> BypassConflicts {
     conflicts
 }
 
-/// Display conflicts and handle them. Returns `Some((ServiceManager, nft_ruleset_backup))` if a
-/// service was stopped (caller must restart it on graceful exit), or `None` if no service was
-/// involved. Returns `Err(())` if user aborted.
+/// Разобраться с конфликтующим DPI-обходом. Возвращает `Some(ServiceManager)`,
+/// если сервис был остановлен (вызывающий обязан поднять его на выходе), или
+/// `None`, если сервиса не было. `Err(())` — пользователь отказался.
+///
+/// Снимка чужого состояния здесь нет намеренно (#66): сервис, который мы
+/// останавливаем его же init-скриптом, поднимает свои таблицы сам —
+/// `start` симметричен `stop`.
 pub async fn handle_bypass_conflicts(
     own_table: &str,
     con: &blockcheckw::ui::Console,
-) -> Result<Option<(ServiceManager, Option<String>)>, ()> {
+) -> Result<Option<ServiceManager>, ()> {
     if SKIP_CONFLICT_CLEANUP.load(Ordering::Relaxed) {
         return Ok(None); // embedded: оркестратор владеет nft-состоянием, чужие трубы не трогаем
     }
@@ -218,9 +212,11 @@ pub async fn handle_bypass_conflicts(
     if conflicts.has_nfqws2_processes {
         con.warn("running nfqws2 processes found");
     }
-    for (family, table) in &conflicts.conflicting_tables {
+    for table in &conflicts.conflicting_tables {
         con.warn(&format!(
-            "nft table '{family} {table}' has queue rules on port 443"
+            "nft table '{} {}' has queue rules on port 443",
+            table.family(),
+            table.name(),
         ));
     }
 
@@ -243,17 +239,11 @@ pub async fn handle_bypass_conflicts(
             return Err(());
         }
 
-        // Backup entire nft ruleset BEFORE stopping zapret2 (stop drops tables)
-        let nft_backup = backup_nft_ruleset().await;
-        if nft_backup.is_some() {
-            con.ok("nft ruleset backed up");
-        }
-
         if stop_service(mgr).await {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             con.ok(&format!("zapret2 stopped via {mgr}"));
             con.info("will restart automatically when blockcheckw finishes");
-            Ok(Some((mgr.clone(), nft_backup)))
+            Ok(Some(mgr.clone()))
         } else {
             con.error(&format!("failed to stop zapret2 via {mgr}"));
             con.info("please stop it manually and re-run blockcheckw");
@@ -272,7 +262,7 @@ pub async fn handle_bypass_conflicts(
             return Err(());
         }
 
-        resolve_bypass_conflicts_manual(&conflicts).await;
+        resolve_bypass_conflicts_manual(&conflicts, &UserConsent::granted()).await;
         con.ok("processes killed, nft tables dropped");
         con.warn("you will need to restart DPI bypass manually afterwards");
         Ok(None)
@@ -280,7 +270,7 @@ pub async fn handle_bypass_conflicts(
 }
 
 /// Fallback: kill nfqws2 by PID (not killall) and drop conflicting tables.
-async fn resolve_bypass_conflicts_manual(conflicts: &BypassConflicts) {
+async fn resolve_bypass_conflicts_manual(conflicts: &BypassConflicts, consent: &UserConsent) {
     use blockcheckw::system::process::run_process;
 
     if conflicts.has_nfqws2_processes {
@@ -298,8 +288,8 @@ async fn resolve_bypass_conflicts_manual(conflicts: &BypassConflicts) {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    for (family, table) in &conflicts.conflicting_tables {
-        let _ = run_process(&["nft", "delete", "table", family, table], 5_000).await;
+    for table in &conflicts.conflicting_tables {
+        let _ = SystemNft.run(table.delete_batch(consent)).await;
     }
 }
 
@@ -310,7 +300,7 @@ pub async fn resolve_bypass_conflicts_if_any(own_table: &str) {
     }
     let conflicts = detect_bypass_conflicts(own_table).await;
     if !conflicts.is_empty() {
-        resolve_bypass_conflicts_manual(&conflicts).await;
+        resolve_bypass_conflicts_manual(&conflicts, &UserConsent::granted()).await;
     }
 }
 
@@ -332,86 +322,15 @@ fn prompt_yes_no() -> bool {
     input.is_empty() || input == "y" || input == "yes"
 }
 
-// ── nft ruleset backup/restore ────────────────────────────────────────────────
-
-/// Backup the entire nft ruleset before stopping zapret2.
-pub async fn backup_nft_ruleset() -> Option<String> {
-    use blockcheckw::system::process::run_process;
-
-    if let Ok(result) = run_process(&["nft", "list", "ruleset"], 5_000).await {
-        if result.exit_code == 0 && !result.stdout.is_empty() {
-            return Some(result.stdout);
-        }
-    }
-    None
-}
-
-/// Restore entire nft ruleset from backup after zapret2 start.
-/// Flushes whatever zapret2 start created, then loads the saved snapshot.
-pub async fn restore_nft_ruleset(dump: &str, con: &blockcheckw::ui::Console) {
-    // Flush current ruleset, then load backup
-    let _ = std::process::Command::new("nft")
-        .args(["flush", "ruleset"])
-        .status();
-
-    let status = nft_load_stdin(dump);
-    match status {
-        Ok(s) if s.success() => {
-            con.ok("nft ruleset restored from backup");
-        }
-        _ => {
-            con.warn("failed to restore nft ruleset from backup");
-        }
-    }
-}
-
-/// Synchronous restore for panic hook (can't use async).
-fn restore_nft_ruleset_sync(dump: &str) {
-    let _ = std::process::Command::new("nft")
-        .args(["flush", "ruleset"])
-        .status();
-
-    match nft_load_stdin(dump) {
-        Ok(s) if s.success() => {
-            eprintln!(
-                "  {} nft ruleset restored after panic",
-                style("OK").green().bold(),
-            );
-        }
-        _ => {
-            eprintln!("  {}failed to restore nft ruleset after panic", WARN);
-        }
-    }
-}
-
-/// Pipe `dump` into `nft -f -`.
-fn nft_load_stdin(dump: &str) -> std::io::Result<std::process::ExitStatus> {
-    use std::io::Write;
-
-    let mut child = std::process::Command::new("nft")
-        .arg("-f")
-        .arg("-")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    if let Some(ref mut stdin) = child.stdin {
-        stdin.write_all(dump.as_bytes())?;
-    }
-    child.wait()
-}
-
 // ── Shared cleanup state ────────────────────────────────────────────────────
 
 /// Shared state for Ctrl+C handler: nft table to drop + optional service to restart.
 pub type CleanupState = Arc<Mutex<CleanupInfo>>;
 
 pub struct CleanupInfo {
-    pub nft_table: String,
+    /// Метка НАШЕЙ таблицы: единственное, что аварийные пути вправе снести.
+    pub nft_table: OwnedTableMarker,
     pub stopped_service: Option<ServiceManager>,
-    /// Full nft ruleset backup taken before we stopped zapret2.
-    pub nft_backup: Option<String>,
     /// Strategies found so far, so a Ctrl+C / SIGTERM mid-scan still writes them.
     pub scan_progress: Option<ScanProgressState>,
 }
@@ -419,9 +338,7 @@ pub struct CleanupInfo {
 fn emergency_cleanup_sync(info: &CleanupInfo) {
     // Drop queue rules before terminating their listeners so packets are not
     // sent to an unbound NFQUEUE during emergency shutdown.
-    let _ = std::process::Command::new("nft")
-        .args(["delete", "table", "inet", &info.nft_table])
-        .status();
+    let _ = SystemNftSync.run(info.nft_table.drop_batch());
     blockcheckw::system::process::start_kill_all_background_processes();
 
     if let Some(ref mgr) = info.stopped_service {
@@ -433,10 +350,6 @@ fn emergency_cleanup_sync(info: &CleanupInfo) {
                 std::process::Command::new(script).arg("start").status()
             }
         };
-    }
-    if let Some(ref dump) = info.nft_backup {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        restore_nft_ruleset_sync(dump);
     }
 }
 
@@ -591,9 +504,8 @@ mod scan_progress_tests {
 /// 2. Restart zapret2 service if we stopped it
 pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
     let state = Arc::new(Mutex::new(CleanupInfo {
-        nft_table: nft_table.to_string(),
+        nft_table: OwnedTableMarker::planned(nft_table),
         stopped_service: None,
-        nft_backup: None,
         scan_progress: None,
     }));
 
@@ -674,11 +586,11 @@ async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i3
     blockcheckw::network::via::Via::cleanup_all().await;
     let info = state.lock().await;
 
-    blockcheckw::firewall::nftables::drop_table(&info.nft_table).await;
+    blockcheckw::firewall::nftables::drop_table(info.nft_table.name()).await;
     eprintln!(
         "  {} nft table '{}' dropped",
         style("OK").green().bold(),
-        info.nft_table,
+        info.nft_table.name(),
     );
     // With queue rules gone, explicitly kill and reap every child we spawned.
     // process::exit below skips destructors, so kill_on_drop alone is not enough.
@@ -696,14 +608,6 @@ async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i3
             );
         }
     }
-    // Restore user's nft ruleset from backup
-    if let Some(ref dump) = info.nft_backup {
-        // Small delay to let zapret2 finish creating its tables
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let cleanup_con = blockcheckw::ui::Console::new();
-        restore_nft_ruleset(dump, &cleanup_con).await;
-    }
-
     // Persist partial results only after network state is safe. A second Ctrl+C
     // may skip the report, but must never leave queue rules or zapret2 altered.
     if let Some(progress) = &info.scan_progress {
@@ -745,23 +649,15 @@ pub async fn set_stopped_service(state: &CleanupState, mgr: ServiceManager) {
     state.lock().await.stopped_service = Some(mgr);
 }
 
-/// Record nft ruleset backup, so cleanup handlers can restore it.
-pub async fn set_nft_backup(state: &CleanupState, backup: Option<String>) {
-    state.lock().await.nft_backup = backup;
-}
-
 /// Register the scan's result accumulator so the signal handler can write a
 /// report from whatever was found if the scan is interrupted.
 pub async fn set_scan_progress(state: &CleanupState, progress: ScanProgressState) {
     state.lock().await.scan_progress = Some(progress);
 }
 
-/// Restart zapret2 service, then restore nft ruleset from backup. Call at graceful exit.
-pub async fn restore_service(
-    mgr: &ServiceManager,
-    nft_backup: &Option<String>,
-    con: &blockcheckw::ui::Console,
-) {
+/// Поднять zapret2 обратно. Своих nft-правил он не теряет: init-скрипт
+/// применяет их на `start` ровно так же, как снимал на `stop` (#66).
+pub async fn restore_service(mgr: &ServiceManager, con: &blockcheckw::ui::Console) {
     con.newline();
     con.section("Restoring zapret2");
     if start_service(mgr).await {
@@ -770,11 +666,6 @@ pub async fn restore_service(
         con.warn(&format!(
             "failed to restart zapret2 via {mgr}, please start manually"
         ));
-    }
-    if let Some(ref dump) = nft_backup {
-        // Small delay to let zapret2 finish creating its tables
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        restore_nft_ruleset(dump, con).await;
     }
 }
 
@@ -870,8 +761,8 @@ pub fn check_prerequisites(con: &blockcheckw::ui::Console) {
     }
 
     // nft binary
-    if which("nft") {
-        con.ok("nft");
+    if which(nft::BINARY) {
+        con.ok(nft::BINARY);
     } else {
         con.error("nft not found in PATH");
         con.println("       install nftables: apt install nftables / opkg install nftables");
@@ -880,7 +771,7 @@ pub fn check_prerequisites(con: &blockcheckw::ui::Console) {
 
     // nft queue support (try creating a table with queue rule)
     if ok {
-        if nft_has_queue_support() {
+        if nft::is_available_sync() {
             con.ok("nft queue support");
         } else {
             con.error("nftables queue support not available");
@@ -917,16 +808,6 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     std::fs::metadata(path)
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
-}
-
-fn nft_has_queue_support() -> bool {
-    // Try to list ruleset — if nft works and kernel has nf_tables, this succeeds
-    std::process::Command::new("nft")
-        .args(["list", "ruleset"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 #[cfg(test)]
@@ -1009,15 +890,30 @@ pub fn chrono_local_prefix() -> String {
 
 #[cfg(test)]
 mod conflict_tests {
-    use super::{foreign_table_candidates, pgrep_has_matches, table_has_bypass_rules};
+    use super::{
+        foreign_table_candidates, pgrep_has_matches, table_has_bypass_rules, ForeignTable,
+    };
 
     /// Роутер с OpenWrt, zapret1 и zapret2 одновременно.
-    const TABLE_LIST: &str = "\
-table inet fw4
-table inet zapret
-table inet zapret2
-table ip nat
-";
+    /// То, что вернул бы `nft list tables` на роутере с работающим zapret1.
+    fn table_list() -> Vec<(String, String)> {
+        [
+            ("inet", "fw4"),
+            ("inet", "zapret"),
+            ("inet", "zapret2"),
+            ("ip", "nat"),
+        ]
+        .iter()
+        .map(|(f, n)| (f.to_string(), n.to_string()))
+        .collect()
+    }
+
+    /// Есть ли среди кандидатов таблица с таким именем.
+    fn has(found: &[ForeignTable], family: &str, name: &str) -> bool {
+        found
+            .iter()
+            .any(|t| t.family() == family && t.name() == name)
+    }
 
     /// Таблица zapret1: очередь на 80/443.
     const ZAPRET1_TABLE: &str = "\
@@ -1031,9 +927,9 @@ table inet zapret {
 
     #[test]
     fn zapret1_table_is_foreign_when_we_use_our_own_name() {
-        let found = foreign_table_candidates(TABLE_LIST, "blockcheckw");
+        let found = foreign_table_candidates(&table_list(), "blockcheckw");
         assert!(
-            found.contains(&("inet".to_string(), "zapret".to_string())),
+            has(&found, "inet", "zapret"),
             "таблица zapret1 должна попадать в кандидаты: {found:?}"
         );
     }
@@ -1042,27 +938,20 @@ table inet zapret {
     fn own_table_is_never_reported_as_foreign() {
         // issue #66: пока own_table == "zapret", таблица zapret1 невидима
         // для детекта конфликтов — и молча сносится нашим cleanup
-        let found = foreign_table_candidates(TABLE_LIST, "zapret");
+        let found = foreign_table_candidates(&table_list(), "zapret");
         assert!(
-            !found.contains(&("inet".to_string(), "zapret".to_string())),
+            !has(&found, "inet", "zapret"),
             "своя таблица не может быть чужой: {found:?}"
         );
     }
 
     #[test]
     fn openwrt_fw4_table_is_skipped() {
-        let found = foreign_table_candidates(TABLE_LIST, "blockcheckw");
+        let found = foreign_table_candidates(&table_list(), "blockcheckw");
         assert!(
-            !found.iter().any(|(_, t)| t == "fw4"),
+            !found.iter().any(|t| t.name() == "fw4"),
             "fw4 — обвязка OpenWrt, не bypass: {found:?}"
         );
-    }
-
-    #[test]
-    fn non_table_lines_are_ignored() {
-        let noise = "garbage\ntable\ntable inet\n\ntable ip nat\n";
-        let found = foreign_table_candidates(noise, "blockcheckw");
-        assert_eq!(found, vec![("ip".to_string(), "nat".to_string())]);
     }
 
     #[test]

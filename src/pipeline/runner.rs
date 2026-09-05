@@ -11,6 +11,7 @@ use crate::config::{CoreConfig, Protocol};
 use crate::error::TaskResult;
 use crate::firewall::nftables;
 use crate::pipeline::worker_task::{execute_worker_task_rules_ready, HttpTestMode, WorkerTask};
+use crate::system::process;
 use crate::worker::slot::WorkerSlot;
 
 #[derive(Debug)]
@@ -37,6 +38,17 @@ impl RunStats {
             0.0
         }
     }
+}
+
+/// Прекратить выдачу новых батчей.
+///
+/// Дедлайн — штатный конец прогона. Shutdown — Ctrl+C: cleanup сносит нашу
+/// таблицу первым делом (чтобы не слать пакеты в отвязанный NFQUEUE), и до
+/// `process::exit` остаётся окно в сотни миллисекунд. Без этой проверки цикл
+/// продолжает лить `add chain inet <table> wp_*` в уже снесённую таблицу —
+/// это и есть простыня `No such file or directory` из #66.
+fn stop_before_batch(deadline: Option<Instant>, now: Instant, shutting_down: bool) -> bool {
+    shutting_down || deadline.is_some_and(|dl| now >= dl)
 }
 
 /// Parameters for parallel strategy execution.
@@ -136,11 +148,12 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
     let batches: Vec<&[Vec<String>]> = strategies.chunks(config.worker_count).collect();
 
     for batch in batches {
-        // Check deadline before starting a new batch
-        if let Some(dl) = deadline {
-            if Instant::now() >= dl {
-                break;
-            }
+        if stop_before_batch(
+            deadline,
+            Instant::now(),
+            process::background_shutdown_started(),
+        ) {
+            break;
         }
 
         // Determine which slots are used in this batch
@@ -282,4 +295,39 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
     );
 
     (all_results, stats)
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::stop_before_batch;
+    use std::time::{Duration, Instant};
+
+    /// #66: cleanup сносит нашу таблицу раньше, чем пайплайн об этом узнаёт.
+    /// Каждый следующий батч утыкается в несуществующую таблицу и печатает
+    /// `add chain inet blockcheckw wp_* — No such file or directory`. Именно
+    /// эту простыню bol-van получил после Ctrl+C.
+    #[test]
+    fn shutdown_stops_batches_before_they_hit_a_dropped_table() {
+        let ahead = Instant::now() + Duration::from_secs(60);
+        assert!(stop_before_batch(Some(ahead), Instant::now(), true));
+    }
+
+    /// Дедлайн — штатный конец прогона, он должен продолжать работать.
+    #[test]
+    fn expired_deadline_stops_batches() {
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(stop_before_batch(Some(past), Instant::now(), false));
+    }
+
+    #[test]
+    fn runs_while_deadline_is_ahead_and_nothing_is_shutting_down() {
+        let ahead = Instant::now() + Duration::from_secs(60);
+        assert!(!stop_before_batch(Some(ahead), Instant::now(), false));
+    }
+
+    #[test]
+    fn no_deadline_means_run_until_shutdown() {
+        assert!(!stop_before_batch(None, Instant::now(), false));
+        assert!(stop_before_batch(None, Instant::now(), true));
+    }
 }

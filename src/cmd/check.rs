@@ -8,10 +8,7 @@ use blockcheckw::pipeline::check;
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
 
-use super::{
-    handle_bypass_conflicts, restore_service, set_nft_backup, set_stopped_service,
-    spawn_cleanup_handler,
-};
+use super::{handle_bypass_conflicts, restore_service, set_stopped_service, spawn_cleanup_handler};
 
 pub struct CheckParams<'a> {
     pub domain: &'a str,
@@ -119,13 +116,12 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         Ok(result) => result,
         Err(()) => std::process::exit(1),
     };
-    let (stopped_service, nft_backup) = match stopped {
-        Some((mgr, backup)) => {
+    let stopped_service = match stopped {
+        Some(mgr) => {
             set_stopped_service(&cleanup, mgr.clone()).await;
-            set_nft_backup(&cleanup, backup.clone()).await;
-            (Some(mgr), backup)
+            Some(mgr)
         }
-        None => (None, None),
+        None => None,
     };
 
     // Run check
@@ -192,6 +188,6 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         v.cleanup().await;
     }
     if let Some(ref mgr) = stopped_service {
-        restore_service(mgr, &nft_backup, &screen).await;
+        restore_service(mgr, &screen).await;
     }
 }

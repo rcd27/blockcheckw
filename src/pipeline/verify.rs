@@ -5,6 +5,7 @@ use console::style;
 use crate::config::{CoreConfig, Protocol};
 use crate::error::TaskResult;
 use crate::network::http_client::DATA_TRANSFER_MIN_BYTES;
+use crate::nfqws2::plan::FilterMark;
 use crate::pipeline::runner::{run_parallel, RunParams, StrategyResult};
 use crate::pipeline::worker_task::HttpTestMode;
 use crate::ui::Console;
@@ -162,8 +163,10 @@ fn extract_outcomes(candidates: &[Vec<String>], results: &[StrategyResult]) -> V
 
 /// Run N verification passes on candidate strategies, return tally and filtered results.
 /// If data_transfer is enabled, runs an additional GET-based pass after HEAD passes.
+#[allow(clippy::too_many_arguments)] // filter_mark добавлен задачей 8 поверх уже широкого набора параметров
 pub async fn run_verification(
     config: &CoreConfig,
+    filter_mark: &FilterMark,
     domain: &str,
     protocol: Protocol,
     candidates: &[Vec<String>],
@@ -193,6 +196,7 @@ pub async fn run_verification(
 
         let (results, _stats) = run_parallel(RunParams {
             config: &verify_core,
+            filter_mark,
             domain,
             protocol,
             strategies: candidates,
@@ -264,6 +268,7 @@ pub async fn run_verification(
 
         let (dt_results, _dt_stats) = run_parallel(RunParams {
             config: &dt_core,
+            filter_mark,
             domain,
             protocol,
             strategies: dt_candidates,

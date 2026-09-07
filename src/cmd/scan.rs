@@ -5,6 +5,7 @@ use console::style;
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
 use blockcheckw::dto::BlockType;
 use blockcheckw::error::TaskResult;
+use blockcheckw::firewall::nft::{OwnedTableMarker, SystemNft};
 use blockcheckw::firewall::nftables;
 use blockcheckw::network::dns::DnsSpoofResult;
 use blockcheckw::network::http_client::{
@@ -31,6 +32,9 @@ const DATA_PROBE_TIMEOUT_SECS: u64 = 10;
 
 pub struct ScanParams<'a> {
     pub workers: usize,
+    /// Сколько стратегий держать загруженными в одном процессе nfqws2 (#68,
+    /// `--profiles-per-instance`).
+    pub profiles_per_instance: usize,
     pub domain: &'a str,
     pub protocols: &'a [Protocol],
     pub dns_mode: DnsMode,
@@ -43,6 +47,19 @@ pub struct ScanParams<'a> {
     /// scan). Splits `IpBlocked` into `SynBlocked` (alive via this proxy) vs
     /// `HostDead`. Validated as a proxy by the caller; reachability checked here.
     pub alive_via: Option<&'a Via>,
+    /// Свидетельство преflight'а: без него `Plan` не собрать.
+    pub prereq: &'a super::Prerequisites,
+}
+
+/// Собрать `CoreConfig` для скана из CLI-параметров. Вынесена из `run_scan`,
+/// чтобы протаскивание `--profiles-per-instance` можно было проверить юнит-тестом,
+/// не поднимая весь асинхронный скан (DNS, root, живой nfqws2).
+fn scan_core_config(workers: usize, profiles_per_instance: usize) -> CoreConfig {
+    CoreConfig {
+        worker_count: workers,
+        profiles_per_instance,
+        ..CoreConfig::default()
+    }
 }
 
 #[tracing::instrument(
@@ -57,6 +74,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
     // переподвешивал бы его к selection и осиротил bcw.root.
     let ScanParams {
         workers,
+        profiles_per_instance,
         domain,
         protocols,
         dns_mode,
@@ -66,11 +84,9 @@ pub async fn run_scan(params: ScanParams<'_>) {
         from_file,
         via,
         alive_via,
+        prereq,
     } = params;
-    let config = Arc::new(CoreConfig {
-        worker_count: workers,
-        ..CoreConfig::default()
-    });
+    let config = Arc::new(scan_core_config(workers, profiles_per_instance));
 
     let cleanup = spawn_cleanup_handler(&config.nft_table);
 
@@ -372,6 +388,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
             let sink = progress.lock().unwrap().begin_protocol(protocol);
             let (results, stats) = run_parallel(RunParams {
                 config: &config,
+                filter_mark: &prereq.filter_mark,
                 domain,
                 protocol,
                 strategies: &strategies,
@@ -421,7 +438,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
             // scan_future was cancelled mid-protocol — recover everything found so
             // far, including the in-progress protocol's partial results (#41).
             summary = progress.lock().unwrap().snapshot();
-            nftables::drop_table(&config.nft_table).await;
+            nftables::drop_table(&SystemNft, &OwnedTableMarker::planned(&config.nft_table)).await;
             screen.newline();
             screen.println(&format!(
                 "{} scan timed out after {}s — showing partial results",
@@ -617,4 +634,26 @@ pub(crate) fn write_scan_reports(
     write_report(&scan_path, &content)?;
 
     Ok(WrittenReports { scan_path, count })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #68 fix round 1: `--profiles-per-instance` разбирается в main.rs, но
+    /// ничего не значит, если не доезжает до `CoreConfig`, который реально
+    /// читает `pipeline::runner::run_parallel`. Ловим именно это — не то, что
+    /// `scan_core_config` умеет строить структуру (это тривиально), а то, что
+    /// значение не подменяется дефолтом по дороге.
+    #[test]
+    fn profiles_per_instance_reaches_core_config() {
+        let config = scan_core_config(8, 256);
+        assert_eq!(config.profiles_per_instance, 256);
+        assert_eq!(config.worker_count, 8);
+        assert_ne!(
+            config.profiles_per_instance,
+            CoreConfig::default().profiles_per_instance,
+            "тест бесполезен, если переданное значение совпадает с дефолтом"
+        );
+    }
 }

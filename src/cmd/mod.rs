@@ -572,8 +572,8 @@ pub fn spawn_cleanup_handler(nft_table: &str) -> CleanupState {
 
 /// Shared graceful cleanup logic for SIGINT and SIGTERM.
 async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i32) {
-    // Make shutdown atomic with BackgroundProcess::spawn. No worker may start a
-    // new nfqws2 after this point.
+    // Make shutdown atomic with BackgroundProcess::spawn. No plan may start a
+    // new nfqws2 instance after this point.
     blockcheckw::system::process::begin_background_shutdown();
 
     eprintln!(
@@ -586,7 +586,7 @@ async fn graceful_cleanup(signal_name: &str, state: &CleanupState, exit_code: i3
     blockcheckw::network::via::Via::cleanup_all().await;
     let info = state.lock().await;
 
-    blockcheckw::firewall::nftables::drop_table(info.nft_table.name()).await;
+    blockcheckw::firewall::nftables::drop_table(&SystemNft, &info.nft_table).await;
     eprintln!(
         "  {} nft table '{}' dropped",
         style("OK").green().bold(),
@@ -735,10 +735,18 @@ pub fn acquire_instance_lock() -> InstanceLock {
 
 // ── Prerequisites check ─────────────────────────────────────────────────────
 
+/// Свидетельства, добытые преflight'ом. Носит тот, кто их получил: собрать
+/// `Plan` без него невозможно — см. `nfqws2::plan::FilterMark`.
+pub struct Prerequisites {
+    pub filter_mark: blockcheckw::nfqws2::plan::FilterMark,
+}
+
 /// Check that required binaries and kernel features are available.
 /// Exits with code 6 (matching vanilla blockcheck2) if something is missing.
-pub fn check_prerequisites(con: &blockcheckw::ui::Console) {
+pub fn check_prerequisites(con: &blockcheckw::ui::Console) -> Prerequisites {
     use blockcheckw::config::CoreConfig;
+    use blockcheckw::nfqws2::run::SystemNfqws2;
+    use blockcheckw::nfqws2::Error as Nfqws2Error;
 
     con.section("Checking prerequisites");
 
@@ -769,19 +777,60 @@ pub fn check_prerequisites(con: &blockcheckw::ui::Console) {
         ok = false;
     }
 
-    // nft queue support (try creating a table with queue rule)
+    // nft (наличие таблиц читаем, а не пытаемся судить про очереди —
+    // `is_available_sync()` зовёт `nft list tables` и про NFQUEUE ничего не
+    // знает; за очередь теперь по-настоящему ручается дымовой запуск ниже)
     if ok {
         if nft::is_available_sync() {
-            con.ok("nft queue support");
+            con.ok("nft");
         } else {
-            con.error("nftables queue support not available");
-            con.println("       install kernel module: modprobe nfnetlink_queue");
+            con.error("nft is not usable (`nft list tables` failed)");
+            con.println(
+                "       check that nftables is installed and you have permission to run it",
+            );
             ok = false;
+        }
+    }
+
+    // 4. Движок понимает --filter-mark (нужна сборка ≥ v1.0.5)
+    let witness = if ok {
+        match SystemNfqws2::probe_sync(&config.nfqws2_env()) {
+            Ok(w) => {
+                con.ok("nfqws2 --filter-mark");
+                Some(w)
+            }
+            Err(e) => {
+                con.error(&format!("{e}"));
+                // Подсказка про версию уместна только для NoFilterMark — на
+                // Spawn (нет прав, чужая архитектура) или таймауте она
+                // указывала бы не на ту причину.
+                if matches!(e, Nfqws2Error::NoFilterMark) {
+                    con.println("       update zapret2 to v1.0.5 or newer");
+                }
+                ok = false;
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 5. Дымовой запуск: lua-версия, архитектура, nfnetlink_queue, CAP_NET_ADMIN
+    if let Some(w) = &witness {
+        match SystemNfqws2::smoke_sync(&config.nfqws2_env(), w) {
+            Ok(()) => con.ok("nfqws2 starts and binds a queue"),
+            Err(e) => {
+                con.error(&format!("{e}"));
+                ok = false;
+            }
         }
     }
 
     if !ok {
         std::process::exit(6);
+    }
+    Prerequisites {
+        filter_mark: witness.expect("ok означает, что свидетельство есть"),
     }
 }
 

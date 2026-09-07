@@ -61,6 +61,10 @@ struct Cli {
     #[arg(short, long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=2048))]
     workers: u16,
 
+    /// How many strategies to keep loaded in one nfqws2 process at a time
+    #[arg(long, default_value_t = 1024)]
+    profiles_per_instance: usize,
+
     /// Auto-confirm all prompts (non-interactive mode)
     #[arg(long, global = true)]
     auto: bool,
@@ -354,6 +358,31 @@ async fn main() {
         );
     }
 
+    // Load persisted config
+    let mut persisted = blockcheckw::persist::load();
+
+    // Resolve effective workers (top-level arg)
+    let eff_workers = resolve_u16(&matches, "workers", cli.workers, persisted.workers);
+    if is_explicit(&matches, "workers") {
+        persisted.workers = Some(cli.workers);
+    }
+
+    // #68: план не может обслужить больше проб в полёте, чем в нём загружено
+    // профилей, а номер профиля не помещается в марку за потолком маски —
+    // ловим здесь, на разборе аргументов, а не паникой в уже запущенном проце.
+    //
+    // Валидация аргументов обязана идти ДО любых побочных эффектов — в
+    // частности, до `check_prerequisites` ниже, который живьём спавнит
+    // nfqws2 (`smoke_sync`). Раньше проверка стояла после преflight'а: явно
+    // мусорный `--profiles-per-instance` отвергался только после того, как
+    // движок уже запускался и убивался вхолостую.
+    if let Err(e) =
+        blockcheckw::config::validate_parallelism(eff_workers as usize, cli.profiles_per_instance)
+    {
+        eprintln!("ERROR: {e}");
+        std::process::exit(2);
+    }
+
     // Pre-read stdin for check in pipe mode (before acquiring lock,
     // so the upstream pipe command can finish and release its lock first)
     let stdin_data = {
@@ -369,23 +398,17 @@ async fn main() {
     let _lock = cmd::acquire_instance_lock();
 
     // Status doesn't need nfqws2/nft — skip prereqs
-    if !matches!(cli.command, Some(Command::Status { .. })) {
+    let prereq = if !matches!(cli.command, Some(Command::Status { .. })) {
         let console = blockcheckw::ui::Console::new();
-        cmd::check_prerequisites(&console);
+        let prereq = cmd::check_prerequisites(&console);
         drop(console);
-    }
+        Some(prereq)
+    } else {
+        None
+    };
 
     // Init tracing: stderr-fmt всегда + OTLP-слой, если задан endpoint (feature otel).
     let otel_guard = tracing_otel::init();
-
-    // Load persisted config
-    let mut persisted = blockcheckw::persist::load();
-
-    // Resolve effective workers (top-level arg)
-    let eff_workers = resolve_u16(&matches, "workers", cli.workers, persisted.workers);
-    if is_explicit(&matches, "workers") {
-        persisted.workers = Some(cli.workers);
-    }
 
     // Корневой span команды под родителем из TRACEPARENT (если демон прислал) —
     // так bcw.scan/bcw.check висят детьми selection-span'а демона.
@@ -423,8 +446,18 @@ async fn main() {
                 }
                 blockcheckw::persist::save(&persisted);
 
-                cmd::benchmark::run_benchmark_cmd(time, max_workers, &eff_domain, &protocol, raw)
-                    .await;
+                cmd::benchmark::run_benchmark_cmd(
+                    time,
+                    max_workers,
+                    &eff_domain,
+                    &protocol,
+                    raw,
+                    cli.profiles_per_instance,
+                    prereq
+                        .as_ref()
+                        .expect("benchmark requires prerequisites (skipped only for `status`)"),
+                )
+                .await;
             }
             Some(Command::Check {
                 from_file,
@@ -483,6 +516,9 @@ async fn main() {
                     passes: passes as usize,
                     output: output.as_deref(),
                     via: via.as_ref(),
+                    prereq: prereq
+                        .as_ref()
+                        .expect("check requires prerequisites (skipped only for `status`)"),
                 })
                 .await;
 
@@ -555,6 +591,7 @@ async fn main() {
 
                 cmd::scan::run_scan(cmd::scan::ScanParams {
                     workers: eff_workers as usize,
+                    profiles_per_instance: cli.profiles_per_instance,
                     domain: &eff_domain,
                     protocols: &protocols,
                     dns_mode,
@@ -564,6 +601,9 @@ async fn main() {
                     from_file: from_file.as_deref(),
                     via: via.as_ref(),
                     alive_via: alive_via_proxy.as_ref(),
+                    prereq: prereq
+                        .as_ref()
+                        .expect("scan requires prerequisites (skipped only for `status`)"),
                 })
                 .await;
             }
@@ -609,12 +649,16 @@ async fn main() {
                 };
                 cmd::universal::run_universal(
                     eff_workers as usize,
+                    cli.profiles_per_instance,
                     &domain_list,
                     &protocols,
                     dns_mode,
                     sample,
                     output.as_deref(),
                     via.as_ref(),
+                    prereq
+                        .as_ref()
+                        .expect("universal requires prerequisites (skipped only for `status`)"),
                 )
                 .await;
             }
@@ -825,5 +869,29 @@ mod tests {
             Some(Command::Scan { alive_via, .. }) => assert_eq!(alive_via, None),
             _ => panic!("expected Scan command"),
         }
+    }
+
+    /// #68: `--profiles-per-instance` — глобальный флаг (как `--workers`), стоит
+    /// ДО имени подкоманды. Ловит регресс, если кто-то случайно перенесёт его
+    /// внутрь `Command::Scan` при рефакторинге — тогда этот же вызов перестал
+    /// бы парситься.
+    #[test]
+    fn profiles_per_instance_parses_before_subcommand() {
+        let cli = Cli::try_parse_from([
+            "blockcheckw",
+            "--profiles-per-instance",
+            "256",
+            "scan",
+            "-d",
+            "example.com",
+        ])
+        .expect("parse");
+        assert_eq!(cli.profiles_per_instance, 256);
+    }
+
+    #[test]
+    fn profiles_per_instance_defaults_to_1024() {
+        let cli = Cli::try_parse_from(["blockcheckw", "scan", "-d", "example.com"]).expect("parse");
+        assert_eq!(cli.profiles_per_instance, 1024);
     }
 }

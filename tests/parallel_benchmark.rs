@@ -6,6 +6,7 @@
 use std::time::Instant;
 
 use blockcheckw::config::{CoreConfig, Protocol};
+use blockcheckw::nfqws2::run::SystemNfqws2;
 use blockcheckw::pipeline::runner::{run_parallel, RunParams};
 use blockcheckw::pipeline::worker_task::HttpTestMode;
 
@@ -80,6 +81,9 @@ async fn parallel_scaling_bench() {
     let strategies = generate_strategies(strategy_count);
     let worker_counts = [8, 16, 64];
 
+    let filter_mark = SystemNfqws2::probe_sync(&CoreConfig::default().nfqws2_env())
+        .expect("nfqws2 must support --filter-mark for this benchmark to run");
+
     let mut rows: Vec<BenchRow> = Vec::new();
 
     for &wc in &worker_counts {
@@ -93,6 +97,7 @@ async fn parallel_scaling_bench() {
 
         let (results, stats) = run_parallel(RunParams {
             config: &config,
+            filter_mark: &filter_mark,
             domain,
             protocol,
             strategies: &strategies,

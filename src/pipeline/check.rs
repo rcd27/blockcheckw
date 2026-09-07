@@ -3,22 +3,25 @@ use std::time::Instant;
 use console::style;
 use tracing::{info_span, Instrument};
 
-use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
+use crate::config::{CoreConfig, Protocol};
 use crate::dto::{CheckReport, CheckedStrategy, VerifiedStrategy};
+use crate::firewall::nft::{OwnedTable, SystemNft};
 use crate::firewall::nftables;
 use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, HttpResult};
+use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
+use crate::nfqws2::run::SystemNfqws2;
 use crate::strategy::generator::TaggedStrategy;
 use crate::ui;
-use crate::worker::nfqws2::start_nfqws2;
-use crate::worker::slot::WorkerSlot;
 
 /// Verify strategies from a vanilla report with real data transfer.
 ///
 /// Each strategy is tested `passes` times. If the first pass fails, the strategy
 /// is dropped immediately (early-exit). `--take N` stops after finding N strategies
 /// with 100% success rate per protocol.
+#[allow(clippy::too_many_arguments)] // witness добавлен задачей 7 поверх уже широкого набора параметров
 pub async fn run_check(
     config: &CoreConfig,
+    witness: &FilterMark,
     domain: &str,
     strategies: &[TaggedStrategy],
     ips: &[String],
@@ -27,27 +30,24 @@ pub async fn run_check(
     screen: &mut ui::Console,
 ) -> CheckReport {
     let start = Instant::now();
-    let slot = WorkerSlot::create_slots(1, config.base_qnum)
-        .into_iter()
-        .next()
-        .expect("create_slots(1) returns exactly one slot");
 
-    // Prepare nftables table
-    nftables::drop_table(&config.nft_table).await;
-    if let Err(e) = nftables::prepare_table(&config.nft_table).await {
-        screen.println(&format!(
-            "  {} failed to prepare nftables: {e}",
-            style("ERROR:").red().bold(),
-        ));
-        return CheckReport {
-            domain: domain.to_string(),
-            timestamp: timestamp_iso(),
-            total: strategies.len(),
-            working: 0,
-            elapsed_secs: start.elapsed().as_secs_f64(),
-            strategies: vec![],
-        };
-    }
+    let table = match nftables::prepare_table(&SystemNft, &config.nft_table).await {
+        Ok(t) => t,
+        Err(e) => {
+            screen.println(&format!(
+                "  {} failed to prepare nftables: {e}",
+                style("ERROR:").red().bold(),
+            ));
+            return CheckReport {
+                domain: domain.to_string(),
+                timestamp: timestamp_iso(),
+                total: strategies.len(),
+                working: 0,
+                elapsed_secs: start.elapsed().as_secs_f64(),
+                strategies: vec![],
+            };
+        }
+    };
 
     screen.println(&format!(
         "  {}",
@@ -109,7 +109,8 @@ pub async fn run_check(
         );
         async {
             for pass_idx in 0..passes {
-                let checked = check_single_strategy(config, &slot, domain, tagged, ips).await;
+                let checked =
+                    check_single_strategy(config, witness, &table, domain, tagged, ips).await;
                 total_run = pass_idx + 1;
 
                 if checked.working {
@@ -192,7 +193,7 @@ pub async fn run_check(
     });
 
     // Cleanup
-    nftables::drop_table(&config.nft_table).await;
+    let _ = table.drop_table(&SystemNft).await;
 
     CheckReport {
         domain: domain.to_string(),
@@ -207,7 +208,8 @@ pub async fn run_check(
 /// Check one strategy: nfqws2 → nftables → GET → measure → cleanup.
 async fn check_single_strategy(
     config: &CoreConfig,
-    slot: &WorkerSlot,
+    witness: &FilterMark,
+    table: &OwnedTable,
     domain: &str,
     tagged: &TaggedStrategy,
     ips: &[String],
@@ -225,71 +227,57 @@ async fn check_single_strategy(
         error: Some(error),
     };
 
-    // 1. Start nfqws2
-    let mut nfqws2_process = match start_nfqws2(config, slot.qnum, &tagged.args) {
-        Ok(p) => p,
+    // 1. Собрать план из одного профиля и поднять движок
+    let env = config.nfqws2_env();
+    let queue = QueueNum::new(config.base_qnum);
+    let plan = Plan::from_one(witness, queue, &tagged.args);
+    let mark = plan.profiles()[0].mark;
+
+    let mut instance = match SystemNfqws2::start(&env, &plan).await {
+        Ok(i) => i,
         Err(e) => return make_failed(format!("nfqws2: {e}")),
     };
 
-    // 2. Wait for nfqws2 to bind, verify it didn't crash
-    if let Err(code) = nfqws2_process.wait_for_ready(NFQWS2_INIT_DELAY_MS).await {
-        return make_failed(format!("nfqws2 exited immediately (code {code})"));
+    // 2. Дождаться, пока движок реально забиндит очередь
+    let ready = match SystemNfqws2::wait_ready(&mut instance).await {
+        Ok(r) => r,
+        Err(e) => {
+            SystemNfqws2::stop(instance).await;
+            return make_failed(format!("nfqws2: {e}"));
+        }
+    };
+
+    // 3. Поставить диспетчеризацию — только теперь, когда слушатель точно есть
+    if let Err(e) = nftables::apply_dispatch(
+        &SystemNft,
+        table,
+        &ready,
+        &plan.dispatch(protocol.port()),
+        ips,
+    )
+    .await
+    {
+        // Батч атомарен, но `Err` тут может значить и таймаут
+        // `run_process_stdin` (15с): нельзя быть уверенным, что nft не успел
+        // применить правила до обрыва. Снимаем диспетчеризацию на всякий
+        // случай, прежде чем убивать слушателя — иначе `queue to N` рискует
+        // остаться стоять без него до конца всего прогона.
+        nftables::remove_dispatch(&SystemNft, table).await;
+        SystemNfqws2::stop(instance).await;
+        return make_failed(format!("nftables: {e}"));
     }
 
-    // 3. Add outgoing nftables rule
-    let postnat_handle = match nftables::add_worker_rule(
-        &config.nft_table,
-        slot.fwmark,
-        protocol.port(),
-        slot.qnum,
-        ips,
-    )
-    .await
-    {
-        Ok(h) => h,
-        Err(e) => {
-            nfqws2_process.kill().await;
-            return make_failed(format!("nftables postnat: {e}"));
-        }
-    };
-
-    // 4. Add incoming SYN,ACK rule
-    let prenat_handle = match nftables::add_incoming_rule(
-        &config.nft_table,
-        slot.fwmark,
-        protocol.port(),
-        slot.qnum,
-        ips,
-    )
-    .await
-    {
-        Ok(h) => h,
-        Err(e) => {
-            // best-effort cleanup
-            let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
-            nfqws2_process.kill().await;
-            return make_failed(format!("nftables prenat: {e}"));
-        }
-    };
-
-    // 5. HTTP GET with data transfer
-    let ip = match pick_random_ip(ips) {
-        Some(ip) => ip,
-        None => {
-            // best-effort cleanup
-            let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle)
-                .await;
-            nfqws2_process.kill().await;
-            return make_failed("no IP addresses".to_string());
-        }
-    };
+    // 4. HTTP GET with data transfer. `ips` гарантированно непусты:
+    // `apply_dispatch` выше уже прогнал `validate_ip_set`, отвергающий
+    // пустой список, и вернул `Ok` — значит, эта проверка не могла провалиться.
+    let ip = pick_random_ip(ips).expect("apply_dispatch already validated ips is non-empty");
 
     let test_start = Instant::now();
     let result = http_test_data(
         protocol,
         domain,
         ip,
-        slot.fwmark,
+        mark.so_mark(),
         config.request_timeout,
         BodyMode::Unlimited,
         None,
@@ -297,11 +285,11 @@ async fn check_single_strategy(
     .await;
     let latency_ms = test_start.elapsed().as_millis() as u64;
 
-    // 6. Cleanup: remove rules first, then kill nfqws2 (best-effort)
-    let _ = nftables::remove_worker_rules(&config.nft_table, postnat_handle, prenat_handle).await;
-    nfqws2_process.kill().await;
+    // 5. Cleanup: снять диспетчеризацию, затем убить nfqws2 (best-effort)
+    nftables::remove_dispatch(&SystemNft, table).await;
+    SystemNfqws2::stop(instance).await;
 
-    // 7. Interpret for check: got an HTTP status code = strategy works.
+    // 6. Interpret for check: got an HTTP status code = strategy works.
     //    DPI blocks manifest as timeouts/connection resets — never as HTTP responses.
     let (working, error) = interpret_check_result(&result, domain);
     let bytes_downloaded = result.size_download.unwrap_or(0);

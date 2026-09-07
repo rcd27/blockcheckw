@@ -1,18 +1,22 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::info;
 
 use crate::config::{CoreConfig, Protocol};
-use crate::error::TaskResult;
+use crate::error::{BlockcheckError, TaskResult};
+use crate::firewall::nft::SystemNft;
 use crate::firewall::nftables;
-use crate::pipeline::worker_task::{execute_worker_task_rules_ready, HttpTestMode, WorkerTask};
+use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
+use crate::nfqws2::run::SystemNfqws2;
+use crate::pipeline::worker_task::{probe_profile, HttpTestMode, ProbeTask};
 use crate::system::process;
-use crate::worker::slot::WorkerSlot;
 
 #[derive(Debug)]
 pub struct StrategyResult {
@@ -40,13 +44,13 @@ impl RunStats {
     }
 }
 
-/// Прекратить выдачу новых батчей.
+/// Прекратить выдачу новых планов.
 ///
 /// Дедлайн — штатный конец прогона. Shutdown — Ctrl+C: cleanup сносит нашу
 /// таблицу первым делом (чтобы не слать пакеты в отвязанный NFQUEUE), и до
 /// `process::exit` остаётся окно в сотни миллисекунд. Без этой проверки цикл
-/// продолжает лить `add chain inet <table> wp_*` в уже снесённую таблицу —
-/// это и есть простыня `No such file or directory` из #66.
+/// продолжает лить `add rule ...` в уже снесённую таблицу — это и есть
+/// простыня `No such file or directory` из #66.
 fn stop_before_batch(deadline: Option<Instant>, now: Instant, shutting_down: bool) -> bool {
     shutting_down || deadline.is_some_and(|dl| now >= dl)
 }
@@ -54,6 +58,8 @@ fn stop_before_batch(deadline: Option<Instant>, now: Instant, shutting_down: boo
 /// Parameters for parallel strategy execution.
 pub struct RunParams<'a> {
     pub config: &'a CoreConfig,
+    /// Свидетельство преflight'а: без него `Plan` не собрать.
+    pub filter_mark: &'a FilterMark,
     pub domain: &'a str,
     pub protocol: Protocol,
     pub strategies: &'a [Vec<String>],
@@ -67,14 +73,69 @@ pub struct RunParams<'a> {
     pub success_sink: Option<Arc<std::sync::Mutex<Vec<Vec<String>>>>>,
 }
 
-/// Run strategies in parallel batches using worker slots.
-///
-/// nftables rules are added once per batch (not per strategy), drastically
-/// reducing nft fork+exec overhead. Only nfqws2 start/kill and HTTP tests
-/// happen per strategy.
+fn record_plan_failure(
+    chunk: &[Vec<String>],
+    error: &BlockcheckError,
+    all_results: &mut Vec<StrategyResult>,
+    errors: &mut usize,
+    multi: Option<&MultiProgress>,
+    pb: &ProgressBar,
+) {
+    let line = format!(
+        "nfqws2 plan failed ({} {}): {error}",
+        chunk.len(),
+        if chunk.len() == 1 {
+            "strategy"
+        } else {
+            "strategies"
+        }
+    );
+    if let Some(m) = multi {
+        let _ = m.println(&line);
+    } else {
+        pb.suspend(|| eprintln!("{line}"));
+    }
+    for strategy_args in chunk {
+        *errors += 1;
+        pb.inc(1);
+        all_results.push(StrategyResult {
+            strategy_args: strategy_args.clone(),
+            result: TaskResult::Error {
+                error: error.clone(),
+            },
+        });
+    }
+}
+
+fn all_as_error(
+    strategies: &[Vec<String>],
+    error: BlockcheckError,
+    elapsed: Duration,
+) -> (Vec<StrategyResult>, RunStats) {
+    let results: Vec<StrategyResult> = strategies
+        .iter()
+        .map(|args| StrategyResult {
+            strategy_args: args.clone(),
+            result: TaskResult::Error {
+                error: error.clone(),
+            },
+        })
+        .collect();
+    let stats = RunStats {
+        total: strategies.len(),
+        completed: strategies.len(),
+        successes: 0,
+        failures: 0,
+        errors: strategies.len(),
+        elapsed,
+    };
+    (results, stats)
+}
+
 pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunStats) {
     let RunParams {
         config,
+        filter_mark,
         domain,
         protocol,
         strategies,
@@ -87,30 +148,22 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
     } = params;
 
     let start = Instant::now();
-    let slots = WorkerSlot::create_slots(config.worker_count, config.base_qnum);
 
-    // Cleanup any leftover nftables table from a previous crashed run
-    nftables::drop_table(&config.nft_table).await;
-
-    // Prepare nftables table once
-    if let Err(e) = nftables::prepare_table(&config.nft_table).await {
-        let results: Vec<StrategyResult> = strategies
-            .iter()
-            .map(|args| StrategyResult {
-                strategy_args: args.clone(),
-                result: TaskResult::Error { error: e.clone() },
-            })
-            .collect();
-        let stats = RunStats {
-            total: strategies.len(),
-            completed: strategies.len(),
-            successes: 0,
-            failures: 0,
-            errors: strategies.len(),
-            elapsed: start.elapsed(),
-        };
-        return (results, stats);
+    if config.profiles_per_instance == 0 {
+        return all_as_error(
+            strategies,
+            BlockcheckError::InvalidConfig {
+                reason: "profiles_per_instance is 0: a plan cannot be built without profiles"
+                    .to_string(),
+            },
+            start.elapsed(),
+        );
     }
+
+    let table = match nftables::prepare_table(&SystemNft, &config.nft_table).await {
+        Ok(t) => t,
+        Err(e) => return all_as_error(strategies, e, start.elapsed()),
+    };
 
     let owned_pb;
     let pb: &ProgressBar = match external_pb {
@@ -145,9 +198,11 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
     let domain: Arc<str> = Arc::from(domain);
     let ips: Arc<[String]> = Arc::from(ips);
 
-    let batches: Vec<&[Vec<String>]> = strategies.chunks(config.worker_count).collect();
+    let env = config.nfqws2_env();
+    let queue = QueueNum::new(config.base_qnum);
+    let permits = Arc::new(Semaphore::new(config.worker_count));
 
-    for batch in batches {
+    for chunk in strategies.chunks(config.profiles_per_instance) {
         if stop_before_batch(
             deadline,
             Instant::now(),
@@ -156,50 +211,78 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
             break;
         }
 
-        // Determine which slots are used in this batch
-        let batch_slots: Vec<WorkerSlot> = slots.iter().take(batch.len()).cloned().collect();
+        let plan = Plan::from_strategies(filter_mark, queue, chunk);
 
-        // Add all nftables vmap elements + dispatch rules for this batch
-        if let Err(e) =
-            nftables::add_all_worker_rules(&config.nft_table, &batch_slots, protocol.port(), &ips)
-                .await
-        {
-            // All strategies in this batch fail
-            for strategy_args in batch {
-                errors += 1;
-                let line = format!("nft batch add failed: {e}");
-                if let Some(m) = multi {
-                    let _ = m.println(&line);
-                } else {
-                    pb.suspend(|| eprintln!("{line}"));
-                }
-                pb.inc(1);
-                all_results.push(StrategyResult {
-                    strategy_args: strategy_args.clone(),
-                    result: TaskResult::Error { error: e.clone() },
-                });
+        let mut instance = match SystemNfqws2::start(&env, &plan).await {
+            Ok(i) => i,
+            Err(e) => {
+                record_plan_failure(chunk, &e.into(), &mut all_results, &mut errors, multi, pb);
+                continue;
             }
+        };
+
+        info!(
+            profiles = plan.profiles().len(),
+            queue = queue.get(),
+            "nfqws2 instance started"
+        );
+
+        let ready = match SystemNfqws2::wait_ready(&mut instance).await {
+            Ok(r) => r,
+            Err(e) => {
+                SystemNfqws2::stop(instance).await;
+                record_plan_failure(chunk, &e.into(), &mut all_results, &mut errors, multi, pb);
+                continue;
+            }
+        };
+
+        if let Err(e) = nftables::apply_dispatch(
+            &SystemNft,
+            &table,
+            &ready,
+            &plan.dispatch(protocol.port()),
+            &ips,
+        )
+        .await
+        {
+            nftables::remove_dispatch(&SystemNft, &table).await;
+            SystemNfqws2::stop(instance).await;
+            record_plan_failure(chunk, &e, &mut all_results, &mut errors, multi, pb);
             continue;
         }
 
-        // Run all strategies in this batch concurrently (rules are already in place)
         let mut join_set = JoinSet::new();
+        let mut pending_args: HashMap<tokio::task::Id, Vec<String>> = HashMap::new();
 
-        for (index, strategy_args) in batch.iter().enumerate() {
-            let slot = slots[index].clone();
-            let config = config.clone();
-            let task = WorkerTask {
-                slot,
+        for profile in plan.profiles() {
+            if stop_before_batch(
+                deadline,
+                Instant::now(),
+                process::background_shutdown_started(),
+            ) {
+                break;
+            }
+
+            let permit = permits
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("семафор жив, пока жив run_parallel");
+            let task = ProbeTask {
+                mark: profile.mark,
                 domain: domain.clone(),
-                strategy_args: strategy_args.clone(),
+                strategy_args: profile.args.clone(),
                 protocol,
                 ips: ips.clone(),
             };
+            let config = config.clone();
 
-            join_set.spawn(async move {
-                let result = execute_worker_task_rules_ready(&config, &task, mode).await;
+            let handle = join_set.spawn(async move {
+                let result = probe_profile(&config, &task, mode).await;
+                drop(permit);
                 (task.strategy_args, result)
             });
+            pending_args.insert(handle.id(), profile.args.clone());
         }
 
         while let Some(join_result) = join_set.join_next().await {
@@ -258,20 +341,30 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
                         pb.suspend(|| eprintln!("{line}"));
                     }
                     pb.inc(1);
+
+                    let strategy_args = pending_args.remove(&join_err.id()).unwrap_or_default();
+                    all_results.push(StrategyResult {
+                        strategy_args,
+                        result: TaskResult::Error {
+                            error: BlockcheckError::TaskJoin {
+                                reason: join_err.to_string(),
+                            },
+                        },
+                    });
                 }
             }
         }
 
-        // Remove all rules for this batch in ONE nft call
-        nftables::remove_all_worker_rules(&config.nft_table, &batch_slots).await;
+        nftables::remove_dispatch(&SystemNft, &table).await;
+        SystemNfqws2::stop(instance).await;
     }
 
     if external_pb.is_none() {
         pb.finish_and_clear();
     }
 
-    // Cleanup nftables table
-    nftables::drop_table(&config.nft_table).await;
+    // Cleanup nftables table — хэндл потребляется, снести повторно нечем.
+    let _ = table.drop_table(&SystemNft).await;
 
     let elapsed = start.elapsed();
     let stats = RunStats {
@@ -329,5 +422,49 @@ mod stop_tests {
     fn no_deadline_means_run_until_shutdown() {
         assert!(!stop_before_batch(None, Instant::now(), false));
         assert!(stop_before_batch(None, Instant::now(), true));
+    }
+
+    #[tokio::test]
+    async fn checking_the_deadline_per_step_stops_sooner_than_once_per_plan() {
+        const STEPS: usize = 40;
+        const STEP: Duration = Duration::from_millis(5);
+
+        // Старая схема: проверка один раз, на границе "плана" — как было на
+        // границе батча до фикса I2.
+        let deadline_old = Instant::now() + STEP * 8;
+        let mut attempted_old = 0;
+        if !stop_before_batch(Some(deadline_old), Instant::now(), false) {
+            for _ in 0..STEPS {
+                tokio::time::sleep(STEP).await; // имитирует ожидание permit'а/пробы
+                attempted_old += 1;
+            }
+        }
+
+        // Новая схема: проверка перед КАЖДЫМ шагом.
+        let deadline_new = Instant::now() + STEP * 8;
+        let mut attempted_new = 0;
+        for _ in 0..STEPS {
+            if stop_before_batch(Some(deadline_new), Instant::now(), false) {
+                break;
+            }
+            tokio::time::sleep(STEP).await;
+            attempted_new += 1;
+        }
+
+        assert_eq!(
+            attempted_old, STEPS,
+            "проверка на границе плана не может остановиться раньше конца плана — \
+             в этом и была находка I2"
+        );
+        assert!(
+            attempted_new < STEPS,
+            "проверка перед каждым шагом обязана остановиться до конца плана, \
+             а не пройти все {STEPS}: attempted_new={attempted_new}"
+        );
+        assert!(
+            attempted_new <= STEPS / 2,
+            "остановка должна случиться около 8-го шага (дедлайн ушёл на 8*STEP), \
+             а не позже: attempted_new={attempted_new}"
+        );
     }
 }

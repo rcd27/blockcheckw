@@ -36,6 +36,13 @@ impl NftBatch {
         Self(lines)
     }
 
+    /// Батч из произвольных строк — для модулей-соседей внутри `firewall/`
+    /// (например, `nftables::apply_dispatch`). Остаётся `pub(crate)`, чтобы
+    /// снаружи `firewall/` батч по-прежнему было не собрать.
+    pub(crate) fn from_lines(lines: Vec<String>) -> Self {
+        Self::new(lines)
+    }
+
     /// Скрипт для `nft -f -`.
     pub fn script(&self) -> String {
         let mut s = self.0.join("\n");
@@ -76,12 +83,38 @@ pub struct OwnedTable {
 }
 
 impl OwnedTable {
-    /// Создать таблицу. Единственный способ получить хэндл.
+    /// Создать таблицу. Единственный ПУБЛИЧНЫЙ способ получить хэндл — второй,
+    /// [`OwnedTable::create_with`], виден только внутри крейта.
     pub async fn create<R: NftRun>(runner: &R, name: &str) -> Result<Self, BlockcheckError> {
         let table = OwnedTable {
             name: name.to_string(),
         };
         runner.run(table.create_batch()).await?;
+        Ok(table)
+    }
+
+    /// Создать таблицу одной транзакцией вместе с `leading` (команды ДО
+    /// `add table` — снос остатков прошлого прогона, БЕЗ чтения перед
+    /// записью — см. doc-комментарий `nftables::prepare_table`, почему) и
+    /// `trailing` (команды ПОСЛЕ — хуки и статические правила).
+    ///
+    /// Существует ради `nftables::prepare_table`: три отдельных `nft -f -`
+    /// (снос, создание, хуки) нарушали бы заявленный модулем инвариант «один
+    /// батч — одна транзакция» и на падении третьей транзакции оставляли бы
+    /// голую таблицу без хуков в рулсете.
+    pub(crate) async fn create_with<R: NftRun>(
+        runner: &R,
+        name: &str,
+        leading: Vec<String>,
+        trailing: Vec<String>,
+    ) -> Result<Self, BlockcheckError> {
+        let table = OwnedTable {
+            name: name.to_string(),
+        };
+        let mut lines = leading;
+        lines.push(format!("add table inet {name}"));
+        lines.extend(trailing);
+        runner.run(NftBatch::new(lines)).await?;
         Ok(table)
     }
 
@@ -333,25 +366,24 @@ pub fn is_available_sync() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Интерпретатор для тестов: записывает транзакции, ничего не выполняет.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
     use std::sync::Mutex;
 
-    /// Интерпретатор, который ничего не выполняет, а записывает транзакции.
-    /// Позволяет проверять сценарии без root и без nftables.
     #[derive(Default)]
-    struct RecordingNft {
+    pub struct RecordingNft {
         transactions: Mutex<Vec<NftBatch>>,
     }
 
     impl RecordingNft {
-        fn transactions(&self) -> Vec<NftBatch> {
+        pub fn transactions(&self) -> Vec<NftBatch> {
             self.transactions.lock().unwrap().clone()
         }
 
         /// Все команды всех транзакций, подряд.
-        fn commands(&self) -> Vec<String> {
+        pub fn commands(&self) -> Vec<String> {
             self.transactions()
                 .iter()
                 .flat_map(|b| b.lines().to_vec())
@@ -369,10 +401,16 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn dump_foreign(&self, _table: &ForeignTable) -> Result<String, BlockcheckError> {
+        async fn dump_foreign(&self, _t: &ForeignTable) -> Result<String, BlockcheckError> {
             Ok(String::new())
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use testing::RecordingNft;
 
     #[tokio::test]
     async fn own_table_lifecycle_touches_only_our_table() {

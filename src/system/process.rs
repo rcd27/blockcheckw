@@ -135,6 +135,7 @@ pub fn start_kill_all_background_processes() {
 }
 
 /// A registered background process handle. Wraps a tokio process child.
+#[derive(Debug)]
 pub struct BackgroundProcess {
     child: Arc<Mutex<tokio::process::Child>>,
 }
@@ -188,16 +189,6 @@ impl BackgroundProcess {
             _ => None,
         }
     }
-
-    /// Wait for the process to become ready (init delay), then verify it's still alive.
-    /// Returns `Ok(())` if alive after delay, `Err(exit_code)` if it exited early.
-    pub async fn wait_for_ready(&mut self, delay_ms: u64) -> Result<(), i32> {
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        match self.try_wait().await {
-            Some(code) => Err(code),
-            None => Ok(()),
-        }
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -218,8 +209,7 @@ mod tests {
 
         assert!(process.try_wait().await.is_some());
         let error = BackgroundProcess::spawn(&["sleep", "30"])
-            .err()
-            .expect("spawn during shutdown must fail");
+            .expect_err("spawn during shutdown must fail");
         assert!(error.to_string().contains("shutdown in progress"));
     }
 }

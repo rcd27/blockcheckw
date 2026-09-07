@@ -1,13 +1,14 @@
 use std::time::Instant;
 
-use crate::config::{CoreConfig, Protocol, NFQWS2_INIT_DELAY_MS};
+use crate::config::{CoreConfig, Protocol};
 use crate::dto::{PassResult, StrategyStats, StrategyTestResult};
 use crate::error::BlockcheckError;
+use crate::firewall::nft::{OwnedTable, SystemNft};
 use crate::firewall::nftables;
 use crate::network::http_client::{http_test, interpret_http_result, pick_random_ip, HttpVerdict};
+use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
+use crate::nfqws2::run::SystemNfqws2;
 use crate::ui;
-use crate::worker::nfqws2::start_nfqws2;
-use crate::worker::slot::WorkerSlot;
 
 pub struct TestConfig {
     pub passes: usize,
@@ -69,10 +70,12 @@ fn shell_split(s: &str) -> Vec<String> {
     args
 }
 
-/// Execute one timed test pass: start nfqws2, add rules, http test, measure latency, cleanup.
+/// Execute one timed test pass: start nfqws2, apply dispatch, http test, measure latency, cleanup.
+#[allow(clippy::too_many_arguments)] // witness/table добавлены задачей 7 поверх уже широкого набора параметров
 async fn execute_timed_test(
     config: &CoreConfig,
-    slot: &WorkerSlot,
+    witness: &FilterMark,
+    table: &OwnedTable,
     domain: &str,
     protocol: Protocol,
     ips: &[String],
@@ -86,93 +89,87 @@ async fn execute_timed_test(
 
     let start = Instant::now();
 
-    // Start nfqws2
-    let mut nfqws2_process = match start_nfqws2(config, slot.qnum, strategy_args) {
-        Ok(p) => p,
+    // Собрать план из одного профиля и поднять движок
+    let env = config.nfqws2_env();
+    let queue = QueueNum::new(config.base_qnum);
+    let plan = Plan::from_one(witness, queue, strategy_args);
+    let mark = plan.profiles()[0].mark;
+
+    let mut instance = match SystemNfqws2::start(&env, &plan).await {
+        Ok(i) => i,
         Err(e) => {
             return PassResult {
                 pass_index: 0,
                 success: false,
-                verdict: format!("ERROR: {e}"),
+                verdict: format!("ERROR: nfqws2: {e}"),
                 latency_ms: start.elapsed().as_millis() as u64,
                 timestamp,
             };
         }
     };
 
-    // Wait for nfqws2 to bind, verify it didn't crash
-    if let Err(code) = nfqws2_process.wait_for_ready(NFQWS2_INIT_DELAY_MS).await {
+    // Дождаться, пока движок реально забиндит очередь
+    let ready = match SystemNfqws2::wait_ready(&mut instance).await {
+        Ok(r) => r,
+        Err(e) => {
+            SystemNfqws2::stop(instance).await;
+            return PassResult {
+                pass_index: 0,
+                success: false,
+                verdict: format!("ERROR: nfqws2: {e}"),
+                latency_ms: start.elapsed().as_millis() as u64,
+                timestamp,
+            };
+        }
+    };
+
+    // Поставить диспетчеризацию — только теперь, когда слушатель точно есть
+    if let Err(e) = nftables::apply_dispatch(
+        &SystemNft,
+        table,
+        &ready,
+        &plan.dispatch(protocol.port()),
+        ips,
+    )
+    .await
+    {
+        // Батч атомарен, но `Err` тут может значить и таймаут
+        // `run_process_stdin` (15с): нельзя быть уверенным, что nft не успел
+        // применить правила до обрыва. Снимаем диспетчеризацию на всякий
+        // случай, прежде чем убивать слушателя — иначе `queue to N` рискует
+        // остаться стоять без него до конца всего прогона.
+        nftables::remove_dispatch(&SystemNft, table).await;
+        SystemNfqws2::stop(instance).await;
         return PassResult {
             pass_index: 0,
             success: false,
-            verdict: format!("ERROR: nfqws2 exited immediately (code {code})"),
+            verdict: format!("ERROR: nftables: {e}"),
             latency_ms: start.elapsed().as_millis() as u64,
             timestamp,
         };
     }
 
-    // Add outgoing rule
-    let postnat_handle = match nftables::add_worker_rule(
-        &config.nft_table,
-        slot.fwmark,
-        protocol.port(),
-        slot.qnum,
-        ips,
-    )
-    .await
-    {
-        Ok(h) => h,
-        Err(e) => {
-            nfqws2_process.kill().await;
-            return PassResult {
-                pass_index: 0,
-                success: false,
-                verdict: format!("ERROR: {e}"),
-                latency_ms: start.elapsed().as_millis() as u64,
-                timestamp,
-            };
-        }
-    };
-
-    // Add incoming SYN,ACK rule
-    let prenat_handle = match nftables::add_incoming_rule(
-        &config.nft_table,
-        slot.fwmark,
-        protocol.port(),
-        slot.qnum,
-        ips,
-    )
-    .await
-    {
-        Ok(h) => h,
-        Err(e) => {
-            // best-effort cleanup
-            let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
-            nfqws2_process.kill().await;
-            return PassResult {
-                pass_index: 0,
-                success: false,
-                verdict: format!("ERROR: {e}"),
-                latency_ms: start.elapsed().as_millis() as u64,
-                timestamp,
-            };
-        }
-    };
-
     // HTTP test with timing
     let ip_str = pick_random_ip(ips).unwrap_or("127.0.0.1");
 
     let test_start = Instant::now();
-    let result = http_test(protocol, domain, ip_str, slot.fwmark, request_timeout, None).await;
+    let result = http_test(
+        protocol,
+        domain,
+        ip_str,
+        mark.so_mark(),
+        request_timeout,
+        None,
+    )
+    .await;
     let verdict = interpret_http_result(&result, domain);
     let success = matches!(verdict, HttpVerdict::Available);
     let verdict_str = format!("{verdict}");
     let latency_ms = test_start.elapsed().as_millis() as u64;
 
-    // best-effort cleanup
-    let _ = nftables::remove_rule(&config.nft_table, postnat_handle).await;
-    let _ = nftables::remove_prenat_rule(&config.nft_table, prenat_handle).await;
-    nfqws2_process.kill().await;
+    // best-effort cleanup: снять диспетчеризацию, затем убить nfqws2
+    nftables::remove_dispatch(&SystemNft, table).await;
+    SystemNfqws2::stop(instance).await;
 
     PassResult {
         pass_index: 0,
@@ -214,9 +211,11 @@ async fn execute_baseline_pass(
 }
 
 /// Run strategy tests sequentially. Returns results for baseline (if enabled) + all strategies.
+#[allow(clippy::too_many_arguments)] // witness добавлен задачей 7 поверх уже широкого набора параметров
 pub async fn run_strategy_tests(
     test_config: &TestConfig,
     core_config: &CoreConfig,
+    witness: &FilterMark,
     domain: &str,
     protocol: Protocol,
     ips: &[String],
@@ -225,15 +224,15 @@ pub async fn run_strategy_tests(
 ) -> Vec<StrategyTestResult> {
     let mut results = Vec::new();
 
-    // Prepare nftables table
-    if let Err(e) = nftables::prepare_table(&core_config.nft_table).await {
-        screen.println(&format!("  ERROR: failed to prepare nftables: {e}"));
-        return results;
-    }
-
-    // Create a single worker slot for sequential testing
-    let slots = WorkerSlot::create_slots(1, core_config.base_qnum);
-    let slot = &slots[0];
+    // Подготовить таблицу: один батч, атомарный снос остатков прошлого
+    // прогона включительно — см. doc-комментарий `prepare_table`.
+    let table = match nftables::prepare_table(&SystemNft, &core_config.nft_table).await {
+        Ok(t) => t,
+        Err(e) => {
+            screen.println(&format!("  ERROR: failed to prepare nftables: {e}"));
+            return results;
+        }
+    };
 
     // Baseline (if enabled)
     if test_config.with_baseline {
@@ -277,7 +276,8 @@ pub async fn run_strategy_tests(
         for i in 0..test_config.passes {
             let mut result = execute_timed_test(
                 core_config,
-                slot,
+                witness,
+                &table,
                 domain,
                 protocol,
                 ips,
@@ -307,8 +307,8 @@ pub async fn run_strategy_tests(
         });
     }
 
-    // Cleanup nftables
-    nftables::drop_table(&core_config.nft_table).await;
+    // Cleanup: снести таблицу целиком, хэндл потреблён.
+    let _ = table.drop_table(&SystemNft).await;
 
     results
 }

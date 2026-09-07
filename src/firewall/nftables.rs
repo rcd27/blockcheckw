@@ -1,9 +1,23 @@
 use crate::error::BlockcheckError;
+use crate::firewall::nft::{NftBatch, NftRun, OwnedTable, OwnedTableMarker};
 use crate::network::dns::is_ipv4;
-use crate::system::process::{run_process, run_process_stdin};
+use crate::nfqws2::dispatch::Dispatch;
+use crate::nfqws2::mark::DESYNC_MARK;
+use crate::nfqws2::run::Ready;
+use tracing::warn;
 
 /// Validate and join IPs for nftables set. Rejects malformed IPs to prevent nft injection.
+///
+/// Пустое множество тоже отвергаем: `ip daddr {  }` (пустые фигурные скобки) —
+/// синтаксическая ошибка nft, а не пустое множество. Без этой проверки отказ
+/// был бы парс-фейлом в чужом бинаре вместо внятной типизированной ошибки.
 fn validate_ip_set(ips: &[String]) -> Result<String, BlockcheckError> {
+    if ips.is_empty() {
+        return Err(BlockcheckError::Nftables {
+            command: "validate ip set".to_string(),
+            stderr: "empty IP set: nft would reject `{ }` as a syntax error".to_string(),
+        });
+    }
     for ip in ips {
         if !is_ipv4(ip) {
             return Err(BlockcheckError::Nftables {
@@ -18,298 +32,275 @@ fn validate_ip_set(ips: &[String]) -> Result<String, BlockcheckError> {
 const CHAIN_POSTNAT: &str = "postnat";
 const CHAIN_PREDEFRAG: &str = "predefrag";
 const CHAIN_PRENAT: &str = "prenat";
-const NFT_TIMEOUT_MS: u64 = 15_000;
 
-/// vmap: packet mark → jump worker postnat chain
-const POSTNAT_VMAP: &str = "postnat_qmap";
-/// vmap: ct mark → jump worker prenat chain
-const PRENAT_VMAP: &str = "prenat_qmap";
-
-#[derive(Debug, Clone, Copy)]
-pub struct RuleHandle(pub u32);
-
-async fn run_nft(args: &[&str]) -> Result<String, BlockcheckError> {
-    let mut cmd: Vec<&str> = vec!["nft"];
-    cmd.extend_from_slice(args);
-
-    let result = run_process(&cmd, NFT_TIMEOUT_MS).await?;
-
-    if result.exit_code == 0 {
-        Ok(result.stdout)
-    } else {
-        Err(BlockcheckError::Nftables {
-            command: cmd.join(" "),
-            stderr: result.stderr,
-        })
-    }
-}
-
-/// Create the nftables table, hook chains, vmaps, and static rules.
-pub async fn prepare_table(table: &str) -> Result<(), BlockcheckError> {
-    let desync_mark = format!("0x{:08X}", crate::config::DESYNC_MARK);
-
-    let batch = format!(
-        "\
-add table inet {table}
-add chain inet {table} {CHAIN_POSTNAT} {{ type filter hook postrouting priority 102; }}
-add chain inet {table} {CHAIN_PREDEFRAG} {{ type filter hook output priority -402; }}
-add rule inet {table} {CHAIN_PREDEFRAG} meta nfproto ipv4 mark and {desync_mark} !=0 notrack
-add chain inet {table} {CHAIN_PRENAT} {{ type filter hook prerouting priority -102; }}
-add rule inet {table} {CHAIN_PRENAT} icmp type time-exceeded ct mark and {desync_mark} != 0 drop
-add rule inet {table} {CHAIN_PRENAT} icmp type time-exceeded ct state invalid drop
-add map inet {table} {POSTNAT_VMAP} {{ type mark : verdict; }}
-add map inet {table} {PRENAT_VMAP} {{ type mark : verdict; }}
-"
-    );
-
-    let result = run_process_stdin(&["nft", "-f", "-"], &batch, NFT_TIMEOUT_MS).await?;
-    if result.exit_code != 0 {
-        return Err(BlockcheckError::Nftables {
-            command: "nft -f - (prepare_table)".to_string(),
-            stderr: result.stderr,
-        });
-    }
-    Ok(())
-}
-
-/// Add per-worker chains, vmap elements, and dispatch rules for ALL slots.
-///
-/// For each worker slot creates:
-/// - postnat chain `wp_{qnum}`:  ct mark set ... ; queue num {qnum}
-/// - prenat chain `wi_{qnum}`:   queue num {qnum}
-/// - postnat vmap element: packet mark → jump wp_{qnum}
-/// - prenat vmap element:  ct mark → jump wi_{qnum}
-///
-/// Plus two dispatch rules (one per hook chain) that use the vmaps.
-/// All lookups are O(1) hash — no linear scan regardless of worker count.
-pub async fn add_all_worker_rules(
-    table: &str,
-    slots: &[crate::worker::slot::WorkerSlot],
-    dport: u16,
-    ips: &[String],
-) -> Result<(), BlockcheckError> {
-    if slots.is_empty() {
-        return Ok(());
-    }
-
-    let ip_set = validate_ip_set(ips)?;
-    let desync_mark = format!("0x{:08X}", crate::config::DESYNC_MARK);
-    let worker_base = format!("0x{:08X}", crate::config::WORKER_MARK_BASE);
-
-    // 1. Per-worker chains + vmap elements
-    let worker_rules: String = slots
-        .iter()
-        .flat_map(|slot| {
-            let worker_mark = format!("0x{:08X}", slot.fwmark);
-            let ct_value = format!("0x{:08X}", crate::config::DESYNC_MARK | slot.fwmark);
-            let pc = format!("wp_{}", slot.qnum);
-            let ic = format!("wi_{}", slot.qnum);
-            [
-                format!("add chain inet {table} {pc}"),
-                format!(
-                    "add rule inet {table} {pc} ct mark set ct mark or {ct_value} queue num {}",
-                    slot.qnum
-                ),
-                format!("add chain inet {table} {ic}"),
-                format!("add rule inet {table} {ic} queue num {}", slot.qnum),
-                format!("add element inet {table} {POSTNAT_VMAP} {{ {worker_mark} : jump {pc} }}"),
-                format!("add element inet {table} {PRENAT_VMAP} {{ {ct_value} : jump {ic} }}"),
-            ]
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    // 2. Dispatch rules
-    let batch = format!(
-        "{worker_rules}\n\
-         add rule inet {table} {CHAIN_POSTNAT} \
-         meta nfproto ipv4 tcp dport {dport} \
-         mark and {desync_mark} == 0 mark and {worker_base} != 0 \
-         ip daddr {{ {ip_set} }} mark vmap @{POSTNAT_VMAP}\n\
-         add rule inet {table} {CHAIN_PRENAT} \
-         meta nfproto ipv4 tcp flags & (syn | ack) == (syn | ack) \
-         ct mark and {worker_base} != 0 \
-         ip saddr {{ {ip_set} }} ct mark vmap @{PRENAT_VMAP}\n"
-    );
-
-    let result = run_process_stdin(&["nft", "-f", "-"], &batch, NFT_TIMEOUT_MS).await?;
-    if result.exit_code != 0 {
-        return Err(BlockcheckError::Nftables {
-            command: "nft -f - (add_all_worker_rules)".to_string(),
-            stderr: result.stderr,
-        });
-    }
-
-    Ok(())
-}
-
-/// Remove all worker chains, vmap elements, and dispatch rules.
-/// Flushes vmaps and hook chains, re-adds static ICMP rules.
-pub async fn remove_all_worker_rules(table: &str, slots: &[crate::worker::slot::WorkerSlot]) {
-    let desync_mark = format!("0x{:08X}", crate::config::DESYNC_MARK);
-
-    // Flush vmaps and hook chains
-    let flush = [
-        format!("flush map inet {table} {POSTNAT_VMAP}"),
-        format!("flush map inet {table} {PRENAT_VMAP}"),
-        format!("flush chain inet {table} {CHAIN_POSTNAT}"),
-        format!("flush chain inet {table} {CHAIN_PRENAT}"),
+pub async fn prepare_table<R: NftRun>(
+    runner: &R,
+    name: &str,
+) -> Result<OwnedTable, BlockcheckError> {
+    let leading = vec![
+        format!("add table inet {name}"),
+        format!("delete table inet {name}"),
     ];
 
-    // Delete per-worker chains
-    let worker_cleanup: Vec<String> = slots
-        .iter()
-        .flat_map(|slot| {
-            let pc = format!("wp_{}", slot.qnum);
-            let ic = format!("wi_{}", slot.qnum);
-            [
-                format!("flush chain inet {table} {pc}"),
-                format!("delete chain inet {table} {pc}"),
-                format!("flush chain inet {table} {ic}"),
-                format!("delete chain inet {table} {ic}"),
-            ]
-        })
-        .collect();
-
-    // Re-add static ICMP drop rules in prenat
-    let icmp = [
-        format!("add rule inet {table} {CHAIN_PRENAT} icmp type time-exceeded ct mark and {desync_mark} != 0 drop"),
-        format!("add rule inet {table} {CHAIN_PRENAT} icmp type time-exceeded ct state invalid drop"),
+    let desync = format!("0x{DESYNC_MARK:08X}");
+    let trailing = vec![
+        format!("add chain inet {name} {CHAIN_POSTNAT} {{ type filter hook postrouting priority 102; }}"),
+        format!("add chain inet {name} {CHAIN_PREDEFRAG} {{ type filter hook output priority -402; }}"),
+        format!("add rule inet {name} {CHAIN_PREDEFRAG} meta nfproto ipv4 mark and {desync} != 0 notrack"),
+        format!("add chain inet {name} {CHAIN_PRENAT} {{ type filter hook prerouting priority -102; }}"),
+        format!("add rule inet {name} {CHAIN_PRENAT} icmp type time-exceeded ct mark and {desync} != 0 drop"),
+        format!("add rule inet {name} {CHAIN_PRENAT} icmp type time-exceeded ct state invalid drop"),
     ];
 
-    let batch = flush
-        .iter()
-        .chain(&worker_cleanup)
-        .chain(&icmp)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    // best-effort cleanup — errors are not actionable
-    let _ = run_process_stdin(&["nft", "-f", "-"], &batch, NFT_TIMEOUT_MS).await;
+    OwnedTable::create_with(runner, name, leading, trailing).await
 }
 
-/// Drop the entire nftables table. Ignores errors (cleanup).
-pub async fn drop_table(table: &str) {
-    // best-effort cleanup — table may not exist
-    let _ = run_nft(&["delete", "table", "inet", table]).await;
-}
-
-// ── Legacy per-rule API (used by test_runner.rs sequential tests) ────────────
-
-pub async fn add_worker_rule(
-    table: &str,
-    worker_fwmark: u32,
-    dport: u16,
-    qnum: u16,
+pub async fn apply_dispatch<R: NftRun>(
+    runner: &R,
+    table: &OwnedTable,
+    ready: &Ready,
+    d: &Dispatch,
     ips: &[String],
-) -> Result<RuleHandle, BlockcheckError> {
-    let ip_set = validate_ip_set(ips)?;
-    let desync_mark = format!("0x{:08X}", crate::config::DESYNC_MARK);
-    let worker_mark_str = format!("0x{:08X}", worker_fwmark);
-    let ct_mark_value = format!("0x{:08X}", crate::config::DESYNC_MARK | worker_fwmark);
-    let rule = format!(
-        "add rule inet {table} {CHAIN_POSTNAT} \
-         meta nfproto ipv4 \
-         mark {worker_mark_str} \
-         tcp dport {dport} \
-         mark and {desync_mark} == 0 \
-         ip daddr {{ {ip_set} }} \
-         ct mark set ct mark or {ct_mark_value} \
-         queue num {qnum}"
-    );
-    let stdout = run_nft(&["--echo", "--handle", &rule]).await?;
-    parse_handle(&stdout)
-}
-
-pub async fn add_incoming_rule(
-    table: &str,
-    worker_fwmark: u32,
-    dport: u16,
-    qnum: u16,
-    ips: &[String],
-) -> Result<RuleHandle, BlockcheckError> {
-    let ip_set = validate_ip_set(ips)?;
-    let worker_mark_str = format!("0x{:08X}", worker_fwmark);
-    let rule = format!(
-        "add rule inet {table} {CHAIN_PRENAT} \
-         meta nfproto ipv4 \
-         tcp sport {dport} \
-         ct mark and {worker_mark_str} == {worker_mark_str} \
-         tcp flags & (syn | ack) == (syn | ack) \
-         ip saddr {{ {ip_set} }} \
-         queue num {qnum}"
-    );
-    let stdout = run_nft(&["--echo", "--handle", &rule]).await?;
-    parse_handle(&stdout)
-}
-
-pub async fn remove_rule(table: &str, handle: RuleHandle) -> Result<(), BlockcheckError> {
-    let h = handle.0.to_string();
-    run_nft(&["delete", "rule", "inet", table, CHAIN_POSTNAT, "handle", &h]).await?;
-    Ok(())
-}
-
-pub async fn remove_prenat_rule(table: &str, handle: RuleHandle) -> Result<(), BlockcheckError> {
-    let h = handle.0.to_string();
-    run_nft(&["delete", "rule", "inet", table, CHAIN_PRENAT, "handle", &h]).await?;
-    Ok(())
-}
-
-pub async fn remove_worker_rules(
-    table: &str,
-    postnat_handle: RuleHandle,
-    prenat_handle: RuleHandle,
 ) -> Result<(), BlockcheckError> {
-    let batch = format!(
-        "delete rule inet {table} {CHAIN_POSTNAT} handle {}\ndelete rule inet {table} {CHAIN_PRENAT} handle {}\n",
-        postnat_handle.0, prenat_handle.0,
-    );
-    let result = run_process_stdin(&["nft", "-f", "-"], &batch, NFT_TIMEOUT_MS).await?;
-    if result.exit_code != 0 {
-        // best-effort fallback: try removing rules individually
-        let _ = remove_rule(table, postnat_handle).await;
-        let _ = remove_prenat_rule(table, prenat_handle).await;
+    if ready.queue() != d.queue {
+        return Err(BlockcheckError::QueueWitnessMismatch {
+            witnessed: ready.queue().get(),
+            requested: d.queue.get(),
+        });
     }
-    Ok(())
+    let ip_set = validate_ip_set(ips)?;
+    let t = table.name();
+    let (q, port) = (d.queue.get(), d.dport);
+    runner
+        .run(NftBatch::from_lines(vec![
+            format!(
+                "add rule inet {t} {CHAIN_POSTNAT} meta nfproto ipv4 tcp dport {port} \
+                 mark and 0x{:08X} == 0 mark and 0x{:08X} == 0x{:08X} ip daddr {{ {ip_set} }} \
+                 ct mark set mark or 0x{:08X} queue num {q}",
+                d.out.require_clear, d.out.require_set, d.out.require_set, d.out.ct_set_or
+            ),
+            format!(
+                "add rule inet {t} {CHAIN_PRENAT} meta nfproto ipv4 tcp sport {port} \
+                 tcp flags & (syn | ack) == (syn | ack) ct mark and 0x{:08X} == 0x{:08X} \
+                 ip saddr {{ {ip_set} }} meta mark set ct mark and 0x{:08X} queue num {q}",
+                d.inc.ct_require_set, d.inc.ct_require_set, d.inc.mark_from_ct_and
+            ),
+        ]))
+        .await
 }
 
-fn parse_handle(stdout: &str) -> Result<RuleHandle, BlockcheckError> {
-    let re_pattern = "# handle ";
-    for line in stdout.lines() {
-        if let Some(pos) = line.find(re_pattern) {
-            let num_str = &line[pos + re_pattern.len()..];
-            if let Ok(n) = num_str.trim().parse::<u32>() {
-                return Ok(RuleHandle(n));
-            }
-        }
+pub async fn drop_table<R: NftRun>(runner: &R, marker: &OwnedTableMarker) {
+    let _ = runner.run(marker.drop_batch()).await;
+}
+
+pub async fn remove_dispatch<R: NftRun>(runner: &R, table: &OwnedTable) {
+    let t = table.name();
+    let desync = format!("0x{DESYNC_MARK:08X}");
+    if let Err(e) = runner
+        .run(NftBatch::from_lines(vec![
+            format!("flush chain inet {t} {CHAIN_POSTNAT}"),
+            format!("flush chain inet {t} {CHAIN_PRENAT}"),
+            format!("add rule inet {t} {CHAIN_PRENAT} icmp type time-exceeded ct mark and {desync} != 0 drop"),
+            format!("add rule inet {t} {CHAIN_PRENAT} icmp type time-exceeded ct state invalid drop"),
+        ]))
+        .await
+    {
+        warn!(table = t, error = %e, "remove_dispatch failed: dispatch rules for the previous plan may still be in the ruleset");
     }
-    Err(BlockcheckError::NftHandleParse {
-        output: stdout.to_string(),
-    })
 }
 
 #[cfg(test)]
-mod tests {
+mod dispatch_tests {
     use super::*;
+    use crate::firewall::nft::testing::RecordingNft;
+    use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
 
-    #[test]
-    fn test_parse_handle() {
-        let output = "add rule ... # handle 42\n";
-        let handle = parse_handle(output).unwrap();
-        assert_eq!(handle.0, 42);
+    async fn rendered(dport: u16) -> Vec<String> {
+        let nft = RecordingNft::default();
+        let table = OwnedTable::create(&nft, "bcw_test").await.unwrap();
+        // Три профиля, не один: дисциплина «два правила на весь план, а не
+        // на профиль» иначе не отличима от «два правила на один профиль» —
+        // e2e-двойник (`tests/e2e_infra.rs::nft_dispatch_add_remove_rules_on_real_kernel`)
+        // тоже строит план из трёх.
+        let plan = Plan::from_strategies(
+            &FilterMark::granted(),
+            QueueNum::new(200),
+            &[
+                vec!["--a".to_string()],
+                vec!["--b".to_string()],
+                vec!["--c".to_string()],
+            ],
+        );
+        let ready = Ready::witnessed(QueueNum::new(200));
+        apply_dispatch(
+            &nft,
+            &table,
+            &ready,
+            &plan.dispatch(dport),
+            &["1.2.3.4".to_string()],
+        )
+        .await
+        .unwrap();
+        nft.commands()
     }
 
-    #[test]
-    fn test_parse_handle_missing() {
-        let output = "some other output\n";
-        assert!(parse_handle(output).is_err());
+    /// Два правила на весь план — вместо K цепочек и 2K элементов карт.
+    #[tokio::test]
+    async fn dispatch_is_exactly_two_rules() {
+        let cmds = rendered(443).await;
+        let rules: Vec<&String> = cmds.iter().filter(|c| c.starts_with("add rule")).collect();
+        assert_eq!(rules.len(), 2, "{cmds:?}");
     }
 
-    #[test]
-    fn test_parse_handle_multiline() {
-        let output = "table inet blockcheckw {\n}\nadd rule ... # handle 137\n";
-        let handle = parse_handle(output).unwrap();
-        assert_eq!(handle.0, 137);
+    /// Ловушка §4 на уровне отрендеренного правила: маска обязана быть 0x2000FFFF.
+    #[tokio::test]
+    async fn the_incoming_rule_restores_the_mark_under_the_safe_mask() {
+        let cmds = rendered(443).await;
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("meta mark set ct mark and 0x2000FFFF")),
+            "{cmds:?}"
+        );
+    }
+
+    /// ct mark выводится из марки пакета — значит правил на профиль не нужно.
+    #[tokio::test]
+    async fn the_outgoing_rule_derives_ct_mark_from_the_packet_mark() {
+        let cmds = rendered(443).await;
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("ct mark set mark or 0x10000000")),
+            "{cmds:?}"
+        );
+    }
+
+    /// Карт и цепочек воркеров больше не существует — вместе с гонкой #66.
+    /// Проверяет именно `prepare_table`: карты создавала она, а не
+    /// `apply_dispatch`, у которого их отродясь не было.
+    #[tokio::test]
+    async fn no_vmaps_and_no_per_worker_chains_remain() {
+        let nft = RecordingNft::default();
+        let table = prepare_table(&nft, "bcw_test").await.unwrap();
+        let plan = Plan::from_strategies(
+            &FilterMark::granted(),
+            QueueNum::new(200),
+            &[vec!["--a".to_string()]],
+        );
+        let ready = Ready::witnessed(QueueNum::new(200));
+        apply_dispatch(
+            &nft,
+            &table,
+            &ready,
+            &plan.dispatch(443),
+            &["1.2.3.4".to_string()],
+        )
+        .await
+        .unwrap();
+
+        for c in nft.commands() {
+            assert!(!c.contains("add map"), "осталась карта: {c}");
+            assert!(!c.contains("qmap"), "остался vmap: {c}");
+            assert!(
+                !c.contains("wp_") && !c.contains("wi_"),
+                "осталась цепочка: {c}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_dispatch_flushes_and_leaves_exactly_two_icmp_rules() {
+        let nft = RecordingNft::default();
+        let table = prepare_table(&nft, "bcw_test").await.unwrap();
+        let plan = Plan::from_strategies(
+            &FilterMark::granted(),
+            QueueNum::new(200),
+            &[vec!["--a".to_string()]],
+        );
+        let ready = Ready::witnessed(QueueNum::new(200));
+        apply_dispatch(
+            &nft,
+            &table,
+            &ready,
+            &plan.dispatch(443),
+            &["1.2.3.4".to_string()],
+        )
+        .await
+        .unwrap();
+
+        remove_dispatch(&nft, &table).await;
+
+        let txs = nft.transactions();
+        let last = txs.last().expect("remove_dispatch отправил транзакцию");
+        let lines = last.lines();
+        assert!(
+            lines
+                .iter()
+                .any(|c| c == &format!("flush chain inet bcw_test {CHAIN_POSTNAT}")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|c| c == &format!("flush chain inet bcw_test {CHAIN_PRENAT}")),
+            "{lines:?}"
+        );
+        let icmp: Vec<&String> = lines
+            .iter()
+            .filter(|c| c.contains("icmp type time-exceeded"))
+            .collect();
+        assert_eq!(icmp.len(), 2, "{lines:?}");
+    }
+
+    /// Мусорный IP не должен доехать до nft.
+    #[tokio::test]
+    async fn malformed_ips_are_rejected_before_reaching_nft() {
+        let nft = RecordingNft::default();
+        let table = OwnedTable::create(&nft, "bcw_test").await.unwrap();
+        let plan = Plan::from_strategies(
+            &FilterMark::granted(),
+            QueueNum::new(200),
+            &[vec!["--a".to_string()]],
+        );
+        let ready = Ready::witnessed(QueueNum::new(200));
+        let bad = vec!["1.2.3.4; drop table inet fw4".to_string()];
+        assert!(
+            apply_dispatch(&nft, &table, &ready, &plan.dispatch(443), &bad)
+                .await
+                .is_err()
+        );
+        assert!(
+            nft.commands().iter().all(|c| !c.starts_with("add rule")),
+            "мусорный IP не должен доехать до nft ни в одном правиле"
+        );
+    }
+
+    /// Свидетельство, выданное одной очереди, не годится правилам для другой:
+    /// слушатель был бы, но не там, и порт ушёл бы в дроп целиком.
+    #[tokio::test]
+    async fn a_witness_for_another_queue_is_refused() {
+        let nft = RecordingNft::default();
+        let table = OwnedTable::create(&nft, "bcw_test").await.unwrap();
+        let plan = Plan::from_strategies(
+            &FilterMark::granted(),
+            QueueNum::new(200),
+            &[vec!["--a".to_string()]],
+        );
+        let ready_for_another = Ready::witnessed(QueueNum::new(201));
+        let err = apply_dispatch(
+            &nft,
+            &table,
+            &ready_for_another,
+            &plan.dispatch(443),
+            &["1.2.3.4".to_string()],
+        )
+        .await
+        .expect_err("свидетельство чужой очереди обязано быть отвергнуто");
+        assert!(matches!(err, BlockcheckError::QueueWitnessMismatch { .. }));
+        assert_eq!(
+            nft.transactions().len(),
+            1,
+            "отвергнутая заявка не должна породить вторую транзакцию — \
+             только та, что создала таблицу"
+        );
     }
 }

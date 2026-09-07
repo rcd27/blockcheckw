@@ -47,19 +47,27 @@ fn shuffle(domains: &[String]) -> Vec<String> {
     result
 }
 
+fn universal_core_config(workers: usize, profiles_per_instance: usize) -> CoreConfig {
+    CoreConfig {
+        worker_count: workers,
+        profiles_per_instance,
+        ..CoreConfig::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // prereq/profiles_per_instance добавлены задачей 8 поверх уже широкого набора параметров
 pub async fn run_universal(
     workers: usize,
+    profiles_per_instance: usize,
     domain_list: &str,
     protocols: &[Protocol],
     dns_mode: DnsMode,
     sample: usize,
     output: Option<&str>,
     via: Option<&Via>,
+    prereq: &super::Prerequisites,
 ) {
-    let config = Arc::new(CoreConfig {
-        worker_count: workers,
-        ..CoreConfig::default()
-    });
+    let config = Arc::new(universal_core_config(workers, profiles_per_instance));
 
     let cleanup = spawn_cleanup_handler(&config.nft_table);
 
@@ -154,6 +162,7 @@ pub async fn run_universal(
 
             let (scan_results, _stats) = run_parallel(RunParams {
                 config: &config,
+                filter_mark: &prereq.filter_mark,
                 domain,
                 protocol,
                 strategies: &corpus,
@@ -344,5 +353,24 @@ pub async fn run_universal(
     }
     if let Some(ref mgr) = stopped_service {
         restore_service(mgr, &screen).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #68 fix round 1: то же самое, что `scan_core_config`'s test — значение
+    /// `--profiles-per-instance` не должно теряться по дороге до `CoreConfig`.
+    #[test]
+    fn profiles_per_instance_reaches_core_config() {
+        let config = universal_core_config(8, 256);
+        assert_eq!(config.profiles_per_instance, 256);
+        assert_eq!(config.worker_count, 8);
+        assert_ne!(
+            config.profiles_per_instance,
+            CoreConfig::default().profiles_per_instance,
+            "тест бесполезен, если переданное значение совпадает с дефолтом"
+        );
     }
 }

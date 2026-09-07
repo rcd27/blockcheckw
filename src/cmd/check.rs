@@ -19,6 +19,7 @@ pub struct CheckParams<'a> {
     pub passes: usize,
     pub output: Option<&'a str>,
     pub via: Option<&'a Via>,
+    pub prereq: &'a super::Prerequisites,
 }
 
 #[tracing::instrument(
@@ -38,9 +39,11 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         passes,
         output,
         via,
+        prereq,
     } = params;
     let config = Arc::new(CoreConfig {
         worker_count: 1,
+        profiles_per_instance: 1,
         request_timeout: timeout,
         ..CoreConfig::default()
     });
@@ -134,6 +137,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
 
     let report = check::run_check(
         &config,
+        &prereq.filter_mark,
         domain,
         &strategies,
         &ips,

@@ -2,6 +2,7 @@ use console::style;
 
 use crate::config::{CoreConfig, Protocol};
 use crate::network::dns;
+use crate::nfqws2::plan::FilterMark;
 use crate::pipeline::runner::{run_parallel, RunParams};
 use crate::pipeline::worker_task::HttpTestMode;
 use crate::strategy::generator;
@@ -43,6 +44,10 @@ fn mem_available_kb() -> Option<u64> {
 
 pub fn worker_counts_to_test(min: usize, max: usize) -> Vec<usize> {
     let floor = min.max(4);
+    if floor > max {
+        // Защита от пустого набора
+        return vec![max.max(1)];
+    }
     let mut counts: Vec<usize> = (0..)
         .map(|p| 1usize << p)
         .take_while(|&n| n <= max)
@@ -53,9 +58,6 @@ pub fn worker_counts_to_test(min: usize, max: usize) -> Vec<usize> {
     counts.retain(|&n| n >= floor);
     counts
 }
-
-/// Estimated RAM per worker (nfqws2 process), in MB.
-const RAM_PER_WORKER_MB: u64 = 3;
 
 /// System profile for benchmark UI and smart range estimation.
 pub struct SystemProfile {
@@ -83,17 +85,12 @@ impl SystemProfile {
             })
             .unwrap_or(0.0);
 
-        // Leave 30% RAM for system, rest available for workers
-        let usable_ram_mb = (mem_available_mb as f64 * 0.7) as u64;
-        let ram_max = (usable_ram_mb / RAM_PER_WORKER_MB) as usize;
-
         // min: at least 4, scale with cores
         let estimated_min = 4usize.max(cpu_cores);
         // Round down to nearest power of 2 for clean levels
         let estimated_min = 1 << (usize::BITS - 1 - estimated_min.leading_zeros());
-
-        // max: RAM-limited, CPU-scaled, capped at 1024
-        let estimated_max = ram_max.min(cpu_cores * 64).min(1024).max(estimated_min);
+        // `peak_mem_mb` измеряет каждый уровень бенчмарка по факту, не по догадке
+        let estimated_max = (cpu_cores * 64).min(1024).max(estimated_min);
         // Round down to nearest power of 2
         let estimated_max = 1 << (usize::BITS - 1 - estimated_max.leading_zeros());
 
@@ -107,12 +104,10 @@ impl SystemProfile {
     }
 
     pub fn format_styled(&self) -> String {
-        let ram_at_min = self.estimated_min as u64 * RAM_PER_WORKER_MB;
-        let ram_at_max = self.estimated_max as u64 * RAM_PER_WORKER_MB;
         format!(
             "{}\n\
              {}  CPU: {} cores | RAM available: {:.1} GB | Load: {:.1}\n\
-             {}  Estimated range: {} \u{2014} {} workers (~{}MB \u{2014} ~{}MB RAM)",
+             {}  Estimated range: {} \u{2014} {} workers",
             style("=== System profile ===").bold().cyan(),
             style("").dim(),
             self.cpu_cores,
@@ -121,24 +116,18 @@ impl SystemProfile {
             style("").dim(),
             self.estimated_min,
             self.estimated_max,
-            ram_at_min,
-            ram_at_max,
         )
     }
 
     pub fn format_raw(&self) -> String {
-        let ram_at_min = self.estimated_min as u64 * RAM_PER_WORKER_MB;
-        let ram_at_max = self.estimated_max as u64 * RAM_PER_WORKER_MB;
         format!(
             "system: cpu={} cores  ram_available={:.1}GB  load={:.1}\n\
-             estimated range: {} - {} workers (~{}MB - ~{}MB RAM)",
+             estimated range: {} - {} workers",
             self.cpu_cores,
             self.mem_available_mb as f64 / 1024.0,
             self.load_avg_1m,
             self.estimated_min,
             self.estimated_max,
-            ram_at_min,
-            ram_at_max,
         )
     }
 }
@@ -266,12 +255,22 @@ fn build_table_text(header: &str, points: &[BenchmarkPoint], base_throughput: f6
     lines.join("\n")
 }
 
+fn benchmark_core_config(worker_count: usize, profiles_per_instance: usize) -> CoreConfig {
+    CoreConfig {
+        worker_count,
+        profiles_per_instance,
+        ..CoreConfig::default()
+    }
+}
+
 pub async fn run_benchmark(
     time_per_level: u64,
     max_workers: usize,
     raw: bool,
     domain: &str,
     protocol: Protocol,
+    profiles_per_instance: usize,
+    filter_mark: &FilterMark,
 ) -> Option<BenchmarkResult> {
     use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
@@ -286,7 +285,17 @@ pub async fn run_benchmark(
 
     let strategies = generator::generate_strategies(protocol);
     let corpus_size = strategies.len();
-    let worker_counts = worker_counts_to_test(profile.estimated_min, max_workers);
+
+    let capped_max_workers = max_workers.min(profiles_per_instance);
+    if capped_max_workers < max_workers && !raw {
+        eprintln!(
+            "  note: --max-workers {max_workers} capped to --profiles-per-instance \
+             {profiles_per_instance} — a single plan never has more probes in flight \
+             than it has profiles loaded"
+        );
+    }
+
+    let worker_counts = worker_counts_to_test(profile.estimated_min, capped_max_workers);
     let level_count = worker_counts.len();
 
     let header = if raw {
@@ -337,29 +346,7 @@ pub async fn run_benchmark(
     let mut base_throughput: Option<f64> = None;
 
     for (level_idx, &wc) in worker_counts.iter().enumerate() {
-        // OOM guard: check if enough RAM for this worker count
-        let ram_needed_mb = wc as u64 * RAM_PER_WORKER_MB;
-        if let Some(avail_kb) = mem_available_kb() {
-            let avail_mb = avail_kb / 1024;
-            // Keep 20% safety margin
-            let safe_mb = avail_mb * 80 / 100;
-            if ram_needed_mb > safe_mb {
-                let msg = format!(
-                    "stopping: {wc} workers need ~{ram_needed_mb}MB, only {avail_mb}MB available"
-                );
-                if raw {
-                    level_pb.println(msg);
-                } else {
-                    level_pb.println(format!("\n  {}", style(&msg).yellow().bold()));
-                }
-                break;
-            }
-        }
-
-        let config = CoreConfig {
-            worker_count: wc,
-            ..CoreConfig::default()
-        };
+        let config = benchmark_core_config(wc, profiles_per_instance);
 
         level_pb.set_message(format!("w={wc}"));
 
@@ -380,6 +367,7 @@ pub async fn run_benchmark(
 
         let (_results, stats) = run_parallel(RunParams {
             config: &config,
+            filter_mark,
             domain,
             protocol,
             strategies: &strategies,
@@ -475,6 +463,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn profiles_per_instance_reaches_core_config() {
+        let config = benchmark_core_config(8, 256);
+        assert_eq!(config.profiles_per_instance, 256);
+        assert_eq!(config.worker_count, 8);
+        assert_ne!(
+            config.profiles_per_instance,
+            CoreConfig::default().profiles_per_instance,
+            "тест бесполезен, если переданное значение совпадает с дефолтом"
+        );
+    }
+
+    #[test]
     fn test_find_optimal_basic() {
         let points = vec![
             BenchmarkPoint {
@@ -564,6 +564,38 @@ mod tests {
         // System with 16 cores should start from 16
         assert_eq!(worker_counts_to_test(16, 256), vec![16, 32, 64, 128, 256]);
         assert_eq!(worker_counts_to_test(8, 64), vec![8, 16, 32, 64]);
+    }
+
+    /// Задача 8ч2: много ядер (высокий `estimated_min`) + маленький
+    /// `--profiles-per-instance` даёт `min > max`. Раньше это вычищалось
+    /// `retain` до пустого вектора, и `run_benchmark` молча прогонял ноль
+    /// уровней. Теперь — единственный уровень на потолке, не пустой список.
+    #[test]
+    fn worker_counts_to_test_is_never_empty_and_never_offers_zero_workers() {
+        assert_eq!(worker_counts_to_test(64, 8), vec![8]);
+        assert_eq!(worker_counts_to_test(1024, 1), vec![1]);
+        // `--profiles-per-instance 0` доезжает до `max` — уровень «0
+        // воркеров» был бы тихим висяком семафора ПОСЛЕ постановки правил
+        // NFQUEUE, тем же классом отказа, что чинил `validate_parallelism`
+        // в части 1.
+        assert_eq!(worker_counts_to_test(1024, 0), vec![1]);
+
+        // Свойство должно держаться на любой паре, не только на трёх ручных
+        // примерах выше — иначе тест называется «никогда не пусто», а
+        // проверяет три точки.
+        for min in [0usize, 1, 4, 16, 64, 1024, 65535] {
+            for max in [0usize, 1, 4, 16, 64, 1024, 65535] {
+                let counts = worker_counts_to_test(min, max);
+                assert!(
+                    !counts.is_empty(),
+                    "min={min} max={max} дал пустой список уровней"
+                );
+                assert!(
+                    counts.iter().all(|&n| n >= 1),
+                    "min={min} max={max} дал уровень с 0 воркеров: {counts:?}"
+                );
+            }
+        }
     }
 
     #[test]

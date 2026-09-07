@@ -2,7 +2,7 @@ use blockcheckw::config::CoreConfig;
 use blockcheckw::pipeline::benchmark;
 use blockcheckw::ui;
 
-use super::{handle_bypass_conflicts, restore_service};
+use super::{handle_bypass_conflicts, restore_service, Prerequisites};
 
 pub async fn run_benchmark_cmd(
     time: u64,
@@ -10,6 +10,8 @@ pub async fn run_benchmark_cmd(
     domain: &str,
     protocol: &str,
     raw: bool,
+    profiles_per_instance: usize,
+    prereq: &Prerequisites,
 ) {
     let con = ui::Console::new();
 
@@ -32,7 +34,16 @@ pub async fn run_benchmark_cmd(
         .map(|w| w as usize)
         .unwrap_or_else(benchmark::default_max_workers);
     let raw = raw || !console::Term::stderr().is_term();
-    benchmark::run_benchmark(time, max, raw, domain, protocol).await;
+    benchmark::run_benchmark(
+        time,
+        max,
+        raw,
+        domain,
+        protocol,
+        profiles_per_instance,
+        &prereq.filter_mark,
+    )
+    .await;
 
     // Restore zapret2 if we stopped it
     if let Some(ref mgr) = stopped_service {

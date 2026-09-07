@@ -1,9 +1,5 @@
 use std::fmt;
 
-pub const DESYNC_MARK: u32 = 0x10000000;
-pub const WORKER_MARK_BASE: u32 = 0x20000000;
-pub const NFQWS2_INIT_DELAY_MS: u64 = 100;
-
 /// Имя нашей nft-таблицы. Не должно совпадать с чужими: "zapret" занято zapret1,
 /// "zapret2" — zapret2 (см. common/nft.sh), иначе их таблицы попадают под наш
 /// cleanup и при этом не видны детекту конфликтов.
@@ -40,6 +36,10 @@ pub fn parse_dns_mode(s: &str) -> Result<DnsMode, String> {
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
     pub worker_count: usize,
+    /// Сколько стратегий держать загруженными в одном процессе nfqws2 (#68).
+    /// Не то же самое, что `worker_count`: это ёмкость плана, а `worker_count` —
+    /// сколько проб этого плана летит одновременно.
+    pub profiles_per_instance: usize,
     pub base_qnum: u16,
     pub nft_table: String,
     pub nfqws2_path: String,
@@ -53,6 +53,7 @@ impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             worker_count: 8,
+            profiles_per_instance: 1024,
             base_qnum: 200,
             nft_table: DEFAULT_NFT_TABLE.to_string(),
             nfqws2_path: detect_nfqws2_path("/opt/zapret2"),
@@ -61,6 +62,95 @@ impl Default for CoreConfig {
             zapret_base: "/opt/zapret2".to_string(),
             nfqws2_uid: detect_nobody_uid(),
             nfqws2_gid: detect_nobody_gid(),
+        }
+    }
+}
+
+/// Потолок числа профилей в одном плане: марка профиля — младшие биты под
+/// `PROFILE_MASK`, и индекс, приведённый к `u16`, на границе маски даёт ноль —
+/// то есть «марки нет» (см. `nfqws2::mark::ProfileMark`).
+pub const MAX_PROFILES_PER_INSTANCE: usize = crate::nfqws2::mark::PROFILE_MASK as usize;
+
+pub fn validate_parallelism(
+    worker_count: usize,
+    profiles_per_instance: usize,
+) -> Result<(), String> {
+    if worker_count == 0 {
+        return Err(
+            "--workers 0 (may have come from saved configuration, not just the flag): \
+             the probe semaphore will never hand out a permit, and the process will hang \
+             forever — AFTER the NFQUEUE rules are already in place"
+                .to_string(),
+        );
+    }
+    if profiles_per_instance == 0 {
+        return Err(
+            "--profiles-per-instance 0: a plan with no profiles cannot test anything".to_string(),
+        );
+    }
+    if profiles_per_instance > MAX_PROFILES_PER_INSTANCE {
+        return Err(format!(
+            "--profiles-per-instance {profiles_per_instance} exceeds the ceiling of \
+             {MAX_PROFILES_PER_INSTANCE}: the profile number does not fit in the mark"
+        ));
+    }
+    if worker_count > profiles_per_instance {
+        return Err(format!(
+            "--workers {worker_count} exceeds --profiles-per-instance {profiles_per_instance} \
+             (--workers may have come from saved configuration, not just the flag): \
+             the plan cannot serve that many probes at once. Fix: raise \
+             --profiles-per-instance to at least {worker_count} (ceiling {MAX_PROFILES_PER_INSTANCE}), \
+             or pass -w to reset the saved --workers value"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod parallelism_tests {
+    use super::validate_parallelism;
+
+    #[test]
+    fn workers_may_not_exceed_loaded_profiles() {
+        assert!(validate_parallelism(1024, 512).is_err());
+    }
+
+    #[test]
+    fn zero_workers_is_rejected() {
+        let err = validate_parallelism(0, 1024).expect_err("0 воркеров обязано быть ошибкой");
+        assert!(
+            err.contains("0"),
+            "сообщение должно называть нулевое значение: {err}"
+        );
+    }
+
+    #[test]
+    fn profiles_may_not_outgrow_the_mark() {
+        use super::MAX_PROFILES_PER_INSTANCE;
+        assert!(validate_parallelism(8, MAX_PROFILES_PER_INSTANCE).is_ok());
+        assert!(validate_parallelism(8, MAX_PROFILES_PER_INSTANCE + 1).is_err());
+        assert!(validate_parallelism(8, 0).is_err());
+    }
+
+    #[test]
+    fn defaults_are_consistent() {
+        let c = super::CoreConfig::default();
+        assert!(validate_parallelism(c.worker_count, c.profiles_per_instance).is_ok());
+        assert_eq!(c.profiles_per_instance, 1024);
+    }
+}
+
+impl CoreConfig {
+    /// Окружение для запуска движка.
+    pub fn nfqws2_env(&self) -> crate::nfqws2::plan::Env {
+        crate::nfqws2::plan::Env {
+            binary: self.nfqws2_path.clone().into(),
+            lua: vec![
+                format!("{}/lua/zapret-lib.lua", self.zapret_base).into(),
+                format!("{}/lua/zapret-antidpi.lua", self.zapret_base).into(),
+            ],
+            uid: self.nfqws2_uid,
+            gid: self.nfqws2_gid,
         }
     }
 }
@@ -296,6 +386,24 @@ mod tests {
         assert_eq!(DnsMode::Auto.to_string(), "auto");
         assert_eq!(DnsMode::System.to_string(), "system");
         assert_eq!(DnsMode::Doh.to_string(), "doh");
+    }
+
+    #[test]
+    fn env_carries_both_lua_scripts_and_the_binary() {
+        let config = CoreConfig::default();
+        let env = config.nfqws2_env();
+        assert_eq!(env.lua.len(), 2, "движку нужны обе библиотеки");
+        assert!(env.lua[0].to_string_lossy().ends_with("zapret-lib.lua"));
+        assert!(env.lua[1].to_string_lossy().ends_with("zapret-antidpi.lua"));
+        // binary — путь к самому бинарю, а не к каталогу zapret_base: если
+        // конверсия перепутает поля, здесь бы прошёл каталог вместо файла.
+        assert_eq!(
+            env.binary,
+            std::path::PathBuf::from(&config.nfqws2_path),
+            "env.binary обязан быть путём к бинарю nfqws2, а не к zapret_base"
+        );
+        assert_eq!(env.uid, config.nfqws2_uid);
+        assert_eq!(env.gid, config.nfqws2_gid);
     }
 }
 

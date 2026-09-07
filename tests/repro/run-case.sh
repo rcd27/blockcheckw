@@ -5,10 +5,16 @@
 #
 # триггер:
 #   none        дать доработать до конца (E1)
-#   table       SIGINT сразу как появилась наша таблица, до цепочек wp_* (E3)
-#   workers     SIGINT после того, как появились цепочки wp_* (E2)
+#   table       SIGINT сразу как появилась наша таблица, до правил диспетчеризации (E3)
+#   workers     SIGINT после того, как встали правила диспетчеризации — "queue num" (E2)
 #   double      как workers, но два SIGINT подряд (E4)
-#   sigterm     SIGTERM вместо SIGINT после появления цепочек wp_*
+#   sigterm     SIGTERM вместо SIGINT после того, как встали правила диспетчеризации
+#
+# ПОСЛЕ #68ч2: цепочек wp_*/wi_* и карт больше не существует — диспетчеризация
+# сводится к двум статическим правилам ("queue num N") в chains postnat/prenat
+# одной таблицы. Триггеры workers/double/sigterm ждут именно их появления, а
+# не отдельной цепочки на воркер (которой больше нет ни при каком числе
+# воркеров).
 #
 # Артефакты складывает в /app/target/repro66/<имя>/:
 #   before.nft / after.nft  нормализованные снимки fw4
@@ -85,18 +91,19 @@ case "$TRIGGER" in
         wait "$PID"; RC=$?
         ;;
     sigterm)
-        if wait_for 'nft list table inet blockcheckw | grep -q "chain wp_"' 600; then
-            echo "триггер: цепочки wp_* на месте, шлю SIGTERM" | tee -a "$OUT/verdict.txt"
+        if wait_for 'nft list table inet blockcheckw | grep -q "queue num"' 600; then
+            echo "триггер: правила диспетчеризации (queue num) на месте, шлю SIGTERM" | tee -a "$OUT/verdict.txt"
             TRIGGERED=да
             kill -TERM "$PID"
         else
-            echo "триггер НЕ сработал" | tee -a "$OUT/verdict.txt"
+            echo "триггер НЕ сработал: правила диспетчеризации не появились за 60с — \
+не молчим, но и не ждём до истечения всего скана" | tee -a "$OUT/verdict.txt"
         fi
         wait "$PID"; RC=$?
         ;;
     workers|double)
-        if wait_for 'nft list table inet blockcheckw | grep -q "chain wp_"' 600; then
-            echo "триггер: цепочки wp_* на месте, шлю SIGINT" | tee -a "$OUT/verdict.txt"
+        if wait_for 'nft list table inet blockcheckw | grep -q "queue num"' 600; then
+            echo "триггер: правила диспетчеризации (queue num) на месте, шлю SIGINT" | tee -a "$OUT/verdict.txt"
             TRIGGERED=да
             kill -INT "$PID"
             if [ "$TRIGGER" = double ]; then
@@ -105,7 +112,8 @@ case "$TRIGGER" in
                 kill -INT "$PID" 2>/dev/null || true
             fi
         else
-            echo "триггер НЕ сработал: цепочки wp_* не появились" | tee -a "$OUT/verdict.txt"
+            echo "триггер НЕ сработал: правила диспетчеризации не появились за 60с — \
+не молчим, но и не ждём до истечения всего скана" | tee -a "$OUT/verdict.txt"
         fi
         wait "$PID"; RC=$?
         ;;

@@ -5,11 +5,17 @@ pub enum BlockcheckError {
     #[error("nftables command failed: {command}\nstderr: {stderr}")]
     Nftables { command: String, stderr: String },
 
-    #[error("cannot parse nft rule handle from output: {output}")]
-    NftHandleParse { output: String },
-
     #[error("nfqws2 start failed: {reason}")]
     Nfqws2Start { reason: String },
+
+    #[error(
+        "queue {queue} is already in use by another process: find and stop it \
+         (check `cat /proc/net/netfilter/nfnetlink_queue`)"
+    )]
+    Nfqws2QueueBusy { queue: u16 },
+
+    #[error("nfqws2 is incompatible with this build of blockcheckw: {reason}")]
+    Nfqws2Incompatible { reason: String },
 
     #[error("nfqws2 crashed during test")]
     Nfqws2Crashed,
@@ -31,6 +37,32 @@ pub enum BlockcheckError {
 
     #[error("HTTP client build failed: {reason}")]
     HttpClientBuild { reason: String },
+
+    #[error(
+        "readiness witness was issued for queue {witnessed}, but rules target queue {requested}"
+    )]
+    QueueWitnessMismatch { witnessed: u16, requested: u16 },
+
+    #[error("invalid parallelism configuration: {reason}")]
+    InvalidConfig { reason: String },
+
+    #[error("probe task did not complete: {reason}")]
+    TaskJoin { reason: String },
+}
+
+impl From<crate::nfqws2::Error> for BlockcheckError {
+    fn from(e: crate::nfqws2::Error) -> Self {
+        use crate::nfqws2::Error as E;
+        match e {
+            E::QueueBusy { queue } => BlockcheckError::Nfqws2QueueBusy { queue },
+            E::NoFilterMark | E::LuaVersionMismatch { .. } => BlockcheckError::Nfqws2Incompatible {
+                reason: e.to_string(),
+            },
+            other => BlockcheckError::Nfqws2Start {
+                reason: other.to_string(),
+            },
+        }
+    }
 }
 
 #[derive(Debug)]

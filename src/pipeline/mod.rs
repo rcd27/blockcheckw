@@ -3,6 +3,7 @@ pub mod benchmark;
 pub mod check;
 pub mod fate;
 pub mod observe;
+pub mod reference;
 pub mod report;
 pub mod runner;
 pub mod scan_report;

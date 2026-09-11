@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use console::style;
 
-use blockcheckw::config::{CoreConfig, DnsMode};
+use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
 use blockcheckw::network::{dns, isp, via::Via};
-use blockcheckw::pipeline::check;
+use blockcheckw::pipeline::{check, reference};
 use blockcheckw::strategy::{generator, rank};
 use blockcheckw::ui;
 
@@ -19,6 +19,7 @@ pub struct CheckParams<'a> {
     pub passes: usize,
     pub output: Option<&'a str>,
     pub via: Option<&'a Via>,
+    pub reference_via: Option<&'a Via>,
     pub prereq: &'a super::Prerequisites,
 }
 
@@ -39,6 +40,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         passes,
         output,
         via,
+        reference_via,
         prereq,
     } = params;
     let config = Arc::new(CoreConfig {
@@ -105,6 +107,19 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
             std::process::exit(1);
         }
     };
+
+    // Эталон: две пробы через чистый egress, ПОСЛЕ резолва DNS и ДО подъёма движка —
+    // движок не должен работать вхолостую, пока мы ходим за эталоном.
+    if let Some(clean) = reference_via {
+        let taken =
+            reference::take_reference(clean, Protocol::HttpsTls12, domain, &ips, timeout, 2).await;
+        match &taken {
+            Some(_) => screen.add_info_line("  эталон снят через чистый egress"),
+            None => screen.add_info_line(
+                "  эталон НЕ снят: Good объявлен не будет, круг судеб останется широким",
+            ),
+        }
+    }
 
     // Remote gateway route setup
     if let Some(v) = via {

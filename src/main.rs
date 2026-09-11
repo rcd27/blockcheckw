@@ -144,6 +144,11 @@ enum Command {
         #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..=100))]
         passes: u16,
 
+        /// Чистый egress для снятия эталона ответа. Без него `Good` объявить нельзя —
+        /// «байты текут» и «ресурс тот самый» неразличимы (см. Fate::Mirage).
+        #[arg(long, value_name = "ENDPOINT")]
+        reference_via: Option<String>,
+
         /// Save JSON report to file (default: stdout)
         #[arg(short, long)]
         output: Option<String>,
@@ -346,6 +351,23 @@ async fn main() {
         })
     });
 
+    // --via и --reference-via несовместимы: весь прогон уже идёт через шлюз (--via),
+    // и «чистый egress» через второй шлюз ничего не доказывает, а маршруты подерутся.
+    // Проверяем до всякой работы — раньше require_root() и прочих побочных эффектов.
+    if via.is_some() {
+        if let Some(Command::Check {
+            reference_via: Some(_),
+            ..
+        }) = &cli.command
+        {
+            eprintln!(
+                "ERROR: --via и --reference-via несовместимы: весь прогон уже идёт через \
+                 шлюз, эталон через второй шлюз ничего не доказывает"
+            );
+            std::process::exit(1);
+        }
+    }
+
     blockcheckw::system::elevate::require_root();
     blockcheckw::system::elevate::raise_nofile_limit();
 
@@ -466,6 +488,7 @@ async fn main() {
                 timeout,
                 take,
                 passes,
+                reference_via,
                 output,
             }) => {
                 let sub = matches
@@ -507,6 +530,13 @@ async fn main() {
                     }
                 };
 
+                let reference_via = reference_via.map(|raw| {
+                    blockcheckw::network::via::Via::parse(&raw).unwrap_or_else(|e| {
+                        eprintln!("ERROR: --reference-via: {e}");
+                        std::process::exit(1);
+                    })
+                });
+
                 cmd::check::run_check_cmd(cmd::check::CheckParams {
                     domain: &eff_domain,
                     from_file: &source,
@@ -516,6 +546,7 @@ async fn main() {
                     passes: passes as usize,
                     output: output.as_deref(),
                     via: via.as_ref(),
+                    reference_via: reference_via.as_ref(),
                     prereq: prereq
                         .as_ref()
                         .expect("check requires prerequisites (skipped only for `status`)"),

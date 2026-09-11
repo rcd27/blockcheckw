@@ -182,7 +182,7 @@ blockcheckw -w 256 scan -d rr3---sn-x.googlevideo.com --alive-via socks5://127.0
 Без `--alive-via` прямой SYN-дроп остаётся `ip_blocked`; с ним уточняется в
 `syn_blocked` (хост жив через прокси) либо `host_dead`.
 
-Pipe в check (scan → проверка с data transfer):
+Pipe в check (scan → проверка двумя пробами, байтовой и подлинности):
 
 ```bash
 blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --take 10
@@ -239,6 +239,21 @@ blockcheckw -w 256 scan -d rutracker.org | blockcheckw check -d rutracker.org --
 # Из файла:
 blockcheckw check --from-file 2026-03-22_18-02_report_vanilla.txt -d rutracker.org
 ```
+
+**Как читать отчёт (поля строки):**
+
+| поле                        | что означает                                                                             |
+|------------------------------|-------------------------------------------------------------------------------------------|
+| `passes_ok`/`passes_total`  | частота полной доставки байтовой оси: сколько из `M` попыток дошли целиком                |
+| `median_share`              | медиана доли `вытянуто/эталон` по тем же `M` попыткам; `null` без `--reference-via`        |
+| `working`                   | рабочая ли строка: подлинность не опровергнута И `passes_ok == passes_total == M`          |
+| `observed`                  | что установила проба подлинности; `"Unobserved"` — недосмотр check, а не приговор домену   |
+| `admits`                    | круг судеб: `Good` / `Grinding` / `Mirage` / `Trap` / `Dead` (может остаться шире одного)   |
+| `inconclusive`              | контроль без десинка сам прошёл — домен на этой линии не режется, о стратегиях прогон молчит |
+
+`2/3` в `passes_ok`/`passes_total` — не то же самое, что `3/3`: обе строки попадают в
+отчёт, `working` разводит их порознь, а решать, доверять ли частичной доставке, остаётся
+человеку (подробности и живой замер — [README](../README.md#две-оси-прошёл-ли-канал-и-подлинный-ли-ресурс)).
 
 **Как работает check:**
 

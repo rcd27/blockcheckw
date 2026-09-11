@@ -26,7 +26,7 @@ pub struct CheckParams<'a> {
 #[tracing::instrument(
     name = "bcw.check",
     skip(params),
-    fields(domain = %params.domain, take = params.take, passes = params.passes, working = tracing::field::Empty)
+    fields(domain = %params.domain, take = params.take, working = tracing::field::Empty)
 )]
 pub async fn run_check_cmd(params: CheckParams<'_>) {
     // Привязка к trace'у демона — единым стежком на bcw.root в main.rs. bcw.check

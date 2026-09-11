@@ -9,6 +9,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "process", "time", "sign
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+# СЛОВАРЬ СУДЬБЫ И ПАРК ПРИБОРОВ. Зависит только от `reflex-core`: ни nfq, ни conntrack,
+# ни Linux, ни C-библиотек — берётся на всех девяти целях. `ring` у core `optional` (за
+# QUIC) и НЕ включается: он единственный с ассемблером и убил бы mips64/riscv64.
+# Пин на ревизию, не на ветку: воспроизводимость сборки важнее свежести (ср. zapret2).
+reflex-instrument = { git = "https://github.com/rcd27/reflex", rev = "a2ee7e9" }
+reflex-core = { git = "https://github.com/rcd27/reflex", rev = "a2ee7e9" }
 tokio-rustls = "0.26"
 rustls = "0.23"
 webpki-roots = "1"

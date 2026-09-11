@@ -7,12 +7,13 @@ use crate::config::{CoreConfig, Protocol};
 use crate::dto::{CheckReport, CheckedStrategy, ControlVerdict, VerifiedStrategy};
 use crate::firewall::nft::{OwnedTable, SystemNft};
 use crate::firewall::nftables;
-use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, HttpResult};
+use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, Ended, HttpResult};
 use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
 use crate::nfqws2::run::SystemNfqws2;
-use crate::pipeline::fate::{self, Admits, Observed, ALL_FATES};
+use crate::pipeline::fate::{self, Admits, Fate, Observed, ALL_FATES};
 use crate::pipeline::observe;
-use crate::pipeline::reference::{ContentPrint, Reference};
+use crate::pipeline::reference::{agrees, ContentPrint, Reference};
+use crate::pipeline::verify::{self, Outcome};
 use crate::strategy::generator::TaggedStrategy;
 use crate::strategy::rank;
 use crate::ui;
@@ -20,23 +21,22 @@ use crate::ui;
 /// Прогнать стратегии из vanilla-отчёта с настоящей передачей данных и СУДИТЬ СУДЬБУ
 /// цели по каждой.
 ///
-/// В отчёт идёт всякая НАБЛЮДЁННАЯ стратегия — та, чей круг судеб уже полного, — а не
-/// только прошедшая. Порядок выдачи задаёт `rank::fate_order`. `--take N` считает только
-/// ПРОШЕДШИЕ (`fate::passed`): он останавливает ПОИСК, а не урезает выдачу, и когда не
-/// прошёл никто, список всё равно выдаётся ранжированным, а не пустым (спека §6.2).
+/// Спека §6-тер: ДВЕ пробы, две работы. Байтовая ось (главная) идёт по `probe_path` и
+/// повторяется `passes` (`M`) раз — из неё растут частота полной доставки и медиана
+/// доли `вытянуто/эталон`. Ось подлинности идёт по `identity_path` ОДИН раз — только
+/// она может сузить круг судеб до `[Fate::Mirage]`. Обе пробы судятся ОДНОЙ мерой у
+/// контроля (без десинка) и у каждой стратегии — `measure_channel` ниже.
 ///
-/// `passes` жёстко равен единице у единственного вызывающего: повторять сужение круга
-/// судеб нечем (спека §9). Параметр сохранён — цикл проходов и ранний выход на первом
-/// провале ждут возврата повторов.
+/// В отчёт идёт всякая НАБЛЮДЁННАЯ стратегия — та, чей круг судеб (ось подлинности) уже
+/// полного, — а не только прошедшая. Порядок выдачи задаёт `rank::fate_order`: частота
+/// полной доставки, медиана доли, ступень круга, простота (спека §6-тер). `--take N`
+/// считает только ПРОШЕДШИЕ (`working`): он останавливает ПОИСК, а не урезает выдачу, и
+/// когда не прошёл никто, список всё равно выдаётся ранжированным, а не пустым.
 ///
-/// ГЛАВНЫЙ вердикт (`working`) выносит `fate::passed`, а НЕ круг судеб (спека §6-бис):
-/// «провёл ли десинк нас через DPI» и «подлинный ли ресурс вернулся» — два разных
-/// вопроса, и неустановленная подлинность первого не отменяет. Круг остаётся честным и
-/// едет в отчёт рядом.
-///
-/// `probe_path` — путь пробы. Тем же путём снят эталон: сверка по разным путям сравнила
-/// бы разные ресурсы.
-#[allow(clippy::too_many_arguments)] // witness добавлен задачей 7 поверх уже широкого набора параметров
+/// `passes` больше не сокращается первым провалом (решение 3 спеки §6-тер): частота
+/// требует всех `M` измерений, иначе `2/3` неотличимо от `0/3`. `M = 0` — честный исход
+/// «не наблюдали», а не паника (`all_passes_succeeded`).
+#[allow(clippy::too_many_arguments)] // две оси и их эталоны добавлены спекой §6-тер поверх уже широкого набора
 pub async fn run_check(
     config: &CoreConfig,
     witness: &FilterMark,
@@ -45,8 +45,10 @@ pub async fn run_check(
     ips: &[String],
     take: usize,
     passes: usize,
-    reference: Option<&Reference>,
+    byte_reference: Option<&Reference>,
+    identity_reference: Option<&Reference>,
     probe_path: &str,
+    identity_path: &str,
     screen: &mut ui::Console,
 ) -> CheckReport {
     let start = Instant::now();
@@ -73,38 +75,31 @@ pub async fn run_check(
 
     // КОНТРОЛЬ. `fwmark = 0` не совпадает с правилом диспетчеризации, и проба идёт мимо
     // движка: это и есть «а что будет без десинка вообще». Без него всякое «работает»
-    // ниже может оказаться свойством линии, а не стратегии.
+    // ниже может оказаться свойством линии, а не стратегии. Судится ТОЙ ЖЕ мерой, что и
+    // стратегии (спека §6-бис/6-тер) — иначе на линии без эталона контроль никогда не
+    // «проходит», и `inconclusive` не срабатывает, сколько бы домен ни открывался без
+    // десинка. Контроль не кандидат: в гистограмму устойчивости (`stability_of`) не идёт.
     let control_ip = pick_random_ip(ips).expect("ips проверены вызывающим");
-    let control_result = http_test_data(
+    let control_reading = measure_channel(
         Protocol::HttpsTls12,
         domain,
         control_ip,
         0,
         config.request_timeout,
-        BodyMode::Unlimited,
-        None,
         probe_path,
+        identity_path,
+        passes,
+        byte_reference,
+        identity_reference,
+        None,
     )
     .await;
-    let control_observed = fate::observe(
-        observe::connected_of(control_result.cause),
-        observe::delivery_of(
-            control_result.size_download.unwrap_or(0),
-            control_result.ended,
-        ),
-    );
-    let control_admits = fate::narrow(fate::Evidence {
-        observed: control_observed,
-        sag: observe::sag_of(&control_result.windows),
-        attempts: 1,
-        reference,
-        print: crate::pipeline::reference::ContentPrint::of(&control_result),
-    });
-    // Замер ни о чём: цель открывается и без нас. Контроль судится ТОЙ ЖЕ мерой, что и
-    // стратегии (спека §6-бис) — иначе на линии без эталона круг контроля до `[Good]` не
-    // сужается никогда, и `inconclusive` не срабатывает ни разу, сколько бы домен ни
-    // открывался без десинка.
-    let inconclusive = fate::passed(control_observed, control_result.ended, control_admits);
+    let control_ok = control_reading
+        .byte_passes
+        .iter()
+        .filter(|p| p.full_delivery)
+        .count();
+    let inconclusive = all_passes_succeeded(control_ok, control_reading.byte_passes.len(), passes);
 
     if inconclusive {
         screen.println(&format!(
@@ -115,14 +110,19 @@ pub async fn run_check(
     }
 
     let control = Some(ControlVerdict {
-        observed: control_observed.name().to_string(),
-        admits: control_admits.0.iter().map(|f| format!("{f:?}")).collect(),
+        observed: control_reading.identity_observed.name().to_string(),
+        admits: control_reading
+            .identity_circle
+            .0
+            .iter()
+            .map(|f| format!("{f:?}"))
+            .collect(),
     });
 
     screen.println(&format!(
         "  {}",
         style(format!(
-            "Verifying {} strategies ({passes} passes, early-exit on first fail)",
+            "Verifying {} strategies ({passes} passes on {probe_path}, identity via {identity_path})",
             strategies.len()
         ))
         .bold()
@@ -136,12 +136,16 @@ pub async fn run_check(
     // где `verified.push`, иначе `zip` ниже разъедется.
     let mut judged: Vec<rank::Ranked> = Vec::new();
     let mut checked_count: usize = 0;
-    // Сколько строк ПРОШЛО (`fate::passed`) — это и есть `working` отчёта, а вовсе не
-    // длина списка.
+    // Сколько строк ПРОШЛО (`working`) — это и есть `working` отчёта, а вовсе не длина
+    // списка.
     let mut working_count: usize = 0;
-    // --take: count strategies that PASSED (`fate::passed`), per protocol
+    // --take: count strategies that PASSED (`working`), per protocol
     let mut perfect_per_proto: std::collections::HashMap<Protocol, usize> =
         std::collections::HashMap::new();
+    // Раскладка корпуса по устойчивости (решение 7 спеки §6-тер): строка на стратегию,
+    // исход на каждый из `M` проходов байтовой оси. `stability_of`/`report_stability`
+    // были сохранены ровно для этого, когда их вызов сняли при `passes == 1`.
+    let mut rows: Vec<Vec<Outcome>> = Vec::new();
 
     for (idx, tagged) in strategies.iter().enumerate() {
         // Skip this protocol if we already have enough perfect strategies
@@ -169,20 +173,6 @@ pub async fn run_check(
 
         checked_count += 1;
 
-        // Run passes with early-exit: if first pass fails, skip remaining
-        let mut ok_count: usize = 0;
-        let mut total_run: usize = 0;
-        let mut speeds: Vec<f64> = Vec::with_capacity(passes);
-        let mut latencies: Vec<u64> = Vec::with_capacity(passes);
-        let mut last_error: Option<String> = None;
-        // Круг ПОСЛЕДНЕГО прохода, каким бы он ни был. Прежде он переписывался только
-        // в ветке `checked.working`, и оттого у всякой строки в `judged` стоял круг
-        // `[Good]`: ступени 1–6 в `rank::step` были в бою недостижимы.
-        let mut last_circle: Admits = Admits(&ALL_FATES);
-        // Само последнее наблюдение — из него растёт строка отчёта: судьба, имя
-        // показания, замеры. Без него в отчёт попадали только `Good`.
-        let mut last_checked: Option<CheckedStrategy> = None;
-
         // Span на проверку конкретной стратегии (ребёнок bcw.check). Здесь живёт
         // причина FAIL (connect/timeout) — то, ради чего трейсинг и затевался.
         let strategy_span = info_span!(
@@ -192,117 +182,85 @@ pub async fn run_check(
             status = tracing::field::Empty,
             reason = tracing::field::Empty,
         );
-        async {
-            for pass_idx in 0..passes {
-                let started = crate::pipeline::verify::now_epoch();
-                let checked = check_single_strategy(
-                    config, witness, &table, domain, tagged, ips,
-                    // `check` пока не делает повторов внутри одной пробы — они появятся
-                    // вместе с многопрофильным прогоном (вне этого плана).
-                    1, reference, probe_path,
-                )
-                .await;
-                total_run = pass_idx + 1;
-
-                let outcome = match checked.working {
-                    true => crate::pipeline::verify::Outcome::Passed,
-                    false => crate::pipeline::verify::Outcome::Failed(
-                        checked
-                            .failure
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string()),
-                    ),
-                };
-                crate::pipeline::verify::log_pass(started, checked_count, pass_idx + 1, &outcome);
-
-                last_circle = checked.circle;
-                let working = checked.working;
-                if working {
-                    ok_count += 1;
-                    speeds.push(checked.speed_kbps);
-                    latencies.push(checked.latency_ms);
-                } else {
-                    last_error = checked.error.clone();
-                }
-                last_checked = Some(checked);
-                if !working {
-                    // Early-exit: first fail → no more passes for this strategy
-                    break;
-                }
-            }
+        let (checked, outcomes) = async {
+            check_single_strategy(
+                config,
+                witness,
+                &table,
+                domain,
+                tagged,
+                ips,
+                passes,
+                byte_reference,
+                identity_reference,
+                probe_path,
+                identity_path,
+                checked_count,
+            )
+            .await
         }
         .instrument(strategy_span.clone())
         .await;
 
-        speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        latencies.sort();
-        // Медиана по УСПЕШНЫМ проходам; их может не быть вовсе — наблюдённая, но не
-        // приведшая к `Good` стратегия тоже идёт в отчёт, и замер у неё свой.
-        let median_speed = speeds.get(speeds.len() / 2).copied();
-        let median_latency = latencies.get(latencies.len() / 2).copied();
+        rows.push(outcomes);
 
-        let good = all_passes_succeeded(ok_count, total_run, passes);
-        if good {
+        if checked.working {
             strategy_span.record("status", "working");
             screen.println(&format!(
-                "    {} median {}ms, {:.1} KB/s",
+                "    {} {}/{} full delivery, median {}ms, share {}",
                 style("OK").green().bold(),
-                median_latency.unwrap_or(0),
-                median_speed.unwrap_or(0.0),
+                checked.passes_ok,
+                checked.passes_total,
+                checked.latency_ms,
+                checked
+                    .median_share
+                    .map(|s| format!("{s:.2}"))
+                    .unwrap_or_else(|| "—".to_string()),
             ));
             *perfect_per_proto.entry(tagged.protocol).or_insert(0) += 1;
             working_count += 1;
         } else {
-            let reason = last_error.as_deref().unwrap_or("failed");
+            let reason = checked.error.as_deref().unwrap_or("failed");
             strategy_span.record("status", "fail");
             strategy_span.record("reason", reason);
             screen.println(&format!(
-                "    {} {}/{} {} [{}]",
+                "    {} {}/{} full delivery {} [{}]",
                 style("FAIL").red().bold(),
-                ok_count,
-                total_run,
+                checked.passes_ok,
+                checked.passes_total,
                 style(reason).red(),
-                style(circle_name(last_circle)).dim(),
+                style(circle_name(checked.circle)).dim(),
             ));
         }
 
-        // Критерий попадания в отчёт — стратегия была НАБЛЮДЕНА, а не «работает».
-        // Спека §6.2: `Grinding` (и всё прочее суженное) выдаётся, когда `Good` нет ни
-        // у кого, — человек видит лучшее из имеющегося ВМЕСТО ПУСТОГО СПИСКА. Прежде в
-        // `verified` пускали только `working`, и без `--reference-via` круг не сужался
-        // до `[Good]` ни у кого: отчёт был всегда пуст.
-        if let Some(checked) = last_checked.filter(|c| observed_at_all(c.circle)) {
-            // Прибор, а не голая длительность: `waited_of` молчит (`None`) на нулевом
-            // ожидании — «не мерили», а не «мерили и вышел ноль». Подставить 0 значило
-            // бы объявить неизмеренное лучшим из всех: в ранге меньше — значит быстрее
-            // (`rank::fate_order`). Кладём наибольшее возможное значение, чтобы
-            // неизмеренное никогда не обошло измеренное внутри одной ступени круга.
-            let latency_ms = median_latency.unwrap_or(checked.latency_ms);
-            let waited_ms = match observe::waited_of(std::time::Duration::from_millis(latency_ms)) {
-                Some(waited) => waited.0.as_millis() as u64,
-                None => u64::MAX,
-            };
+        // Критерий попадания в отчёт — стратегия была НАБЛЮДЕНА (ось подлинности), а не
+        // «работает». Спека §6.2: `Grinding` (и всё прочее суженное) выдаётся, когда
+        // `Good` нет ни у кого, — человек видит лучшее из имеющегося ВМЕСТО ПУСТОГО
+        // СПИСКА.
+        if observed_at_all(checked.circle) {
             verified.push(VerifiedStrategy {
                 protocol: tagged.protocol.to_string(),
                 args: args_str.clone(),
                 coverage: tagged.coverage,
-                success_rate: match total_run {
+                success_rate: match checked.passes_total {
                     0 => 0.0,
-                    run => ok_count as f64 / run as f64,
+                    total => checked.passes_ok as f64 / total as f64,
                 },
-                median_latency_ms: latency_ms,
-                median_speed_kbps: median_speed.unwrap_or(checked.speed_kbps),
-                passes_ok: ok_count,
-                passes_total: passes,
+                median_latency_ms: checked.latency_ms,
+                median_speed_kbps: checked.speed_kbps,
+                passes_ok: checked.passes_ok,
+                passes_total: checked.passes_total,
+                median_share: checked.median_share,
                 observed: checked.observed.clone(),
                 admits: checked.admits.clone(),
                 working: checked.working,
             });
             judged.push(rank::Ranked {
+                full_delivery: (checked.passes_ok, checked.passes_total),
+                median_share: checked.median_share,
                 // Круг едет в `CheckedStrategy.circle` значением — строки из `admits`
                 // для сортировки не годятся.
-                admits: last_circle,
-                waited_ms,
+                admits: checked.circle,
                 simplicity: rank::simplicity_key(&args_str),
             });
         }
@@ -325,11 +283,11 @@ pub async fn run_check(
         }
     }
 
-    // Замер устойчивости снят: `passes` жёстко равен единице, значит всякая строка в
-    // `stability_of` либо `always`, либо `never`, а `flapping` не может быть ненулевым
-    // никогда. Печатать «0 флапают» как РЕЗУЛЬТАТ замера значит рапортовать о том, чего
-    // не делали. Сами функции в `verify.rs` остались — они понадобятся, когда вернутся
-    // повторы.
+    // Раскладка корпуса по устойчивости — решение 7 спеки §6-тер: `M` проходов теперь
+    // измеряет частоту, а не голосует, и `stability_of` наконец видит флапающих, а не
+    // только «всегда»/«никогда».
+    let stability = verify::stability_of(&rows, passes);
+    verify::report_stability(&stability, domain, screen);
 
     // Порядок обхода был по простоте — это разумно для ПРОБ. Порядок ВЫДАЧИ задаёт
     // измеренное: до этой строки ранг не знал ни одного факта о канале.
@@ -356,8 +314,204 @@ pub async fn run_check(
     }
 }
 
-/// Check one strategy: nfqws2 → nftables → GET → measure → cleanup.
-#[allow(clippy::too_many_arguments)] // attempts/reference добавлены задачей 6 поверх уже широкого набора параметров
+/// Итог одной пробы байтовой оси (`--probe-path`, одна из `M`).
+struct BytePassReading {
+    bytes: u64,
+    latency_ms: u64,
+    /// `fate::passed(observed, ended, identity_circle) И agrees(byte_reference, print)`
+    /// — «полная доставка», решение 6 спеки §6-тер: `passed` про связность и про
+    /// подлинность (не `[Mirage]`), `agrees` про объём.
+    full_delivery: bool,
+    /// `None` — эталона объёма нет, доли не существует (решение 2 спеки §6-тер).
+    share: Option<f64>,
+    /// Короткое имя причины (для гистограммы `BCW_CAUSE_HISTOGRAM`). `None` при
+    /// полной доставке.
+    reason: Option<String>,
+    /// Человекочитаемое сообщение для экрана. `None` при полной доставке.
+    message: Option<String>,
+}
+
+/// Итог одной «беседы» через канал: ось подлинности (один раз, `--identity-path`) плюс
+/// `M` проб байтовой оси (`--probe-path`). Контроль (без десинка) и стратегия судятся
+/// этой же структурой, собранной одной и той же функцией (`measure_channel`) — иначе они
+/// мерятся разными мерами (спека §6-бис).
+struct ChannelReading {
+    identity_observed: Observed,
+    /// Только эта проба может сузить круг до `[Fate::Mirage]` (спека §6-тер).
+    identity_circle: Admits,
+    byte_passes: Vec<BytePassReading>,
+}
+
+/// Короткое имя причины отказа связности — с провода, где оно есть, иначе по тому, что
+/// увидел `interpret_check_result` сверху. Чистая функция: `Cause` строится без сети.
+fn connectivity_cause_name(
+    cause: Option<crate::network::cause::Cause>,
+    named: Option<&str>,
+) -> String {
+    match (cause, named) {
+        (Some(c), _) => c.name(),
+        (None, Some(name)) => name.to_string(),
+        (None, None) => "unknown".to_string(),
+    }
+}
+
+/// Почему проход байтовой оси не засчитан полной доставкой. Порядок — от более
+/// фундаментального факта к менее: сперва не встал ли разговор вообще (связность),
+/// потом не разошёлся ли ОБЪЁМ с эталоном, и только потом — не опровергла ли ПОДЛИННОСТЬ
+/// (ось `--identity-path`) весь круг разом. Три причины различны и не должны схлопнуться
+/// в одно «failed»: сеть, содержимое и личность ресурса — разные болезни разного лечения.
+fn byte_pass_reason(
+    connectivity_ok: bool,
+    agreed: bool,
+    identity_circle: Admits,
+    cause_name: Option<String>,
+) -> String {
+    if !connectivity_ok {
+        return cause_name.unwrap_or_else(|| "unknown".to_string());
+    }
+    if !agreed {
+        return "content_diverged_from_reference".to_string();
+    }
+    if matches!(identity_circle.0, [Fate::Mirage]) {
+        return "identity_mirage".to_string();
+    }
+    "unknown".to_string()
+}
+
+/// Медиана доли `вытянуто/эталон` по `M` проходам байтовой оси. `None`, если хоть один
+/// проход не имеет доли (эталона объёма не было вовсе — решение 2 спеки §6-тер: доли
+/// нет ни у одного прохода, либо у всех, поскольку эталон общий на весь прогон) или
+/// проходов не было.
+fn median_share_of(shares: &[Option<f64>]) -> Option<f64> {
+    if shares.is_empty() || shares.iter().any(Option::is_none) {
+        return None;
+    }
+    let values: Vec<f64> = shares
+        .iter()
+        .map(|s| s.expect("checked all Some above"))
+        .collect();
+    Some(crate::pipeline::reference::median(&values))
+}
+
+/// Пройти ОБЕ пробы спеки §6-тер по уже установленному пути: ось подлинности один раз
+/// (`identity_path`), байтовую ось `passes` раз (`probe_path`), БЕЗ раннего выхода на
+/// первом провале (решение 3: частота требует всех `M` измерений). `mark = 0` — контроль
+/// без десинка; иначе — метка профиля стратегии. `log_index` — позиция стратегии в
+/// прогоне для журнала (`BCW_CAUSE_HISTOGRAM`); `None` у контроля — он не кандидат.
+#[allow(clippy::too_many_arguments)] // спека §6-тер: две пробы, два эталона, два пути
+async fn measure_channel(
+    protocol: Protocol,
+    domain: &str,
+    ip: &str,
+    mark: u32,
+    timeout: u64,
+    probe_path: &str,
+    identity_path: &str,
+    passes: usize,
+    byte_reference: Option<&Reference>,
+    identity_reference: Option<&Reference>,
+    log_index: Option<usize>,
+) -> ChannelReading {
+    // Ось подлинности: один раз, детерминированный путь. Только она сужает до `Mirage`.
+    let identity_result = http_test_data(
+        protocol,
+        domain,
+        ip,
+        mark,
+        timeout,
+        BodyMode::Unlimited,
+        None,
+        identity_path,
+    )
+    .await;
+    let identity_bytes = identity_result.size_download.unwrap_or(0);
+    let identity_observed = fate::observe(
+        observe::connected_of(identity_result.cause),
+        observe::delivery_of(identity_bytes, identity_result.ended),
+    );
+    let identity_circle = fate::narrow(fate::Evidence {
+        observed: identity_observed,
+        sag: observe::sag_of(&identity_result.windows),
+        attempts: 1,
+        reference: identity_reference,
+        print: ContentPrint::of(&identity_result),
+    });
+
+    // Байтовая ось: `M` проходов, ни один не пропущен первым провалом.
+    let mut byte_passes = Vec::with_capacity(passes);
+    for pass_idx in 0..passes {
+        let started_at = verify::now_epoch();
+        let pass_start = Instant::now();
+        let result = http_test_data(
+            protocol,
+            domain,
+            ip,
+            mark,
+            timeout,
+            BodyMode::Unlimited,
+            None,
+            probe_path,
+        )
+        .await;
+        let latency_ms = pass_start.elapsed().as_millis() as u64;
+        let bytes = result.size_download.unwrap_or(0);
+        let observed = fate::observe(
+            observe::connected_of(result.cause),
+            observe::delivery_of(bytes, result.ended),
+        );
+        let connectivity_ok = observed == Observed::Bytes && result.ended != Ended::BodyError;
+        let agreed = byte_reference
+            .map(|r| agrees(r, &ContentPrint::of(&result)))
+            .unwrap_or(false);
+        // «Проба засчитана, если passed И agrees» — решение 6 спеки §6-тер. `passed`
+        // читает круг ПОДЛИННОСТИ (`identity_circle`), а не круг этого прохода: только
+        // ось подлинности вправе сказать `Mirage`.
+        let full_delivery = fate::passed(observed, result.ended, identity_circle) && agreed;
+        let share = byte_reference.map(|r| r.share(bytes));
+
+        let (_permissive, message_from_interpret, named) = interpret_check_result(&result, domain);
+        let cause_name = (!connectivity_ok).then(|| connectivity_cause_name(result.cause, named));
+        let reason = (!full_delivery)
+            .then(|| byte_pass_reason(connectivity_ok, agreed, identity_circle, cause_name));
+        let message = if full_delivery {
+            None
+        } else if !connectivity_ok {
+            message_from_interpret
+        } else if !agreed {
+            Some(format!("объём {bytes} байт разошёлся с эталоном"))
+        } else {
+            Some("подлинность разошлась с эталоном (Mirage)".to_string())
+        };
+
+        if let Some(index) = log_index {
+            let outcome = match &reason {
+                None => Outcome::Passed,
+                Some(name) => Outcome::Failed(name.clone()),
+            };
+            verify::log_pass(started_at, index, pass_idx + 1, &outcome);
+        }
+
+        byte_passes.push(BytePassReading {
+            bytes,
+            latency_ms,
+            full_delivery,
+            share,
+            reason,
+            message,
+        });
+    }
+
+    ChannelReading {
+        identity_observed,
+        identity_circle,
+        byte_passes,
+    }
+}
+
+/// Check one strategy: nfqws2 → nftables → обе пробы (спека §6-тер) → cleanup.
+/// Возвращает строку отчёта и исходы `M` проходов байтовой оси — материал для
+/// `verify::stability_of` (решение 7 спеки §6-тер).
+#[allow(clippy::too_many_arguments)] // две оси и их эталоны добавлены спекой §6-тер поверх уже широкого набора
 async fn check_single_strategy(
     config: &CoreConfig,
     witness: &FilterMark,
@@ -365,27 +519,38 @@ async fn check_single_strategy(
     domain: &str,
     tagged: &TaggedStrategy,
     ips: &[String],
-    attempts: u32,
-    reference: Option<&Reference>,
+    passes: usize,
+    byte_reference: Option<&Reference>,
+    identity_reference: Option<&Reference>,
     probe_path: &str,
-) -> CheckedStrategy {
+    identity_path: &str,
+    log_index: usize,
+) -> (CheckedStrategy, Vec<Outcome>) {
     let protocol = tagged.protocol;
     let args_str = tagged.args.join(" ");
 
     // Движок не поднялся — значит мы не наблюдали ничего, и сужать не из чего.
     // Круг остаётся полным (то же самое, что `Observed::Unobserved.admits()`).
-    let make_failed = |error: String| CheckedStrategy {
-        failure: Some("engine_error".to_string()),
-        protocol: protocol.to_string(),
-        args: args_str.clone(),
-        working: false,
-        bytes_downloaded: 0,
-        latency_ms: 0,
-        speed_kbps: 0.0,
-        error: Some(error),
-        observed: Observed::Unobserved.name().to_string(),
-        admits: ALL_FATES.iter().map(|f| format!("{f:?}")).collect(),
-        circle: Admits(&ALL_FATES),
+    let make_failed = |error: String| {
+        (
+            CheckedStrategy {
+                failure: Some("engine_error".to_string()),
+                protocol: protocol.to_string(),
+                args: args_str.clone(),
+                working: false,
+                bytes_downloaded: 0,
+                latency_ms: 0,
+                speed_kbps: 0.0,
+                error: Some(error),
+                observed: Observed::Unobserved.name().to_string(),
+                admits: ALL_FATES.iter().map(|f| format!("{f:?}")).collect(),
+                circle: Admits(&ALL_FATES),
+                passes_ok: 0,
+                passes_total: 0,
+                median_share: None,
+            },
+            Vec::new(),
+        )
     };
 
     // 1. Собрать план из одного профиля и поднять движок
@@ -428,58 +593,98 @@ async fn check_single_strategy(
         return make_failed(format!("nftables: {e}"));
     }
 
-    // 4. HTTP GET with data transfer. `ips` гарантированно непусты:
-    // `apply_dispatch` выше уже прогнал `validate_ip_set`, отвергающий
-    // пустой список, и вернул `Ok` — значит, эта проверка не могла провалиться.
+    // 4. Обе пробы спеки §6-тер. `ips` гарантированно непусты: `apply_dispatch` выше уже
+    // прогнал `validate_ip_set`, отвергающий пустой список, и вернул `Ok`.
     let ip = pick_random_ip(ips).expect("apply_dispatch already validated ips is non-empty");
 
-    let test_start = Instant::now();
-    let result = http_test_data(
+    let reading = measure_channel(
         protocol,
         domain,
         ip,
         mark.so_mark(),
         config.request_timeout,
-        BodyMode::Unlimited,
-        None,
         probe_path,
+        identity_path,
+        passes,
+        byte_reference,
+        identity_reference,
+        Some(log_index),
     )
     .await;
-    let latency_ms = test_start.elapsed().as_millis() as u64;
 
     // 5. Cleanup: снять диспетчеризацию, затем убить nfqws2 (best-effort)
     nftables::remove_dispatch(&SystemNft, table).await;
     SystemNfqws2::stop(instance).await;
 
-    // 6. Показание и круг судеб. `interpret_check_result` остаётся поставщиком
-    //    диагностики (`Cause`, имя провала) — но вердикта больше не выносит:
-    //    «есть статус и тело не пусто» есть `Observed::Bytes`, а не «работает».
-    let (_permissive, error, named) = interpret_check_result(&result, domain);
-    let bytes_downloaded = result.size_download.unwrap_or(0);
+    // 6. Свести обе пробы в строку отчёта.
+    let outcomes: Vec<Outcome> = reading
+        .byte_passes
+        .iter()
+        .map(|p| match &p.reason {
+            None => Outcome::Passed,
+            Some(name) => Outcome::Failed(name.clone()),
+        })
+        .collect();
 
-    let observed = fate::observe(
-        observe::connected_of(result.cause),
-        observe::delivery_of(bytes_downloaded, result.ended),
-    );
-    let admits = fate::narrow(fate::Evidence {
-        observed,
-        sag: observe::sag_of(&result.windows),
-        attempts,
-        reference,
-        print: ContentPrint::of(&result),
-    });
-    // ГЛАВНАЯ ось, и она НЕ проекция круга (спека §6-бис): байты потекли, разговор не
-    // прервали, содержимое с эталоном не разошлось. Неустановленная подлинность — не
-    // свидетельство против.
-    let working = fate::passed(observed, result.ended, admits);
+    let passes_ok = reading
+        .byte_passes
+        .iter()
+        .filter(|p| p.full_delivery)
+        .count();
+    let passes_total = reading.byte_passes.len();
+    // `working` спеки §6-тер: подлинность не опровергнута И полная доставка КАЖДЫЙ раз
+    // из `M`. `identity_circle == [Mirage]` уже зашит в `full_delivery` каждого прохода
+    // через `fate::passed` (решение 6) — отдельной проверки здесь не нужно.
+    let working = all_passes_succeeded(passes_ok, passes_total, passes);
 
+    let shares: Vec<Option<f64>> = reading.byte_passes.iter().map(|p| p.share).collect();
+    let median_share = median_share_of(&shares);
+
+    let mut ok_bytes: Vec<u64> = reading
+        .byte_passes
+        .iter()
+        .filter(|p| p.full_delivery)
+        .map(|p| p.bytes)
+        .collect();
+    let mut ok_latency: Vec<u64> = reading
+        .byte_passes
+        .iter()
+        .filter(|p| p.full_delivery)
+        .map(|p| p.latency_ms)
+        .collect();
+    ok_bytes.sort_unstable();
+    ok_latency.sort_unstable();
+    // Медиана по ПОЛНОЙ ДОСТАВКЕ; её может не быть вовсе — наблюдённая, но не прошедшая
+    // стратегия тоже идёт в отчёт, и последний проход честнее нуля.
+    let bytes_downloaded = ok_bytes
+        .get(ok_bytes.len() / 2)
+        .copied()
+        .or_else(|| reading.byte_passes.last().map(|p| p.bytes))
+        .unwrap_or(0);
+    let latency_ms = ok_latency
+        .get(ok_latency.len() / 2)
+        .copied()
+        .or_else(|| reading.byte_passes.last().map(|p| p.latency_ms))
+        .unwrap_or(0);
     let speed_kbps = if working && latency_ms > 0 {
         (bytes_downloaded as f64 / 1024.0) / (latency_ms as f64 / 1000.0)
     } else {
         0.0
     };
 
-    CheckedStrategy {
+    let last_failed = reading.byte_passes.iter().rev().find(|p| !p.full_delivery);
+    let error = last_failed.and_then(|p| p.message.clone());
+    let failure = if working {
+        None
+    } else {
+        Some(
+            last_failed
+                .and_then(|p| p.reason.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+        )
+    };
+
+    let checked = CheckedStrategy {
         protocol: protocol.to_string(),
         args: args_str,
         working,
@@ -487,19 +692,21 @@ async fn check_single_strategy(
         latency_ms,
         speed_kbps,
         error,
-        // Имя провала — с провода, где он есть; иначе по тому, что видно сверху.
-        failure: match working {
-            true => None,
-            false => Some(match (result.cause, named) {
-                (Some(c), _) => c.name(),
-                (None, Some(name)) => name.to_string(),
-                (None, None) => "unknown".to_string(),
-            }),
-        },
-        observed: observed.name().to_string(),
-        admits: admits.0.iter().map(|f| format!("{f:?}")).collect(),
-        circle: admits,
-    }
+        failure,
+        observed: reading.identity_observed.name().to_string(),
+        admits: reading
+            .identity_circle
+            .0
+            .iter()
+            .map(|f| format!("{f:?}"))
+            .collect(),
+        circle: reading.identity_circle,
+        passes_ok,
+        passes_total,
+        median_share,
+    };
+
+    (checked, outcomes)
 }
 
 /// Check-specific interpretation of HTTP results.
@@ -601,8 +808,6 @@ fn all_passes_succeeded(ok_count: usize, total_run: usize, passes: usize) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::http_client::Ended;
-    use crate::pipeline::fate::Fate;
 
     #[test]
     fn passes_zero_does_not_masquerade_as_all_passes_ok() {
@@ -705,6 +910,7 @@ mod tests {
             median_speed_kbps: 147.2,
             passes_ok: 1,
             passes_total: 1,
+            median_share: Some(1.02),
             observed: "Bytes".to_string(),
             admits: vec!["Good".to_string()],
             working: true,
@@ -713,6 +919,7 @@ mod tests {
         assert!(json.contains("\"observed\":\"Bytes\""), "{json}");
         assert!(json.contains("\"admits\":[\"Good\"]"), "{json}");
         assert!(json.contains("\"working\":true"), "{json}");
+        assert!(json.contains("\"median_share\":1.02"), "{json}");
     }
 
     #[test]
@@ -729,6 +936,7 @@ mod tests {
             median_speed_kbps: 0.0,
             passes_ok: 0,
             passes_total: 1,
+            median_share: None,
             observed: "Bytes".to_string(),
             admits: vec!["Mirage".to_string()],
             working: false,
@@ -736,6 +944,10 @@ mod tests {
         let json = serde_json::to_string(&vs).unwrap();
         assert!(json.contains("\"admits\":[\"Mirage\"]"), "{json}");
         assert!(json.contains("\"working\":false"), "{json}");
+        assert!(
+            json.contains("\"median_share\":null"),
+            "нет эталона объёма — доли не существует, а не «ноль»: {json}"
+        );
     }
 
     #[test]
@@ -796,6 +1008,7 @@ mod tests {
             median_speed_kbps: 5.5,
             passes_ok: 3,
             passes_total: 3,
+            median_share: Some(1.0),
             observed: "Bytes".to_string(),
             admits: vec!["Good".to_string()],
             working: true,
@@ -825,6 +1038,7 @@ mod tests {
             median_speed_kbps: 2.5,
             passes_ok: 2,
             passes_total: 3,
+            median_share: Some(0.67),
             observed: "Bytes".to_string(),
             admits: vec!["Grinding".to_string()],
             working: false,
@@ -833,5 +1047,97 @@ mod tests {
         assert!(json.contains("\"success_rate\":0.67"));
         assert!(json.contains("\"median_speed_kbps\":2.5"));
         assert!(json.contains("\"passes_ok\":2"));
+    }
+
+    // ── Чистые функции байтовой оси (спека §6-тер): без сети ─────────────────
+
+    #[test]
+    fn полная_доставка_недостижима_без_эталона_объёма() {
+        // `byte_reference: None` → `agreed` всегда `false` в `measure_channel` — доля не
+        // существует, и «полной доставки» без эталона не бывает вовсе (решение 2).
+        // Здесь проверяется причина, которую видит пользователь в этом случае.
+        assert_eq!(
+            byte_pass_reason(true, false, Admits(&[Fate::Good]), None),
+            "content_diverged_from_reference"
+        );
+    }
+
+    #[test]
+    fn причина_связности_идёт_первой_даже_если_подлинность_тоже_против() {
+        // Порядок проверки byte_pass_reason: связность важнее содержимого важнее
+        // подлинности. Оборванная связность не смеет спрятаться за «Mirage».
+        let reason = byte_pass_reason(
+            false,
+            false,
+            Admits(&[Fate::Mirage]),
+            Some("reset/tls".to_string()),
+        );
+        assert_eq!(reason, "reset/tls");
+    }
+
+    #[test]
+    fn причина_mirage_только_когда_связность_и_объём_в_порядке() {
+        let reason = byte_pass_reason(true, true, Admits(&[Fate::Mirage]), None);
+        assert_eq!(reason, "identity_mirage");
+    }
+
+    #[test]
+    fn причина_объёма_идёт_раньше_подлинности() {
+        // Круг уже [Mirage], но объём САМ по себе разошёлся — сообщать надо про объём,
+        // а не молча свалить в «identity_mirage»: у пользователя разное лечение.
+        let reason = byte_pass_reason(true, false, Admits(&[Fate::Mirage]), None);
+        assert_eq!(reason, "content_diverged_from_reference");
+    }
+
+    #[test]
+    fn когда_всё_сошлось_причины_нет_но_функция_не_паникует() {
+        // Ветка недостижима из `measure_channel` (там `reason` считается только при
+        // `!full_delivery`), но `byte_pass_reason` — чистая функция без контракта на
+        // недостижимость, и обязана вести себя предсказуемо на любом входе.
+        assert_eq!(
+            byte_pass_reason(true, true, Admits(&[Fate::Good]), None),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn медиана_доли_молчит_когда_эталона_нет_вовсе() {
+        assert_eq!(median_share_of(&[None, None]), None);
+    }
+
+    #[test]
+    fn медиана_доли_молчит_на_пустом_ряде() {
+        assert_eq!(median_share_of(&[]), None);
+    }
+
+    #[test]
+    fn медиана_доли_молчит_если_хоть_один_проход_без_доли() {
+        // Эталон общий на весь прогон — либо есть у всех проходов, либо ни у одного.
+        // Смешение — брак вызывающего кода, и медиана обязана отказаться, а не соврать.
+        assert_eq!(median_share_of(&[Some(1.0), None, Some(0.9)]), None);
+    }
+
+    #[test]
+    fn медиана_доли_считает_честную_медиану() {
+        let median = median_share_of(&[Some(0.4), Some(1.0), Some(0.6)]).expect("все доли есть");
+        assert!((median - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn имя_причины_связности_берёт_причину_с_провода_прежде_вердикта_сверху() {
+        assert_eq!(
+            connectivity_cause_name(
+                Some(crate::network::cause::Cause::Reset(
+                    crate::network::cause::Phase::Tls
+                )),
+                Some("empty_body")
+            ),
+            "reset/tls"
+        );
+    }
+
+    #[test]
+    fn имя_причины_связности_падает_на_unknown_без_единой_улики() {
+        assert_eq!(connectivity_cause_name(None, None), "unknown");
     }
 }

@@ -16,12 +16,19 @@ pub struct CheckParams<'a> {
     pub dns_mode: DnsMode,
     pub timeout: u64,
     pub take: usize,
+    /// `M` — сколько раз мерить байтовую ось (спека §6-тер).
     pub passes: usize,
     pub output: Option<&'a str>,
     pub via: Option<&'a Via>,
+    /// Чистый egress для обоих эталонов: снимается дважды (по два прохода) для КАЖДОГО
+    /// из двух путей — `probe_path` и `identity_path` (решение 2 спеки §6-тер).
     pub reference_via: Option<&'a Via>,
-    /// Путь пробы (`--probe-path`). Тем же путём снимается эталон.
+    /// Путь байтовой оси (`--probe-path`). Главный вердикт: доля вытянутого от эталона
+    /// объёма, повторяется `passes` раз.
     pub probe_path: &'a str,
+    /// Путь оси подлинности (`--identity-path`). Побочный вердикт: точная сверка с
+    /// эталоном по этому пути, один раз. Только она может дать круг `[Fate::Mirage]`.
+    pub identity_path: &'a str,
     pub prereq: &'a super::Prerequisites,
 }
 
@@ -44,19 +51,14 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         via,
         reference_via,
         probe_path,
+        identity_path,
         prereq,
     } = params;
 
-    // Путь приводится к абсолютному один раз, здесь: дальше он едет и в пробу, и в
-    // эталон, и разойтись они не должны.
+    // Пути приводятся к абсолютным один раз, здесь: дальше они едут и в пробы, и в
+    // эталоны, и разойтись не должны.
     let probe_path = blockcheckw::network::http_client::normalize_probe_path(probe_path);
-
-    if passes != 1 {
-        eprintln!(
-            "предупреждение: --passes устарел и игнорируется. Вердикт больше не булев: \
-             check сужает круг судеб цели, и повтор к сужению ничего не добавляет."
-        );
-    }
+    let identity_path = blockcheckw::network::http_client::normalize_probe_path(identity_path);
 
     let config = Arc::new(CoreConfig {
         worker_count: 1,
@@ -120,11 +122,13 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         }
     };
 
-    // Эталон: две пробы через чистый egress, ПОСЛЕ резолва DNS и ДО подъёма движка —
-    // движок не должен работать вхолостую, пока мы ходим за эталоном.
-    let reference = match reference_via {
+    // Эталоны: по две пробы через чистый egress для КАЖДОГО пути (решение 2 спеки
+    // §6-тер), ПОСЛЕ резолва DNS и ДО подъёма движка — движок не должен работать
+    // вхолостую, пока мы ходим за эталонами. Отсутствие одного эталона не отменяет
+    // другого: без байтового эталона молчит доля, без эталона подлинности — `Mirage`.
+    let (byte_reference, identity_reference) = match reference_via {
         Some(clean) => {
-            let taken = reference::take_reference(
+            let byte_reference = reference::take_reference(
                 clean,
                 Protocol::HttpsTls12,
                 domain,
@@ -134,15 +138,30 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
                 &probe_path,
             )
             .await;
-            match &taken {
-                Some(_) => screen.add_info_line("  эталон снят через чистый egress"),
+            let identity_reference = reference::take_reference(
+                clean,
+                Protocol::HttpsTls12,
+                domain,
+                &ips,
+                timeout,
+                2,
+                &identity_path,
+            )
+            .await;
+            match &byte_reference {
+                Some(_) => screen.add_info_line("  эталон объёма снят через чистый egress"),
+                None => screen
+                    .add_info_line("  эталон объёма НЕ снят: доли не будет, working не утвердится"),
+            }
+            match &identity_reference {
+                Some(_) => screen.add_info_line("  эталон подлинности снят через чистый egress"),
                 None => screen.add_info_line(
-                    "  эталон НЕ снят: Good объявлен не будет, круг судеб останется широким",
+                    "  эталон подлинности НЕ снят: Mirage не проверяется, круг судеб останется широким",
                 ),
             }
-            taken
+            (byte_reference, identity_reference)
         }
-        None => None,
+        None => (None, None),
     };
 
     // Remote gateway route setup
@@ -169,7 +188,11 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
     // Run check
     screen.newline();
     screen.println(&ui::section("Checking strategies (data transfer)"));
-    screen.println(&format!("  путь пробы: {}", style(&probe_path).bold()));
+    screen.println(&format!(
+        "  байтовая ось: {} ({passes}x)  |  ось подлинности: {}",
+        style(&probe_path).bold(),
+        style(&identity_path).bold(),
+    ));
     screen.println(&format!(
         "  {}",
         style("Tip: use --take 10 to stop after 10 verified per protocol").yellow()
@@ -182,11 +205,11 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         &strategies,
         &ips,
         take,
-        // --passes устарел (см. предупреждение выше): вердикт больше не булев,
-        // и повторять сужение круга судеб нечем.
-        1,
-        reference.as_ref(),
+        passes,
+        byte_reference.as_ref(),
+        identity_reference.as_ref(),
         &probe_path,
+        &identity_path,
         &mut screen,
     )
     .await;

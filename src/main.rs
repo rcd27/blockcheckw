@@ -145,26 +145,40 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         take: usize,
 
-        /// УСТАРЕЛ и игнорируется: вердикт больше не булев, и голосовать не по чему.
-        /// Круг судеб либо сужен наблюдением, либо честно широк.
-        #[arg(long, default_value_t = 1)]
+        /// `M` — сколько раз мерить байтовую ось (спека §6-тер, «мера байтов»).
+        ///
+        /// Один прогон на маленьком файле рапортует 19-20 «рабочих» стратегий; два
+        /// ОДИНАКОВЫХ прогона (тот же путь, тот же таймаут) дали 19 и 19, из которых
+        /// общих — 11: разошлись 16 из 27. Третий прогон с таймаутом в 2,5 раза больше
+        /// добавил ровно одну — флапает провод, а не нетерпение. Устойчивое ядро по
+        /// трём прогонам — 9. Умолчание `M = 3` несёт этот замер рядом (спека §3):
+        /// повторы возвращаются не голосованием, а числом измерений частоты.
+        ///
+        /// `M = 0` — честный исход «не наблюдали» (не паникует).
+        #[arg(long, default_value_t = 3)]
         passes: usize,
 
-        /// Чистый egress для снятия эталона ответа. Без него `Good` объявить нельзя —
-        /// «байты текут» и «ресурс тот самый» неразличимы (см. Fate::Mirage).
+        /// Чистый egress для ОБОИХ эталонов (снимается дважды для каждого из двух
+        /// путей — `--probe-path` и `--identity-path`). Без него доли не существует, а
+        /// круг судеб не сужается до `Mirage`/`Good`/`Grinding` (см. `Fate::Mirage`).
         #[arg(long, value_name = "ENDPOINT")]
         reference_via: Option<String>,
 
-        /// Путь пробы. Умолчание детерминировано: `/robots.txt` не редиректит и не
-        /// гуляет в объёме, значит сверка с эталоном точна (спека §6-бис).
-        ///
-        /// ОТКАТА НА `/` ЗДЕСЬ НЕТ, И ЭТО НЕ БАГ. Если `robots.txt` у домена нет,
-        /// сервер отдаст `404` — и это ПОЛНОЦЕННАЯ проба: `404` от настоящего сервера,
-        /// прошедший через DPI, доказывает проход канала ровно так же, как `200`, а
-        /// эталон получит тот же `404` и сойдётся. Откат на `/` вернул бы ровно ту беду,
-        /// ради которой флаг и заведён: редиректы и разброс объёма.
-        #[arg(long, value_name = "PATH", default_value = "/robots.txt")]
+        /// Путь БАЙТОВОЙ оси (главная, спека §6-тер): сколько долей эталона вытянула
+        /// стратегия, повторяется `--passes` раз. Умолчание — корень `/`: главный
+        /// вердикт от пути не зависит (DPI решает по SNI в `ClientHello`, до HTTP), а
+        /// байтовая ось требует ОБЪЁМА настоящего ресурса, а не статичного файла.
+        #[arg(long, value_name = "PATH", default_value = "/")]
         probe_path: String,
+
+        /// Путь ОСИ ПОДЛИННОСТИ (побочная, спека §6-тер): сверяется с эталоном ТОЧНО,
+        /// один раз. Только она может дать круг `[Fate::Mirage]`. Умолчание —
+        /// `/robots.txt`: детерминированный файл не редиректит и не гуляет в объёме
+        /// между узлами CDN, значит сверка точна. Отката на `--probe-path` нет: если
+        /// `robots.txt` у домена нет, сервер отдаст `404` — и это полноценная проба,
+        /// эталон получит тот же `404` и сойдётся.
+        #[arg(long, value_name = "PATH", default_value = "/robots.txt")]
+        identity_path: String,
 
         /// Save JSON report to file (default: stdout)
         #[arg(short, long)]
@@ -507,6 +521,7 @@ async fn main() {
                 passes,
                 reference_via,
                 probe_path,
+                identity_path,
                 output,
             }) => {
                 let sub = matches
@@ -566,6 +581,7 @@ async fn main() {
                     via: via.as_ref(),
                     reference_via: reference_via.as_ref(),
                     probe_path: &probe_path,
+                    identity_path: &identity_path,
                     prereq: prereq
                         .as_ref()
                         .expect("check requires prerequisites (skipped only for `status`)"),
@@ -894,13 +910,14 @@ mod tests {
     }
 
     #[test]
-    fn check_probe_path_defaults_to_robots_txt() {
-        // Детерминированный путь — умолчание, а не опция: он не редиректит и не гуляет
-        // в объёме (спека §6-бис). Корень возвращается только явной просьбой.
+    fn check_probe_path_defaults_to_root() {
+        // Байтовая ось (главная, спека §6-тер) идёт по настоящему ресурсу: главный
+        // вердикт от пути не зависит (DPI решает по SNI, до HTTP), а объём требует
+        // реального содержимого, а не статичного файла.
         let cli =
             Cli::try_parse_from(["blockcheckw", "check", "--from-file", "v.json"]).expect("parse");
         match cli.command {
-            Some(Command::Check { probe_path, .. }) => assert_eq!(probe_path, "/robots.txt"),
+            Some(Command::Check { probe_path, .. }) => assert_eq!(probe_path, "/"),
             _ => panic!("expected Check command"),
         }
     }
@@ -918,6 +935,66 @@ mod tests {
         .expect("parse");
         match cli.command {
             Some(Command::Check { probe_path, .. }) => assert_eq!(probe_path, "/forum/index.php"),
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    #[test]
+    fn check_identity_path_defaults_to_robots_txt() {
+        // Ось подлинности (побочная): детерминированный путь — умолчание, а не опция.
+        // Только она может дать круг [Fate::Mirage] (спека §6-тер).
+        let cli =
+            Cli::try_parse_from(["blockcheckw", "check", "--from-file", "v.json"]).expect("parse");
+        match cli.command {
+            Some(Command::Check { identity_path, .. }) => assert_eq!(identity_path, "/robots.txt"),
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    #[test]
+    fn check_accepts_identity_path_flag() {
+        let cli = Cli::try_parse_from([
+            "blockcheckw",
+            "check",
+            "--from-file",
+            "v.json",
+            "--identity-path",
+            "/static/manifest.json",
+        ])
+        .expect("parse");
+        match cli.command {
+            Some(Command::Check { identity_path, .. }) => {
+                assert_eq!(identity_path, "/static/manifest.json")
+            }
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    #[test]
+    fn check_passes_defaults_to_three() {
+        // Умолчание несёт замер (спека §3): ядро устойчивости по трём одинаковым
+        // прогонам на живой линии — 9 из 27, флап — 16 из 27.
+        let cli =
+            Cli::try_parse_from(["blockcheckw", "check", "--from-file", "v.json"]).expect("parse");
+        match cli.command {
+            Some(Command::Check { passes, .. }) => assert_eq!(passes, 3),
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    #[test]
+    fn check_accepts_passes_flag() {
+        let cli = Cli::try_parse_from([
+            "blockcheckw",
+            "check",
+            "--from-file",
+            "v.json",
+            "--passes",
+            "5",
+        ])
+        .expect("parse");
+        match cli.command {
+            Some(Command::Check { passes, .. }) => assert_eq!(passes, 5),
             _ => panic!("expected Check command"),
         }
     }

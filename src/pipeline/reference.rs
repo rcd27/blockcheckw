@@ -29,6 +29,26 @@ pub struct Reference {
     status: Option<u16>,
     low: u64,
     high: u64,
+    /// Медиана выборок — знаменатель доли (спека §6-тер): «вытянуто / эталон». Не
+    /// `(low + high) / 2`: при более чем двух выборках это не одно и то же, а сам
+    /// эталон обязан отвечать словом «медиана», раз им назвался.
+    median: f64,
+}
+
+/// Медиана ряда: стандартное определение (для чётного числа — среднее двух средних),
+/// а не «серединный элемент отсортированного», как у `speeds.get(len / 2)` в
+/// `pipeline/check.rs` — там это давняя справка без претензии на строгость, а здесь
+/// величина ложится в знаменатель доли, и подмена имени была бы тем самым дефектом,
+/// что спека §3 запрещает: числом без замера, которое его туда положило.
+pub(crate) fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    match n {
+        0 => 0.0,
+        _ if n % 2 == 1 => sorted[n / 2],
+        _ => (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0,
+    }
 }
 
 impl Reference {
@@ -51,11 +71,21 @@ impl Reference {
         if high - low >= low {
             return None;
         }
+        let bytes: Vec<f64> = prints.iter().map(|p| p.bytes as f64).collect();
         Some(Reference {
             status: first.status,
             low,
             high,
+            median: median(&bytes),
         })
+    }
+
+    /// Доля эталона, которую вытянула проба (спека §6-тер): `вытянуто / эталон`, где
+    /// знаменатель — медиана выборок эталона. `take` не выдаёт эталон с нулевой
+    /// медианой (нулевой эталон отвергается вырождением выше), значит деления на ноль
+    /// не бывает у эталона, собранного конструктором.
+    pub fn share(&self, bytes: u64) -> f64 {
+        bytes as f64 / self.median
     }
 }
 
@@ -205,6 +235,7 @@ mod tests {
             status: Some(200),
             low: 1_000,
             high: 2_500,
+            median: 1_750.0,
         };
         assert!(agrees(&degenerate, &print(200, 1)));
         assert!(agrees(&degenerate, &print(200, 4_000)));
@@ -220,5 +251,47 @@ mod tests {
             .expect("две выборки — эталон");
         assert!(agrees(&reference, &print(200, 50_000)));
         assert!(!agrees(&reference, &print(200, 50_001)));
+    }
+
+    // ── Медиана и доля (спека §6-тер) ────────────────────────────────────────
+
+    #[test]
+    fn медиана_двух_выборок_есть_их_среднее_а_не_верхняя() {
+        // Ровно то, чем «медиана эталона» отличается от `.get(len / 2)`, каким в
+        // `pipeline/check.rs` считаются median_latency/median_speed: там это давняя
+        // справка, здесь — знаменатель доли, и подмена одного другим дала бы 110_000
+        // вместо честных 105_000.
+        let reference = Reference::take(vec![print(200, 100_000), print(200, 110_000)])
+            .expect("две выборки — эталон");
+        assert_eq!(reference.share(105_000), 1.0);
+    }
+
+    #[test]
+    fn медиана_нечётного_ряда_есть_средний_элемент() {
+        assert_eq!(median(&[1.0, 5.0, 3.0]), 3.0);
+    }
+
+    #[test]
+    fn медиана_чётного_ряда_есть_среднее_двух_средних() {
+        assert_eq!(median(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+    }
+
+    #[test]
+    fn медиана_пустого_ряда_есть_ноль_а_не_паника() {
+        assert_eq!(median(&[]), 0.0);
+    }
+
+    #[test]
+    fn доля_меньше_единицы_когда_вытянуто_меньше_эталона() {
+        let reference = Reference::take(vec![print(200, 100_000), print(200, 100_000)])
+            .expect("две выборки — эталон");
+        assert!((reference.share(50_000) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn доля_больше_единицы_когда_вытянуто_больше_эталона() {
+        let reference = Reference::take(vec![print(200, 100_000), print(200, 100_000)])
+            .expect("две выборки — эталон");
+        assert!((reference.share(150_000) - 1.5).abs() < f64::EPSILON);
     }
 }

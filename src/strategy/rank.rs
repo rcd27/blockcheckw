@@ -23,11 +23,17 @@ pub fn sort_by_simplicity(strategies: &mut [TaggedStrategy]) {
     });
 }
 
-/// Строка для ранжирования: круг судеб, чем заплачено, и прежний структурный ключ.
+/// Строка для ранжирования (спека §6-тер): частота полной доставки, медиана доли,
+/// круг судеб (побочная ось — только она даёт `Mirage`), прежний структурный ключ.
 #[derive(Debug, Clone)]
 pub struct Ranked {
+    /// (сколько раз доставка была полной, из скольких мерили) — `passes_ok`/`passes_total`.
+    /// `(0, 0)` — не мерили вовсе; такая строка в ранг попадать не должна (см.
+    /// `observed_at_all` в `pipeline/check.rs`), но `delivery_rate` не паникует и на ней.
+    pub full_delivery: (usize, usize),
+    /// `None` — эталона объёма нет, доли не существует (спека §6-тер, решение 2).
+    pub median_share: Option<f64>,
     pub admits: Admits,
-    pub waited_ms: u64,
     pub simplicity: (usize, u32, bool),
 }
 
@@ -46,7 +52,24 @@ fn step(admits: Admits) -> u8 {
     }
 }
 
-/// Порядок по судьбе: ступень круга, затем ожидание, затем прежняя простота.
+/// Частота полной доставки как число: `M/M` больше, чем `2/3`. `0/0` («не мерили»)
+/// читается как `0.0` — ниже всякого измеренного — а не как деление на ноль.
+fn delivery_rate((ok, total): (usize, usize)) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        ok as f64 / total as f64
+    }
+}
+
+/// Ключ доли для сравнения: отсутствующая доля (нет эталона объёма) не смеет
+/// обогнать измеренную — она ложится в самый низ, а не теряется как «равная нулю».
+fn share_key(share: Option<f64>) -> f64 {
+    share.unwrap_or(f64::NEG_INFINITY)
+}
+
+/// Порядок по судьбе (спека §6-тер): частота полной доставки ↓, медиана доли ↓,
+/// ступень круга ↑ (`step`, не меняется), простота ↑ тай-брейкером.
 pub fn sort_by_fate(rows: &mut [Ranked]) {
     rows.sort_by(fate_order);
 }
@@ -54,9 +77,15 @@ pub fn sort_by_fate(rows: &mut [Ranked]) {
 /// Сравнение двух строк — то же, что в [`sort_by_fate`], но пригодное для сортировки
 /// чужого вектора, где ранг едет рядом со своей полезной нагрузкой.
 pub fn fate_order(a: &Ranked, b: &Ranked) -> std::cmp::Ordering {
-    step(a.admits)
-        .cmp(&step(b.admits))
-        .then_with(|| a.waited_ms.cmp(&b.waited_ms))
+    delivery_rate(b.full_delivery)
+        .partial_cmp(&delivery_rate(a.full_delivery))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            share_key(b.median_share)
+                .partial_cmp(&share_key(a.median_share))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| step(a.admits).cmp(&step(b.admits)))
         .then_with(|| a.simplicity.cmp(&b.simplicity))
 }
 
@@ -143,64 +172,118 @@ mod tests {
         );
     }
 
-    fn ranked(admits: &'static [Fate], waited_ms: u64) -> Ranked {
+    fn ranked(admits: &'static [Fate], full_delivery: (usize, usize)) -> Ranked {
         Ranked {
+            full_delivery,
+            median_share: None,
             admits: Admits(admits),
-            waited_ms,
             simplicity: (1, 0, false),
         }
     }
 
     #[test]
-    fn good_идёт_выше_grinding() {
-        let mut rows = vec![ranked(&[Fate::Grinding], 100), ranked(&[Fate::Good], 5_000)];
+    fn частота_полной_доставки_сильнее_ступени_круга() {
+        // M/M выше, чем 2/3 (спека §6-тер) — даже если её круг хуже.
+        let mut rows = vec![
+            ranked(&[Fate::Grinding], (2, 3)),
+            ranked(&[Fate::Good], (3, 3)),
+        ];
         sort_by_fate(&mut rows);
-        // Даже если Good ждал дольше: судьба сильнее темпа.
+        assert_eq!(rows[0].full_delivery, (3, 3));
+    }
+
+    #[test]
+    fn нулевая_частота_не_паникует_и_идёт_последней() {
+        let mut rows = vec![ranked(&[Fate::Good], (0, 0)), ranked(&[Fate::Good], (1, 1))];
+        sort_by_fate(&mut rows);
+        assert_eq!(rows[0].full_delivery, (1, 1));
+    }
+
+    #[test]
+    fn при_равной_частоте_решает_медиана_доли() {
+        let mut rows = vec![
+            Ranked {
+                full_delivery: (3, 3),
+                median_share: Some(0.4),
+                admits: Admits(&[Fate::Good]),
+                simplicity: (1, 0, false),
+            },
+            Ranked {
+                full_delivery: (3, 3),
+                median_share: Some(0.9),
+                admits: Admits(&[Fate::Good]),
+                simplicity: (1, 0, false),
+            },
+        ];
+        sort_by_fate(&mut rows);
+        assert_eq!(rows[0].median_share, Some(0.9));
+    }
+
+    #[test]
+    fn отсутствующая_доля_не_обгоняет_измеренную() {
+        // Нет эталона объёма — доли не существует (решение 2 спеки §6-тер), и такая
+        // строка не смеет выглядеть лучше строки с честно измеренной долей.
+        let mut rows = vec![
+            Ranked {
+                full_delivery: (3, 3),
+                median_share: None,
+                admits: Admits(&[Fate::Good]),
+                simplicity: (1, 0, false),
+            },
+            Ranked {
+                full_delivery: (3, 3),
+                median_share: Some(0.1),
+                admits: Admits(&[Fate::Good]),
+                simplicity: (1, 0, false),
+            },
+        ];
+        sort_by_fate(&mut rows);
+        assert_eq!(rows[0].median_share, Some(0.1));
+    }
+
+    #[test]
+    fn при_равной_частоте_и_доле_решает_ступень_круга() {
+        let mut rows = vec![
+            Ranked {
+                full_delivery: (3, 3),
+                median_share: Some(1.0),
+                admits: Admits(&[Fate::Grinding]),
+                simplicity: (1, 0, false),
+            },
+            Ranked {
+                full_delivery: (3, 3),
+                median_share: Some(1.0),
+                admits: Admits(&[Fate::Good]),
+                simplicity: (1, 0, false),
+            },
+        ];
+        sort_by_fate(&mut rows);
         assert_eq!(rows[0].admits.0, [Fate::Good].as_slice());
     }
 
     #[test]
-    fn внутри_grinding_порядок_задаёт_ожидание() {
+    fn mirage_не_поднимается_выше_ничего_живого_при_равной_частоте() {
         let mut rows = vec![
-            ranked(&[Fate::Grinding], 5_000),
-            ranked(&[Fate::Grinding], 900),
+            ranked(&[Fate::Mirage], (3, 3)),
+            ranked(&[Fate::Grinding], (3, 3)),
         ];
         sort_by_fate(&mut rows);
-        assert_eq!(rows[0].waited_ms, 900);
-    }
-
-    #[test]
-    fn несуженный_круг_ниже_суженного_до_good() {
-        let mut rows = vec![
-            ranked(&[Fate::Mirage, Fate::Grinding, Fate::Good], 100),
-            ranked(&[Fate::Good], 100),
-        ];
-        sort_by_fate(&mut rows);
-        assert_eq!(rows[0].admits.0, [Fate::Good].as_slice());
-    }
-
-    #[test]
-    fn mirage_не_поднимается_выше_ничего_живого() {
-        let mut rows = vec![
-            ranked(&[Fate::Mirage], 10),
-            ranked(&[Fate::Grinding], 9_000),
-        ];
-        sort_by_fate(&mut rows);
-        // Заглушка, отданная мгновенно, — не лучше настоящего ресурса, добытого долго.
         assert_eq!(rows[0].admits.0, [Fate::Grinding].as_slice());
     }
 
     #[test]
-    fn при_равной_судьбе_и_равном_ожидании_решает_простота() {
+    fn при_равной_частоте_доле_и_ступени_решает_простота() {
         let mut rows = vec![
             Ranked {
+                full_delivery: (3, 3),
+                median_share: Some(1.0),
                 admits: Admits(&[Fate::Good]),
-                waited_ms: 100,
                 simplicity: (3, 20, true),
             },
             Ranked {
+                full_delivery: (3, 3),
+                median_share: Some(1.0),
                 admits: Admits(&[Fate::Good]),
-                waited_ms: 100,
                 simplicity: (1, 0, false),
             },
         ];

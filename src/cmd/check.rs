@@ -43,6 +43,14 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         reference_via,
         prereq,
     } = params;
+
+    if passes != 1 {
+        eprintln!(
+            "предупреждение: --passes устарел и игнорируется. Вердикт больше не булев: \
+             check сужает круг судеб цели, и повтор к сужению ничего не добавляет."
+        );
+    }
+
     let config = Arc::new(CoreConfig {
         worker_count: 1,
         profiles_per_instance: 1,
@@ -67,9 +75,6 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
     let mut flags = String::new();
     if take > 0 {
         flags.push_str(&format!(", --take {take}"));
-    }
-    if passes >= 2 {
-        flags.push_str(&format!(", --passes {passes}"));
     }
     screen.println(&format!(
         "{} loaded {} strategies from {}{}",
@@ -162,7 +167,9 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         &strategies,
         &ips,
         take,
-        passes,
+        // --passes устарел (см. предупреждение выше): вердикт больше не булев,
+        // и повторять сужение круга судеб нечем.
+        1,
         reference.as_ref(),
         &mut screen,
     )

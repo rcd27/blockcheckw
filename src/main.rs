@@ -140,9 +140,10 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         take: usize,
 
-        /// Verification passes per strategy (early-exit on first fail)
-        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..=100))]
-        passes: u16,
+        /// УСТАРЕЛ и игнорируется: вердикт больше не булев, и голосовать не по чему.
+        /// Круг судеб либо сужен наблюдением, либо честно широк.
+        #[arg(long, default_value_t = 1)]
+        passes: usize,
 
         /// Чистый egress для снятия эталона ответа. Без него `Good` объявить нельзя —
         /// «байты текут» и «ресурс тот самый» неразличимы (см. Fate::Mirage).
@@ -543,7 +544,7 @@ async fn main() {
                     dns_mode,
                     timeout,
                     take,
-                    passes: passes as usize,
+                    passes,
                     output: output.as_deref(),
                     via: via.as_ref(),
                     reference_via: reference_via.as_ref(),

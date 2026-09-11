@@ -60,7 +60,6 @@ pub async fn run_check(
     // движка: это и есть «а что будет без десинка вообще». Без него всякое «работает»
     // ниже может оказаться свойством линии, а не стратегии.
     let control_ip = pick_random_ip(ips).expect("ips проверены вызывающим");
-    let control_started = Instant::now();
     let control_result = http_test_data(
         Protocol::HttpsTls12,
         domain,
@@ -87,7 +86,6 @@ pub async fn run_check(
     });
     // Замер ни о чём: цель открывается и без нас.
     let inconclusive = matches!(control_admits.0, [Fate::Good]);
-    let _ = control_started;
 
     if inconclusive {
         screen.println(&format!(
@@ -221,7 +219,7 @@ pub async fn run_check(
 
         rows.push(row);
 
-        if ok_count == total_run && ok_count == passes {
+        if all_passes_succeeded(ok_count, total_run, passes) {
             // All passes OK
             strategy_span.record("status", "working");
             speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -248,11 +246,21 @@ pub async fn run_check(
                 passes_ok: ok_count,
                 passes_total: passes,
             });
+            // Прибор, а не голая длительность: `waited_of` молчит (`None`) на нулевом
+            // ожидании — «не мерили», а не «мерили и вышел ноль». Подставить 0 значило
+            // бы объявить неизмеренное лучшим из всех: в ранге меньше — значит быстрее
+            // (`rank::fate_order`). Кладём наибольшее возможное значение, чтобы
+            // неизмеренное никогда не обошло измеренное внутри одной ступени круга.
+            let waited_ms =
+                match observe::waited_of(std::time::Duration::from_millis(median_latency)) {
+                    Some(waited) => waited.0.as_millis() as u64,
+                    None => u64::MAX,
+                };
             judged.push(rank::Ranked {
                 // Круг едет в `CheckedStrategy.circle` значением — строки из `admits`
                 // для сортировки не годятся.
                 admits: last_circle,
-                waited_ms: median_latency,
+                waited_ms,
                 simplicity: rank::simplicity_key(&args_str),
             });
         } else {
@@ -522,10 +530,39 @@ fn timestamp_iso() -> String {
     crate::pipeline::test_report::chrono_like_timestamp()
 }
 
+/// Все проходы стратегии прошли. Наивная проверка `ok_count == total_run &&
+/// ok_count == passes` истинна и при `passes == 0` (`0 == 0 && 0 == 0`) — то есть
+/// «все прошли», хотя не прошло ни одного, и `speeds`/`latencies` тогда пусты:
+/// индексация медианы паникует. `ok_count > 0` — унаследованный дефект закрыт
+/// намеренно, а не только побочным эффектом хардкода `--passes` в единицу.
+fn all_passes_succeeded(ok_count: usize, total_run: usize, passes: usize) -> bool {
+    ok_count > 0 && ok_count == total_run && ok_count == passes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::network::http_client::Ended;
+
+    #[test]
+    fn passes_zero_does_not_masquerade_as_all_passes_ok() {
+        // Унаследованный дефект: `--passes 0` даёт `ok_count == total_run == passes == 0`,
+        // старая проверка читала это как «все проходы OK» и падала на индексации пустых
+        // `speeds`/`latencies`. `all_passes_succeeded` обязана вернуть false без единого
+        // прохода — иначе `bcw check --passes 0` снова паникует.
+        assert!(!all_passes_succeeded(0, 0, 0));
+    }
+
+    #[test]
+    fn all_passes_succeeded_true_when_every_pass_ok() {
+        assert!(all_passes_succeeded(3, 3, 3));
+    }
+
+    #[test]
+    fn not_all_passes_succeeded_when_early_exit_fired() {
+        // Первый провал остановил цикл раньше, чем добежали до `passes`.
+        assert!(!all_passes_succeeded(0, 1, 3));
+    }
 
     #[test]
     fn test_speed_calculation() {

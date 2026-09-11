@@ -52,6 +52,23 @@ impl BodyMode {
 
 const REDIRECT_CODES: &[u16] = &[301, 302, 307, 308];
 
+/// Чем кончилось чтение. Различает ДОСМОТРЕННОЕ окно от брошенного — без этого
+/// «цель молчала» неотличимо от «мы не дождались», и всякий наш промах становится
+/// уликой против цензора.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// Сервер закрыл поток — тело кончилось само.
+    BodyComplete,
+    /// Упёрлись в СВОЙ лимит (`BodyMode::LimitedTo`): брали, пока сами не прекратили.
+    LimitReached,
+    /// Ошибка чтения тела: сброс, TLS-алерт. Окно досмотрено, ответ получен.
+    BodyError,
+    /// Мы перестали ждать: `stall` или внешний таймаут. О цели НИЧЕГО.
+    WeStoppedWaiting,
+    /// До тела не дошло вовсе (`HEAD`, провал раньше).
+    NeverStarted,
+}
+
 #[derive(Debug)]
 pub struct HttpResult {
     pub status_code: Option<u16>,
@@ -60,6 +77,8 @@ pub struct HttpResult {
     pub size_download: Option<u64>,
     /// Причина провала — инструментовка замера (спайк #verify-histogram).
     pub cause: Option<Cause>,
+    /// Чем кончилось чтение — см. [`Ended`].
+    pub ended: Ended,
 }
 
 impl HttpResult {
@@ -73,6 +92,7 @@ impl HttpResult {
             error: Some("timeout".to_string()),
             size_download: None,
             cause: Some(Cause::Timeout(reached.phase())),
+            ended: Ended::WeStoppedWaiting,
         }
     }
 }
@@ -359,6 +379,7 @@ async fn http_single_request(
                 error: Some(format!("invalid address: {e}")),
                 size_download: None,
                 cause: None,
+                ended: Ended::NeverStarted,
             };
         }
     };
@@ -374,6 +395,7 @@ async fn http_single_request(
                     error: Some(format!("proxy connect: {e}")),
                     size_download: None,
                     cause: Some(classify(&e, Phase::Connect)),
+                    ended: Ended::NeverStarted,
                 };
             }
         },
@@ -386,6 +408,7 @@ async fn http_single_request(
                     error: Some(format!("connect: {e}")),
                     size_download: None,
                     cause: Some(classify(&e, Phase::Connect)),
+                    ended: Ended::NeverStarted,
                 };
             }
         },
@@ -415,6 +438,7 @@ async fn http_single_request(
                         error: Some(format!("invalid server name: {e}")),
                         size_download: None,
                         cause: Some(Cause::Protocol(Phase::Tls)),
+                        ended: Ended::NeverStarted,
                     };
                 }
             };
@@ -428,6 +452,7 @@ async fn http_single_request(
                         error: Some(format!("tls: {e}")),
                         size_download: None,
                         cause: None,
+                        ended: Ended::NeverStarted,
                     };
                 }
             };
@@ -486,6 +511,7 @@ where
                 error: Some(format!("handshake: {e}")),
                 size_download: None,
                 cause: Some(classify(&e, Phase::Request)),
+                ended: Ended::NeverStarted,
             };
         }
     };
@@ -525,6 +551,7 @@ where
                 error: Some(format!("handshake: {e}")),
                 size_download: None,
                 cause: Some(classify(&e, Phase::Request)),
+                ended: Ended::NeverStarted,
             };
         }
     };
@@ -563,6 +590,7 @@ async fn send_and_parse(
                 error: Some(format!("request: {e}")),
                 size_download: None,
                 cause: Some(classify(&e, Phase::Request)),
+                ended: Ended::NeverStarted,
             };
         }
     };
@@ -587,6 +615,7 @@ async fn send_and_parse(
     }
 
     let mut body_cause: Option<Cause> = None;
+    let mut ended = Ended::NeverStarted;
     let size_download = if mode.is_get() {
         let limit = mode.max_bytes();
         let mut total: u64 = 0;
@@ -598,7 +627,11 @@ async fn send_and_parse(
             let next = match stall {
                 Some(d) => match tokio::time::timeout(d, body.frame()).await {
                     Ok(chunk) => chunk,
-                    Err(_) => break,
+                    // Сорвались по СВОЕМУ терпению — окно не досмотрено.
+                    Err(_) => {
+                        ended = Ended::WeStoppedWaiting;
+                        break;
+                    }
                 },
                 None => body.frame().await,
             };
@@ -607,6 +640,7 @@ async fn send_and_parse(
                     if let Some(data) = frame.data_ref() {
                         total += data.len() as u64;
                         if total >= limit {
+                            ended = Ended::LimitReached;
                             break;
                         }
                     }
@@ -615,9 +649,13 @@ async fn send_and_parse(
                 // нельзя: цензор, режущий на данных, виден только здесь.
                 Some(Err(e)) => {
                     body_cause = Some(classify(&e, Phase::Body));
+                    ended = Ended::BodyError;
                     break;
                 }
-                None => break,
+                None => {
+                    ended = Ended::BodyComplete;
+                    break;
+                }
             }
         }
         Some(total)
@@ -631,6 +669,7 @@ async fn send_and_parse(
         error: None,
         size_download,
         cause: body_cause,
+        ended,
     }
 }
 
@@ -745,6 +784,7 @@ mod tests {
             error: Some("tls: connection reset".to_string()),
             size_download: None,
             cause: Some(Cause::Reset(Phase::Tls)),
+            ended: Ended::NeverStarted,
         };
         match interpret_http_result(&result, "example.com") {
             HttpVerdict::Unavailable { cause, .. } => assert_eq!(
@@ -778,6 +818,7 @@ mod tests {
             error: None,
             size_download: None,
             cause: None,
+            ended: Ended::NeverStarted,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -793,6 +834,7 @@ mod tests {
             error: Some("timeout".to_string()),
             size_download: None,
             cause: None,
+            ended: Ended::WeStoppedWaiting,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -808,6 +850,7 @@ mod tests {
             error: None,
             size_download: None,
             cause: None,
+            ended: Ended::NeverStarted,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -823,6 +866,7 @@ mod tests {
             error: None,
             size_download: None,
             cause: None,
+            ended: Ended::NeverStarted,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -839,6 +883,7 @@ mod tests {
             error: None,
             size_download: None,
             cause: None,
+            ended: Ended::NeverStarted,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -874,6 +919,7 @@ mod tests {
             error: None,
             size_download: Some(50_000),
             cause: None,
+            ended: Ended::BodyComplete,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -889,6 +935,7 @@ mod tests {
             error: None,
             size_download: Some(500),
             cause: None,
+            ended: Ended::BodyComplete,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -904,6 +951,7 @@ mod tests {
             error: None,
             size_download: Some(DATA_TRANSFER_MIN_BYTES),
             cause: None,
+            ended: Ended::BodyComplete,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -919,6 +967,7 @@ mod tests {
             error: None,
             size_download: None,
             cause: None,
+            ended: Ended::NeverStarted,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -934,6 +983,7 @@ mod tests {
             error: Some("connection refused".to_string()),
             size_download: None,
             cause: None,
+            ended: Ended::NeverStarted,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -949,6 +999,7 @@ mod tests {
             error: None,
             size_download: Some(16_384),
             cause: None,
+            ended: Ended::BodyError,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -967,6 +1018,7 @@ mod tests {
             error: None,
             size_download: Some(10_240),
             cause: None,
+            ended: Ended::BodyError,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result_low, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -982,6 +1034,7 @@ mod tests {
             error: None,
             size_download: Some(26_000),
             cause: None,
+            ended: Ended::BodyComplete,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result_above, "example.com", DATA_TRANSFER_MIN_BYTES),

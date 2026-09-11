@@ -135,6 +135,7 @@ pub fn format_baseline_verdict_styled(result: &BaselineResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::http_client::Ended;
 
     fn make_result(protocol: Protocol, verdict: HttpVerdict) -> BaselineResult {
         BaselineResult { protocol, verdict }
@@ -211,6 +212,7 @@ mod tests {
             error: None,
             size_download: Some(12_000),
             cause: None,
+            ended: Ended::BodyError,
         };
         let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::HttpsTls12);
         assert!(
@@ -228,6 +230,7 @@ mod tests {
             error: None,
             size_download: Some(64_000),
             cause: None,
+            ended: Ended::BodyComplete,
         };
         let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::HttpsTls12);
         assert!(
@@ -247,6 +250,7 @@ mod tests {
             error: None,
             size_download: Some(0),
             cause: None,
+            ended: Ended::BodyComplete,
         };
         let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::Http);
         assert!(

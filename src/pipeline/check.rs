@@ -423,6 +423,7 @@ fn timestamp_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::http_client::Ended;
 
     #[test]
     fn test_speed_calculation() {
@@ -452,6 +453,7 @@ mod tests {
             error: None,
             size_download: Some(0),
             cause: None,
+            ended: Ended::BodyComplete,
         };
         let (working, _, failure) = interpret_check_result(&result, "rutracker.org");
         assert!(!working);
@@ -471,6 +473,7 @@ mod tests {
             error: None,
             size_download: None,
             cause: None,
+            ended: Ended::NeverStarted,
         };
         let (working, _, failure) = interpret_check_result(&result, "rutracker.org");
         assert!(!working);

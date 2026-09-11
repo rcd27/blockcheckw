@@ -79,6 +79,9 @@ pub struct HttpResult {
     pub cause: Option<Cause>,
     /// Чем кончилось чтение — см. [`Ended`].
     pub ended: Ended,
+    /// Байт тела по СЕКУНДНЫМ окнам, индекс — номер секунды от первого байта тела.
+    /// Материал для `Sag`; пусто, если тело не читали.
+    pub windows: Vec<u64>,
 }
 
 impl HttpResult {
@@ -93,6 +96,7 @@ impl HttpResult {
             size_download: None,
             cause: Some(Cause::Timeout(reached.phase())),
             ended: Ended::WeStoppedWaiting,
+            windows: Vec::new(),
         }
     }
 }
@@ -380,6 +384,7 @@ async fn http_single_request(
                 size_download: None,
                 cause: None,
                 ended: Ended::NeverStarted,
+                windows: Vec::new(),
             };
         }
     };
@@ -396,6 +401,7 @@ async fn http_single_request(
                     size_download: None,
                     cause: Some(classify(&e, Phase::Connect)),
                     ended: Ended::NeverStarted,
+                    windows: Vec::new(),
                 };
             }
         },
@@ -409,6 +415,7 @@ async fn http_single_request(
                     size_download: None,
                     cause: Some(classify(&e, Phase::Connect)),
                     ended: Ended::NeverStarted,
+                    windows: Vec::new(),
                 };
             }
         },
@@ -439,6 +446,7 @@ async fn http_single_request(
                         size_download: None,
                         cause: Some(Cause::Protocol(Phase::Tls)),
                         ended: Ended::NeverStarted,
+                        windows: Vec::new(),
                     };
                 }
             };
@@ -453,6 +461,7 @@ async fn http_single_request(
                         size_download: None,
                         cause: None,
                         ended: Ended::NeverStarted,
+                        windows: Vec::new(),
                     };
                 }
             };
@@ -512,6 +521,7 @@ where
                 size_download: None,
                 cause: Some(classify(&e, Phase::Request)),
                 ended: Ended::NeverStarted,
+                windows: Vec::new(),
             };
         }
     };
@@ -552,6 +562,7 @@ where
                 size_download: None,
                 cause: Some(classify(&e, Phase::Request)),
                 ended: Ended::NeverStarted,
+                windows: Vec::new(),
             };
         }
     };
@@ -591,6 +602,7 @@ async fn send_and_parse(
                 size_download: None,
                 cause: Some(classify(&e, Phase::Request)),
                 ended: Ended::NeverStarted,
+                windows: Vec::new(),
             };
         }
     };
@@ -616,10 +628,13 @@ async fn send_and_parse(
 
     let mut body_cause: Option<Cause> = None;
     let mut ended = Ended::NeverStarted;
+    // Материал для `Sag`; остаётся пустым, если тело не читали (не-GET).
+    let mut windows: Vec<u64> = Vec::new();
     let size_download = if mode.is_get() {
         let limit = mode.max_bytes();
         let mut total: u64 = 0;
         let mut body = response.into_body();
+        let body_started = std::time::Instant::now();
         loop {
             // With `stall` set, a body that hangs (throttled / capped by DPI)
             // stops the read and keeps the partial byte count, instead of
@@ -638,6 +653,13 @@ async fn send_and_parse(
             match next {
                 Some(Ok(frame)) => {
                     if let Some(data) = frame.data_ref() {
+                        // Окно ≥ секунды — требование прибора: короче пачки оно даёт
+                        // нули между пачками и ложную просадку (`sag.rs`, ловушка 3).
+                        let second = body_started.elapsed().as_secs() as usize;
+                        if windows.len() <= second {
+                            windows.resize(second + 1, 0);
+                        }
+                        windows[second] += data.len() as u64;
                         total += data.len() as u64;
                         if total >= limit {
                             ended = Ended::LimitReached;
@@ -670,6 +692,7 @@ async fn send_and_parse(
         size_download,
         cause: body_cause,
         ended,
+        windows,
     }
 }
 
@@ -785,6 +808,7 @@ mod tests {
             size_download: None,
             cause: Some(Cause::Reset(Phase::Tls)),
             ended: Ended::NeverStarted,
+            windows: Vec::new(),
         };
         match interpret_http_result(&result, "example.com") {
             HttpVerdict::Unavailable { cause, .. } => assert_eq!(
@@ -819,6 +843,7 @@ mod tests {
             size_download: None,
             cause: None,
             ended: Ended::NeverStarted,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -835,6 +860,7 @@ mod tests {
             size_download: None,
             cause: None,
             ended: Ended::WeStoppedWaiting,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -851,6 +877,7 @@ mod tests {
             size_download: None,
             cause: None,
             ended: Ended::NeverStarted,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -867,6 +894,7 @@ mod tests {
             size_download: None,
             cause: None,
             ended: Ended::NeverStarted,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -884,6 +912,7 @@ mod tests {
             size_download: None,
             cause: None,
             ended: Ended::NeverStarted,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -920,6 +949,7 @@ mod tests {
             size_download: Some(50_000),
             cause: None,
             ended: Ended::BodyComplete,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -936,6 +966,7 @@ mod tests {
             size_download: Some(500),
             cause: None,
             ended: Ended::BodyComplete,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -952,6 +983,7 @@ mod tests {
             size_download: Some(DATA_TRANSFER_MIN_BYTES),
             cause: None,
             ended: Ended::BodyComplete,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -968,6 +1000,7 @@ mod tests {
             size_download: None,
             cause: None,
             ended: Ended::NeverStarted,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -984,6 +1017,7 @@ mod tests {
             size_download: None,
             cause: None,
             ended: Ended::NeverStarted,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -1000,6 +1034,7 @@ mod tests {
             size_download: Some(16_384),
             cause: None,
             ended: Ended::BodyError,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -1019,6 +1054,7 @@ mod tests {
             size_download: Some(10_240),
             cause: None,
             ended: Ended::BodyError,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_data_transfer_result(&result_low, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -1035,6 +1071,7 @@ mod tests {
             size_download: Some(26_000),
             cause: None,
             ended: Ended::BodyComplete,
+            windows: Vec::new(),
         };
         assert!(matches!(
             interpret_data_transfer_result(&result_above, "example.com", DATA_TRANSFER_MIN_BYTES),

@@ -213,6 +213,7 @@ mod tests {
             size_download: Some(12_000),
             cause: None,
             ended: Ended::BodyError,
+            windows: Vec::new(),
         };
         let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::HttpsTls12);
         assert!(
@@ -231,6 +232,7 @@ mod tests {
             size_download: Some(64_000),
             cause: None,
             ended: Ended::BodyComplete,
+            windows: Vec::new(),
         };
         let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::HttpsTls12);
         assert!(
@@ -251,6 +253,7 @@ mod tests {
             size_download: Some(0),
             cause: None,
             ended: Ended::BodyComplete,
+            windows: Vec::new(),
         };
         let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::Http);
         assert!(

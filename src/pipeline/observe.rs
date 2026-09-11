@@ -4,6 +4,9 @@
 use crate::network::cause::{Cause, Phase};
 use crate::network::http_client::Ended;
 use crate::pipeline::fate::Delivery;
+use reflex_core::mealy::Mealy;
+use reflex_core::DetectorEvent;
+use reflex_instrument::sag::{Sag, SagInstrument};
 
 /// Что доставило плечо. `Abandoned` — единственный честный ответ там, где ждать
 /// перестали мы: окно не досмотрено, и о цели не установлено ничего.
@@ -30,6 +33,18 @@ pub fn connected_of(cause: Option<Cause>) -> bool {
         | Some(Cause::Io(p))
         | Some(Cause::Protocol(p)) => p > Phase::Connect,
     }
+}
+
+/// Просадка канала по ряду секундных окон. Прибор без состояния — гоняем один шаг.
+/// `None` значит «не сузили»: либо просадки нет, либо окон меньше, чем прибору нужно
+/// (маховик и хвост он отбрасывает сам). Разные причины, один ответ — и потому
+/// толковать `None` как «всё хорошо» нельзя.
+pub fn sag_of(windows: &[u64]) -> Option<Sag> {
+    let (_, spoken, ()) = SagInstrument.step(DetectorEvent::Packet {
+        input: windows.to_vec(),
+        at: std::time::Instant::now(),
+    });
+    spoken.into_iter().next()
 }
 
 #[cfg(test)]
@@ -75,5 +90,28 @@ mod tests {
         assert!(connected_of(Some(Cause::Timeout(Phase::Body))));
         // Причины нет вовсе — значит дошли до конца, коннект был.
         assert!(connected_of(None));
+    }
+
+    #[test]
+    fn просадка_видна_по_ряду_а_не_по_порогу() {
+        // Маховик, четыре ровных, обвал, хвост. Планка — первое окно ПОСЛЕ маховика.
+        let windows = vec![10_000, 100_000, 100_000, 100_000, 2_000, 2_000, 500];
+        let sag = sag_of(&windows).expect("просадка обязана быть названа");
+        assert_eq!(sag.before_bps, 100_000);
+        assert!(sag.after_bps < sag.before_bps);
+    }
+
+    #[test]
+    fn ровно_медленный_канал_не_есть_просадка() {
+        // Разницу между «всегда медленный» и «начало качаться хреново» даёт только ряд.
+        let windows = vec![900, 1_000, 1_000, 1_000, 1_000, 1_000, 900];
+        assert_eq!(sag_of(&windows), None);
+    }
+
+    #[test]
+    fn короткий_разговор_есть_наша_слепота_а_не_отсутствие_просадки() {
+        // Меньше четырёх окон — прибор молчит, и это НЕ «всё хорошо».
+        assert_eq!(sag_of(&[100_000, 1]), None);
+        assert_eq!(sag_of(&[]), None);
     }
 }

@@ -454,6 +454,7 @@ mod tests {
             size_download: Some(0),
             cause: None,
             ended: Ended::BodyComplete,
+            windows: Vec::new(),
         };
         let (working, _, failure) = interpret_check_result(&result, "rutracker.org");
         assert!(!working);
@@ -474,6 +475,7 @@ mod tests {
             size_download: None,
             cause: None,
             ended: Ended::NeverStarted,
+            windows: Vec::new(),
         };
         let (working, _, failure) = interpret_check_result(&result, "rutracker.org");
         assert!(!working);

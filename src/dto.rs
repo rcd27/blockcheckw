@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::pipeline::fate::Admits;
+
 // ── Shared (used across commands) ────────────────────────────────────────────
 
 /// Single strategy entry for interchange between commands (scan → check pipe).
@@ -64,6 +66,16 @@ pub struct CheckedStrategy {
     /// отчёта менять ради инструментовки незачем.
     #[serde(skip)]
     pub failure: Option<String>,
+    /// Что установило наблюдение: `Bytes`, `Mute`, `NoConnect`, `Unobserved`,
+    /// `Inconsistent`. Потребителю JSON читать НАДО ЭТО, а не `working`.
+    pub observed: String,
+    /// Круг допускаемых судеб. Одна судьба — сузили; несколько — не сузили; это не одно
+    /// и то же, и `working: false` в обоих случаях означает разное.
+    pub admits: Vec<String>,
+    /// Тот же круг значением — для ранга. Вне JSON: контракт отчёта менять ради
+    /// внутреннего порядка незачем, а строки для сортировки не годятся.
+    #[serde(skip)]
+    pub circle: Admits,
 }
 
 #[derive(Debug, Clone, Serialize)]

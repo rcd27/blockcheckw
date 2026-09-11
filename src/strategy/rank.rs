@@ -9,6 +9,7 @@
 // single-stage before multi-stage.
 
 use super::generator::TaggedStrategy;
+use crate::pipeline::fate::{Admits, Fate};
 
 /// Sort tagged strategies: coverage descending, then simplicity ascending.
 pub fn sort_by_simplicity(strategies: &mut [TaggedStrategy]) {
@@ -22,8 +23,45 @@ pub fn sort_by_simplicity(strategies: &mut [TaggedStrategy]) {
     });
 }
 
+/// Строка для ранжирования: круг судеб, чем заплачено, и прежний структурный ключ.
+#[derive(Debug, Clone)]
+pub struct Ranked {
+    pub admits: Admits,
+    pub waited_ms: u64,
+    pub simplicity: (usize, u32, bool),
+}
+
+/// Ступень круга — чем уже и лучше круг, тем ниже число. Несуженный круг НЕ равен
+/// плохому: он равен «не знаем», и потому стоит ниже доказанного `Good`, но выше
+/// доказанного `Mirage`.
+fn step(admits: Admits) -> u8 {
+    match admits.0 {
+        [Fate::Good] => 0,
+        [Fate::Grinding] => 1,
+        circle if circle.contains(&Fate::Good) => 2, // не сузили
+        [Fate::Mirage] => 3,
+        [Fate::Trap] => 4,
+        [Fate::Dead] => 5,
+        _other => 6,
+    }
+}
+
+/// Порядок по судьбе: ступень круга, затем ожидание, затем прежняя простота.
+pub fn sort_by_fate(rows: &mut [Ranked]) {
+    rows.sort_by(fate_order);
+}
+
+/// Сравнение двух строк — то же, что в [`sort_by_fate`], но пригодное для сортировки
+/// чужого вектора, где ранг едет рядом со своей полезной нагрузкой.
+pub fn fate_order(a: &Ranked, b: &Ranked) -> std::cmp::Ordering {
+    step(a.admits)
+        .cmp(&step(b.admits))
+        .then_with(|| a.waited_ms.cmp(&b.waited_ms))
+        .then_with(|| a.simplicity.cmp(&b.simplicity))
+}
+
 /// Sort key: (action_count, max_repeats, is_multi_stage). Lower = simpler.
-fn simplicity_key(joined: &str) -> (usize, u32, bool) {
+pub fn simplicity_key(joined: &str) -> (usize, u32, bool) {
     (
         count_desync_actions(joined),
         parse_max_repeats(joined),
@@ -103,5 +141,70 @@ mod tests {
             !strategies[0].args.join(" ").contains("--payload=empty"),
             "single-stage should come first"
         );
+    }
+
+    fn ranked(admits: &'static [Fate], waited_ms: u64) -> Ranked {
+        Ranked {
+            admits: Admits(admits),
+            waited_ms,
+            simplicity: (1, 0, false),
+        }
+    }
+
+    #[test]
+    fn good_идёт_выше_grinding() {
+        let mut rows = vec![ranked(&[Fate::Grinding], 100), ranked(&[Fate::Good], 5_000)];
+        sort_by_fate(&mut rows);
+        // Даже если Good ждал дольше: судьба сильнее темпа.
+        assert_eq!(rows[0].admits.0, [Fate::Good].as_slice());
+    }
+
+    #[test]
+    fn внутри_grinding_порядок_задаёт_ожидание() {
+        let mut rows = vec![
+            ranked(&[Fate::Grinding], 5_000),
+            ranked(&[Fate::Grinding], 900),
+        ];
+        sort_by_fate(&mut rows);
+        assert_eq!(rows[0].waited_ms, 900);
+    }
+
+    #[test]
+    fn несуженный_круг_ниже_суженного_до_good() {
+        let mut rows = vec![
+            ranked(&[Fate::Mirage, Fate::Grinding, Fate::Good], 100),
+            ranked(&[Fate::Good], 100),
+        ];
+        sort_by_fate(&mut rows);
+        assert_eq!(rows[0].admits.0, [Fate::Good].as_slice());
+    }
+
+    #[test]
+    fn mirage_не_поднимается_выше_ничего_живого() {
+        let mut rows = vec![
+            ranked(&[Fate::Mirage], 10),
+            ranked(&[Fate::Grinding], 9_000),
+        ];
+        sort_by_fate(&mut rows);
+        // Заглушка, отданная мгновенно, — не лучше настоящего ресурса, добытого долго.
+        assert_eq!(rows[0].admits.0, [Fate::Grinding].as_slice());
+    }
+
+    #[test]
+    fn при_равной_судьбе_и_равном_ожидании_решает_простота() {
+        let mut rows = vec![
+            Ranked {
+                admits: Admits(&[Fate::Good]),
+                waited_ms: 100,
+                simplicity: (3, 20, true),
+            },
+            Ranked {
+                admits: Admits(&[Fate::Good]),
+                waited_ms: 100,
+                simplicity: (1, 0, false),
+            },
+        ];
+        sort_by_fate(&mut rows);
+        assert_eq!(rows[0].simplicity, (1, 0, false));
     }
 }

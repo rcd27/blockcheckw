@@ -10,7 +10,11 @@ use crate::firewall::nftables;
 use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, HttpResult};
 use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
 use crate::nfqws2::run::SystemNfqws2;
+use crate::pipeline::fate::{self, Admits, Fate, Observed, ALL_FATES};
+use crate::pipeline::observe;
+use crate::pipeline::reference::{ContentPrint, Reference};
 use crate::strategy::generator::TaggedStrategy;
+use crate::strategy::rank;
 use crate::ui;
 
 /// Verify strategies from a vanilla report with real data transfer.
@@ -27,6 +31,7 @@ pub async fn run_check(
     ips: &[String],
     take: usize,
     passes: usize,
+    reference: Option<&Reference>,
     screen: &mut ui::Console,
 ) -> CheckReport {
     let start = Instant::now();
@@ -72,6 +77,9 @@ pub async fn run_check(
     let mut rows: Vec<Vec<crate::pipeline::verify::Outcome>> = Vec::new();
 
     let mut verified: Vec<VerifiedStrategy> = Vec::new();
+    // Ранг по судьбе, нога в ногу с `verified`: запись сюда происходит ровно там же,
+    // где `verified.push` — в ветке «все проходы OK», иначе `zip` ниже разъедется.
+    let mut judged: Vec<rank::Ranked> = Vec::new();
     let mut checked_count: usize = 0;
     // --take: count perfect (all passes OK) strategies per protocol
     let mut perfect_per_proto: std::collections::HashMap<Protocol, usize> =
@@ -109,6 +117,8 @@ pub async fn run_check(
         let mut speeds: Vec<f64> = Vec::with_capacity(passes);
         let mut latencies: Vec<u64> = Vec::with_capacity(passes);
         let mut last_error: Option<String> = None;
+        // Круг последнего успешного прохода — для `judged`, если все проходы окажутся OK.
+        let mut last_circle: Admits = Admits(&ALL_FATES);
 
         // Span на проверку конкретной стратегии (ребёнок bcw.check). Здесь живёт
         // причина FAIL (connect/timeout) — то, ради чего трейсинг и затевался.
@@ -123,8 +133,13 @@ pub async fn run_check(
         async {
             for pass_idx in 0..passes {
                 let started = crate::pipeline::verify::now_epoch();
-                let checked =
-                    check_single_strategy(config, witness, &table, domain, tagged, ips).await;
+                let checked = check_single_strategy(
+                    config, witness, &table, domain, tagged, ips,
+                    // `check` пока не делает повторов внутри одной пробы — они появятся
+                    // вместе с многопрофильным прогоном (вне этого плана).
+                    1, reference,
+                )
+                .await;
                 total_run = pass_idx + 1;
 
                 let outcome = match checked.working {
@@ -143,6 +158,7 @@ pub async fn run_check(
                     ok_count += 1;
                     speeds.push(checked.speed_kbps);
                     latencies.push(checked.latency_ms);
+                    last_circle = checked.circle;
                 } else {
                     last_error = checked.error;
                     // Early-exit: first fail → drop this strategy
@@ -176,13 +192,20 @@ pub async fn run_check(
 
             verified.push(VerifiedStrategy {
                 protocol: tagged.protocol.to_string(),
-                args: args_str,
+                args: args_str.clone(),
                 coverage: tagged.coverage,
                 success_rate: 1.0,
                 median_latency_ms: median_latency,
                 median_speed_kbps: median_speed,
                 passes_ok: ok_count,
                 passes_total: passes,
+            });
+            judged.push(rank::Ranked {
+                // Круг едет в `CheckedStrategy.circle` значением — строки из `admits`
+                // для сортировки не годятся.
+                admits: last_circle,
+                waited_ms: median_latency,
+                simplicity: rank::simplicity_key(&args_str),
             });
         } else {
             let reason = last_error.as_deref().unwrap_or("failed");
@@ -221,12 +244,15 @@ pub async fn run_check(
         screen,
     );
 
-    // Sort by speed descending (all are 100% success rate due to early-exit)
-    verified.sort_by(|a, b| {
-        b.median_speed_kbps
-            .partial_cmp(&a.median_speed_kbps)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Порядок обхода был по простоте — это разумно для ПРОБ. Порядок ВЫДАЧИ задаёт
+    // измеренное: до этой строки ранг не знал ни одного факта о канале.
+    let mut order: Vec<(rank::Ranked, VerifiedStrategy)> = verified
+        .into_iter()
+        .zip(judged)
+        .map(|(strategy, ranked)| (ranked, strategy))
+        .collect();
+    order.sort_by(|a, b| rank::fate_order(&a.0, &b.0));
+    let verified: Vec<VerifiedStrategy> = order.into_iter().map(|(_, s)| s).collect();
 
     // Cleanup
     let _ = table.drop_table(&SystemNft).await;
@@ -242,6 +268,7 @@ pub async fn run_check(
 }
 
 /// Check one strategy: nfqws2 → nftables → GET → measure → cleanup.
+#[allow(clippy::too_many_arguments)] // attempts/reference добавлены задачей 6 поверх уже широкого набора параметров
 async fn check_single_strategy(
     config: &CoreConfig,
     witness: &FilterMark,
@@ -249,10 +276,14 @@ async fn check_single_strategy(
     domain: &str,
     tagged: &TaggedStrategy,
     ips: &[String],
+    attempts: u32,
+    reference: Option<&Reference>,
 ) -> CheckedStrategy {
     let protocol = tagged.protocol;
     let args_str = tagged.args.join(" ");
 
+    // Движок не поднялся — значит мы не наблюдали ничего, и сужать не из чего.
+    // Круг остаётся полным (то же самое, что `Observed::Unobserved.admits()`).
     let make_failed = |error: String| CheckedStrategy {
         failure: Some("engine_error".to_string()),
         protocol: protocol.to_string(),
@@ -262,6 +293,9 @@ async fn check_single_strategy(
         latency_ms: 0,
         speed_kbps: 0.0,
         error: Some(error),
+        observed: Observed::Unobserved.name().to_string(),
+        admits: ALL_FATES.iter().map(|f| format!("{f:?}")).collect(),
+        circle: Admits(&ALL_FATES),
     };
 
     // 1. Собрать план из одного профиля и поднять движок
@@ -326,10 +360,25 @@ async fn check_single_strategy(
     nftables::remove_dispatch(&SystemNft, table).await;
     SystemNfqws2::stop(instance).await;
 
-    // 6. Interpret for check: got an HTTP status code = strategy works.
-    //    DPI blocks manifest as timeouts/connection resets — never as HTTP responses.
-    let (working, error, named) = interpret_check_result(&result, domain);
+    // 6. Показание и круг судеб. `interpret_check_result` остаётся поставщиком
+    //    диагностики (`Cause`, имя провала) — но вердикта больше не выносит:
+    //    «есть статус и тело не пусто» есть `Observed::Bytes`, а не «работает».
+    let (_permissive, error, named) = interpret_check_result(&result, domain);
     let bytes_downloaded = result.size_download.unwrap_or(0);
+
+    let observed = fate::observe(
+        observe::connected_of(result.cause),
+        observe::delivery_of(bytes_downloaded, result.ended),
+    );
+    let admits = fate::narrow(fate::Evidence {
+        observed,
+        sag: observe::sag_of(&result.windows),
+        attempts,
+        reference,
+        print: ContentPrint::of(&result),
+    });
+    let working = matches!(admits.0, [Fate::Good]);
+
     let speed_kbps = if working && latency_ms > 0 {
         (bytes_downloaded as f64 / 1024.0) / (latency_ms as f64 / 1000.0)
     } else {
@@ -353,6 +402,9 @@ async fn check_single_strategy(
                 (None, None) => "unknown".to_string(),
             }),
         },
+        observed: observed.name().to_string(),
+        admits: admits.0.iter().map(|f| format!("{f:?}")).collect(),
+        circle: admits,
     }
 }
 
@@ -502,6 +554,9 @@ mod tests {
             speed_kbps: 147.2,
             error: None,
             failure: None,
+            observed: "Bytes".to_string(),
+            admits: vec!["Good".to_string()],
+            circle: Admits(&[Fate::Good]),
         };
         let json = serde_json::to_string(&cs).unwrap();
         assert!(json.contains("\"working\":true"));

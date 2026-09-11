@@ -110,16 +110,21 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
 
     // Эталон: две пробы через чистый egress, ПОСЛЕ резолва DNS и ДО подъёма движка —
     // движок не должен работать вхолостую, пока мы ходим за эталоном.
-    if let Some(clean) = reference_via {
-        let taken =
-            reference::take_reference(clean, Protocol::HttpsTls12, domain, &ips, timeout, 2).await;
-        match &taken {
-            Some(_) => screen.add_info_line("  эталон снят через чистый egress"),
-            None => screen.add_info_line(
-                "  эталон НЕ снят: Good объявлен не будет, круг судеб останется широким",
-            ),
+    let reference = match reference_via {
+        Some(clean) => {
+            let taken =
+                reference::take_reference(clean, Protocol::HttpsTls12, domain, &ips, timeout, 2)
+                    .await;
+            match &taken {
+                Some(_) => screen.add_info_line("  эталон снят через чистый egress"),
+                None => screen.add_info_line(
+                    "  эталон НЕ снят: Good объявлен не будет, круг судеб останется широким",
+                ),
+            }
+            taken
         }
-    }
+        None => None,
+    };
 
     // Remote gateway route setup
     if let Some(v) = via {
@@ -158,6 +163,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         &ips,
         take,
         passes,
+        reference.as_ref(),
         &mut screen,
     )
     .await;

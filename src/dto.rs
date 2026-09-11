@@ -60,6 +60,10 @@ pub struct CheckedStrategy {
     pub speed_kbps: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Имя провала для замера (спайк #verify-histogram). Вне JSON: контракт
+    /// отчёта менять ради инструментовки незачем.
+    #[serde(skip)]
+    pub failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

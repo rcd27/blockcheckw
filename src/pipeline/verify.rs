@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use console::style;
@@ -120,6 +121,110 @@ pub fn tally_results(
         .collect()
 }
 
+/// Исход одного прохода для одной стратегии. `bool`, которым обходится
+/// `tally_results`, отвечает «прошла ли», но не «почему нет», — а весь вопрос
+/// замера именно во втором.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    Passed,
+    /// Имя провала — с провода (`reset/tls`) либо от вердикта (`dpi_data_limit`).
+    Failed(String),
+}
+
+/// Раскладка корпуса по устойчивости плюс причины провалов в каждой группе.
+///
+/// Три прохода держатся ради ФЛАПАЮЩИХ — тех, кто прошёл не всегда. Стратегия,
+/// не прошедшая ни разу, отсеивается и одним проходом; вопрос лишь в том, можно
+/// ли по причине отличить её от флапающей СРАЗУ. Поэтому причины считаются по
+/// группам раздельно: их смешение и есть та ошибка, что делает замер бесполезным.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct StabilityReport {
+    /// Прошли все проходы.
+    pub always: usize,
+    /// Не прошли ни одного.
+    pub never: usize,
+    /// Прошли часть — ради них и держится повтор.
+    pub flapping: usize,
+    /// Причины провалов у ни разу не прошедших.
+    pub causes_never: BTreeMap<String, usize>,
+    /// Причины провалов у флапающих. Если сюда не попадает сброс — сброс
+    /// детерминирован, и одного прохода довольно, чтобы судить.
+    pub causes_flapping: BTreeMap<String, usize>,
+}
+
+/// Раскладка по строкам «стратегия → её исходы». Форма, в которой исходы
+/// рождаются у `check`: там внешний цикл идёт по стратегиям, а не по проходам,
+/// и при раннем выходе строка КОРОЧЕ числа проходов — недобранное не смеет
+/// сойти за успех.
+pub fn stability_of(rows: &[Vec<Outcome>], total_passes: usize) -> StabilityReport {
+    let mut report = StabilityReport::default();
+
+    for row in rows {
+        let passed = row.iter().filter(|o| **o == Outcome::Passed).count();
+
+        // Группа решается ДО подсчёта причин: причина попадает в корзину
+        // стратегии целиком, а не отдельного её провала.
+        let bucket = if passed == total_passes {
+            report.always += 1;
+            None
+        } else if passed == 0 {
+            report.never += 1;
+            Some(&mut report.causes_never)
+        } else {
+            report.flapping += 1;
+            Some(&mut report.causes_flapping)
+        };
+
+        if let Some(causes) = bucket {
+            for outcome in row {
+                if let Outcome::Failed(name) = outcome {
+                    *causes.entry(name.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    report
+}
+
+/// Разложить исходы по устойчивости. `outcomes[pass][strategy]`.
+pub fn stability_report(candidates: &[Vec<String>], outcomes: &[Vec<Outcome>]) -> StabilityReport {
+    let rows: Vec<Vec<Outcome>> = (0..candidates.len())
+        .map(|index| {
+            outcomes
+                .iter()
+                .filter_map(|pass| pass.get(index).cloned())
+                .collect()
+        })
+        .collect();
+    stability_of(&rows, outcomes.len())
+}
+
+/// Имя провала по вердикту. Причина с провода сильнее: она называет, ЧТО
+/// случилось на проводе, тогда как вердикт говорит лишь, как это выглядело
+/// сверху. Где провода нет — имя берётся от вердикта, и провал остаётся видимым.
+pub fn outcome_of(result: &TaskResult) -> Outcome {
+    use crate::network::http_client::HttpVerdict;
+    match result {
+        TaskResult::Success { .. } => Outcome::Passed,
+        // Наша поломка, не свойство стратегии, — отдельным именем.
+        TaskResult::Error { .. } => Outcome::Failed("engine_error".to_string()),
+        TaskResult::Failed { verdict } => Outcome::Failed(match verdict {
+            HttpVerdict::Unavailable { cause, .. } => match cause {
+                Some(c) => c.name(),
+                None => "unknown".to_string(),
+            },
+            HttpVerdict::DpiDataLimit { .. } => "dpi_data_limit".to_string(),
+            HttpVerdict::DataTransferFailed { .. } => "data_transfer_failed".to_string(),
+            HttpVerdict::SuspiciousRedirect { .. } => "suspicious_redirect".to_string(),
+            HttpVerdict::ServerReceivesFakes => "server_receives_fakes".to_string(),
+            // Успех в ветке провала — противоречие; называем его так, чтобы
+            // молча не слиться с сетевой бедой, если он когда-нибудь случится.
+            HttpVerdict::Available => "available_but_failed".to_string(),
+        }),
+    }
+}
+
 /// Keep only strategies with pass_count >= min_passes.
 pub fn filter_verified(tallies: &[StrategyTally], min_passes: usize) -> Vec<Vec<String>> {
     tallies
@@ -144,6 +249,122 @@ pub fn find_relaxed(tallies: &[StrategyTally], min_passes: usize) -> Option<Rela
         }
     }
     None
+}
+
+/// Строка журнала одного прохода: когда, по кому, чем кончилось. Нужна затем,
+/// что наблюдения с провода приходят со своими метками времени, и связать их с
+/// пробой можно только общей осью — стратегия целиком слишком крупна, проходов
+/// в ней три.
+pub fn pass_line(started: f64, at: f64, index: usize, pass: usize, outcome: &Outcome) -> String {
+    let (verdict, name) = match outcome {
+        Outcome::Passed => ("ok", String::new()),
+        Outcome::Failed(name) => ("fail", name.clone()),
+    };
+    format!(
+        "{{\"t0\":{started:.3},\"t\":{at:.3},\"i\":{index},\"pass\":{pass},\"outcome\":\"{verdict}\",\"why\":\"{name}\"}}"
+    )
+}
+
+/// Часы замера — секунды эпохи. Одна ось с наблюдателем провода, иначе
+/// сопоставить их нечем.
+pub fn now_epoch() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Дописать строку журнала, если замер включён. Молча ничего не делает, когда
+/// переменная не названа: инструментовка не смеет мешать обычному прогону.
+pub fn log_pass(started: f64, index: usize, pass: usize, outcome: &Outcome) {
+    let Ok(path) = std::env::var("BCW_CAUSE_HISTOGRAM") else {
+        return;
+    };
+    let at = now_epoch();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{}", pass_line(started, at, index, pass, outcome));
+    }
+}
+
+/// Напечатать раскладку и, если названа переменная `BCW_CAUSE_HISTOGRAM`, сложить
+/// её же в файл. Через переменную, а не всегда: артефакты замера не должны
+/// сыпаться в корень дерева у обычного пользователя.
+pub fn report_stability(report: &StabilityReport, domain: &str, screen: &mut Console) {
+    let total = report.always + report.never + report.flapping;
+    if total == 0 {
+        return;
+    }
+
+    screen.println(&format!(
+        "  {} {total} кандидатов: {} прошли всегда, {} ни разу, {} флапают",
+        style("замер").bold(),
+        report.always,
+        report.never,
+        report.flapping,
+    ));
+
+    let show = |screen: &mut Console, title: &str, causes: &BTreeMap<String, usize>| {
+        if causes.is_empty() {
+            return;
+        }
+        let sum: usize = causes.values().sum();
+        let mut rows: Vec<(&String, &usize)> = causes.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1));
+        screen.println(&format!("    {title} ({sum}):"));
+        for (name, count) in rows {
+            let share = 100.0 * *count as f64 / sum as f64;
+            screen.println(&format!("      {name:<24} {count:>5}  {share:>5.1}%"));
+        }
+    };
+    show(screen, "провалы ни разу не прошедших", &report.causes_never);
+    show(screen, "провалы флапающих", &report.causes_flapping);
+
+    let Ok(path) = std::env::var("BCW_CAUSE_HISTOGRAM") else {
+        return;
+    };
+    let json = serde_json::json!({
+        "domain": domain,
+        "always": report.always,
+        "never": report.never,
+        "flapping": report.flapping,
+        "causes_never": report.causes_never,
+        "causes_flapping": report.causes_flapping,
+    });
+    let line = format!("{json}\n");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            let _ = file.write_all(line.as_bytes());
+        }
+        Err(e) => screen.println(&format!("    замер: не записать {path}: {e}")),
+    }
+}
+
+/// Исходы прохода в порядке кандидатов — то же сопоставление, что и
+/// [`extract_outcomes`], но с сохранением имени провала.
+pub fn extract_rich_outcomes(
+    candidates: &[Vec<String>],
+    results: &[StrategyResult],
+) -> Vec<Outcome> {
+    candidates
+        .iter()
+        .map(|args| {
+            match results.iter().find(|r| r.strategy_args == *args) {
+                Some(found) => outcome_of(&found.result),
+                // Проба не вернулась вовсе: дедлайн, снятый план, ошибка джойна.
+                None => Outcome::Failed("missing".to_string()),
+            }
+        })
+        .collect()
 }
 
 /// Map run_parallel results (arbitrary order) back to candidate order.
@@ -180,6 +401,8 @@ pub async fn run_verification(
     });
 
     let mut all_outcomes: Vec<Vec<bool>> = Vec::with_capacity(verify_config.passes);
+    // ЗАМЕР (спайк #verify-histogram): те же исходы, но с именем провала.
+    let mut all_named: Vec<Vec<Outcome>> = Vec::with_capacity(verify_config.passes);
 
     for pass in 1..=verify_config.passes {
         screen.println(&format!(
@@ -213,7 +436,10 @@ pub async fn run_verification(
 
         let outcomes = extract_outcomes(candidates, &results);
         all_outcomes.push(outcomes);
+        all_named.push(extract_rich_outcomes(candidates, &results));
     }
+
+    report_stability(&stability_report(candidates, &all_named), domain, screen);
 
     let tallies = tally_results(candidates, &all_outcomes);
     let verified = filter_verified(&tallies, verify_config.min_passes);
@@ -516,6 +742,7 @@ mod tests {
                 result: TaskResult::Failed {
                     verdict: crate::network::http_client::HttpVerdict::Unavailable {
                         reason: "connection refused".to_string(),
+                        cause: None,
                     },
                 },
             },
@@ -597,5 +824,257 @@ mod tests {
             fail_count: 3,
         }];
         assert!(find_relaxed(&tallies, 1).is_none());
+    }
+}
+
+#[cfg(test)]
+mod stability_tests {
+    use super::*;
+    use crate::network::cause::{Cause, Phase};
+
+    fn strategies(n: usize) -> Vec<Vec<String>> {
+        (0..n).map(|i| vec![format!("--strategy-{i}")]).collect()
+    }
+
+    #[test]
+    fn a_strategy_passing_every_pass_counts_as_always() {
+        let report = stability_report(
+            &strategies(1),
+            &[vec![Outcome::Passed], vec![Outcome::Passed]],
+        );
+        assert_eq!(report.always, 1);
+        assert_eq!(report.flapping, 0);
+        assert_eq!(report.never, 0);
+    }
+
+    #[test]
+    fn a_strategy_passing_some_passes_counts_as_flapping() {
+        let report = stability_report(
+            &strategies(1),
+            &[
+                vec![Outcome::Passed],
+                vec![Outcome::Failed(Cause::Timeout(Phase::Request).name())],
+            ],
+        );
+        assert_eq!(report.flapping, 1);
+        assert_eq!(report.always, 0);
+    }
+
+    #[test]
+    fn causes_of_the_never_group_do_not_leak_into_the_flapping_one() {
+        // Первая стратегия не прошла ни разу — сброс. Вторая флапает — тишина.
+        let report = stability_report(
+            &strategies(2),
+            &[
+                vec![
+                    Outcome::Failed(Cause::Reset(Phase::Tls).name()),
+                    Outcome::Passed,
+                ],
+                vec![
+                    Outcome::Failed(Cause::Reset(Phase::Tls).name()),
+                    Outcome::Failed(Cause::Timeout(Phase::Request).name()),
+                ],
+            ],
+        );
+        assert_eq!(report.never, 1);
+        assert_eq!(report.flapping, 1);
+        assert_eq!(report.causes_never.get("reset/tls"), Some(&2));
+        assert_eq!(
+            report.causes_never.get("timeout/request"),
+            None,
+            "тишина флапающей не смеет попасть в счёт стабильно павшей: \
+             смешение групп и есть та ошибка, ради устранения которой замер"
+        );
+        assert_eq!(report.causes_flapping.get("timeout/request"), Some(&1));
+        assert_eq!(report.causes_flapping.get("reset/tls"), None);
+    }
+
+    #[test]
+    fn a_failure_with_no_cause_is_counted_under_its_own_name_not_dropped() {
+        let report = stability_report(
+            &strategies(1),
+            &[vec![Outcome::Failed("unknown".to_string())]],
+        );
+        assert_eq!(
+            report.causes_never.get("unknown"),
+            Some(&1),
+            "провал без причины обязан быть виден: молча выброшенный, он \
+             занизил бы знаменатель и завысил долю всего остального"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+    use crate::error::HttpVerdictAvailable;
+    use crate::network::cause::{Cause, Phase};
+    use crate::network::http_client::HttpVerdict;
+
+    #[test]
+    fn a_success_is_a_passed_outcome() {
+        let result = TaskResult::Success {
+            verdict: HttpVerdictAvailable,
+            strategy_args: vec![],
+        };
+        assert_eq!(outcome_of(&result), Outcome::Passed);
+    }
+
+    #[test]
+    fn a_failure_carrying_a_wire_cause_is_named_by_that_cause() {
+        let result = TaskResult::Failed {
+            verdict: HttpVerdict::Unavailable {
+                reason: "tls: reset".to_string(),
+                cause: Some(Cause::Reset(Phase::Tls)),
+            },
+        };
+        assert_eq!(
+            outcome_of(&result),
+            Outcome::Failed("reset/tls".to_string())
+        );
+    }
+
+    #[test]
+    fn a_verdict_born_above_the_wire_keeps_its_own_name() {
+        let result = TaskResult::Failed {
+            verdict: HttpVerdict::DpiDataLimit {
+                size_download: 16_384,
+            },
+        };
+        assert_eq!(
+            outcome_of(&result),
+            Outcome::Failed("dpi_data_limit".to_string()),
+            "обрезание данных — находка того же ранга, что сброс: у него нет \
+             ошибки ввода-вывода, но есть имя, и в гистограмме оно обязано стоять \
+             отдельной корзиной, а не в «unknown»"
+        );
+    }
+
+    #[test]
+    fn an_engine_error_is_named_apart_from_any_network_failure() {
+        let result = TaskResult::Error {
+            error: crate::error::BlockcheckError::Nfqws2Crashed,
+        };
+        assert_eq!(
+            outcome_of(&result),
+            Outcome::Failed("engine_error".to_string()),
+            "падение движка — не свойство стратегии; смешать его с сетевым \
+             провалом значило бы обвинить стратегию в нашей же поломке"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rich_outcome_tests {
+    use super::*;
+    use crate::error::HttpVerdictAvailable;
+    use crate::network::cause::{Cause, Phase};
+    use crate::network::http_client::HttpVerdict;
+
+    fn failed(cause: Cause) -> TaskResult {
+        TaskResult::Failed {
+            verdict: HttpVerdict::Unavailable {
+                reason: "x".to_string(),
+                cause: Some(cause),
+            },
+        }
+    }
+
+    #[test]
+    fn outcomes_follow_candidate_order_not_result_order() {
+        let candidates = vec![vec!["--a".to_string()], vec!["--b".to_string()]];
+        // Результаты приходят из JoinSet в произвольном порядке — здесь обратном.
+        let results = vec![
+            StrategyResult {
+                strategy_args: vec!["--b".to_string()],
+                result: failed(Cause::Reset(Phase::Tls)),
+            },
+            StrategyResult {
+                strategy_args: vec!["--a".to_string()],
+                result: TaskResult::Success {
+                    verdict: HttpVerdictAvailable,
+                    strategy_args: vec!["--a".to_string()],
+                },
+            },
+        ];
+        assert_eq!(
+            extract_rich_outcomes(&candidates, &results),
+            vec![Outcome::Passed, Outcome::Failed("reset/tls".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_candidate_with_no_result_at_all_is_named_missing() {
+        let candidates = vec![vec!["--a".to_string()]];
+        assert_eq!(
+            extract_rich_outcomes(&candidates, &[]),
+            vec![Outcome::Failed("missing".to_string())],
+            "проба, не вернувшая ничего (дедлайн, снятый план), — не провал \
+             стратегии; под своим именем она видна, а под чужим лгала бы"
+        );
+    }
+}
+
+#[cfg(test)]
+mod row_stability_tests {
+    use super::*;
+    use crate::network::cause::{Cause, Phase};
+
+    #[test]
+    fn a_row_shorter_than_the_pass_count_is_not_an_always() {
+        // Ранний выход: первый проход упал, остальные не гонялись.
+        let rows = vec![vec![Outcome::Failed(Cause::Reset(Phase::Tls).name())]];
+        let report = stability_of(&rows, 3);
+        assert_eq!(
+            report.always, 0,
+            "строка из одного провала при трёх проходах — не «прошла всегда»"
+        );
+        assert_eq!(report.never, 1);
+    }
+
+    #[test]
+    fn a_row_of_all_passes_is_an_always() {
+        let rows = vec![vec![Outcome::Passed, Outcome::Passed, Outcome::Passed]];
+        assert_eq!(stability_of(&rows, 3).always, 1);
+    }
+
+    #[test]
+    fn a_row_mixing_a_pass_and_a_failure_is_flapping_and_its_cause_is_kept() {
+        let rows = vec![vec![
+            Outcome::Passed,
+            Outcome::Failed(Cause::Timeout(Phase::Request).name()),
+        ]];
+        let report = stability_of(&rows, 2);
+        assert_eq!(report.flapping, 1);
+        assert_eq!(report.causes_flapping.get("timeout/request"), Some(&1));
+    }
+}
+
+#[cfg(test)]
+mod pass_line_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_pass_carries_its_reason_into_the_journal() {
+        let line = pass_line(
+            1788984490.0,
+            1788984497.091,
+            7,
+            2,
+            &Outcome::Failed("reset/tls".to_string()),
+        );
+        assert_eq!(
+            line,
+            r#"{"t0":1788984490.000,"t":1788984497.091,"i":7,"pass":2,"outcome":"fail","why":"reset/tls"}"#
+        );
+    }
+
+    #[test]
+    fn a_passing_pass_has_no_reason_but_keeps_its_place_on_the_clock() {
+        let line = pass_line(1.0, 1.5, 0, 1, &Outcome::Passed);
+        assert_eq!(
+            line,
+            r#"{"t0":1.000,"t":1.500,"i":0,"pass":1,"outcome":"ok","why":""}"#
+        );
     }
 }

@@ -59,6 +59,18 @@ pub async fn run_check(
         .underlined(),
     ));
 
+    // ЗАМЕР (спайк #verify-histogram): под переменной ранний выход снимается —
+    // иначе флапающих не видно вовсе, они умирают на первом же провале, и
+    // вопрос «стоило ли повторять» остаётся без данных.
+    let measure_all = std::env::var("BCW_MEASURE_ALL_PASSES").is_ok();
+    if measure_all {
+        screen.println(&format!(
+            "  {} ранний выход снят: гоняем все {passes} проходов",
+            style("замер").bold(),
+        ));
+    }
+    let mut rows: Vec<Vec<crate::pipeline::verify::Outcome>> = Vec::new();
+
     let mut verified: Vec<VerifiedStrategy> = Vec::new();
     let mut checked_count: usize = 0;
     // --take: count perfect (all passes OK) strategies per protocol
@@ -107,11 +119,25 @@ pub async fn run_check(
             status = tracing::field::Empty,
             reason = tracing::field::Empty,
         );
+        let mut row: Vec<crate::pipeline::verify::Outcome> = Vec::with_capacity(passes);
         async {
             for pass_idx in 0..passes {
+                let started = crate::pipeline::verify::now_epoch();
                 let checked =
                     check_single_strategy(config, witness, &table, domain, tagged, ips).await;
                 total_run = pass_idx + 1;
+
+                let outcome = match checked.working {
+                    true => crate::pipeline::verify::Outcome::Passed,
+                    false => crate::pipeline::verify::Outcome::Failed(
+                        checked
+                            .failure
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                    ),
+                };
+                crate::pipeline::verify::log_pass(started, checked_count, pass_idx + 1, &outcome);
+                row.push(outcome);
 
                 if checked.working {
                     ok_count += 1;
@@ -120,12 +146,16 @@ pub async fn run_check(
                 } else {
                     last_error = checked.error;
                     // Early-exit: first fail → drop this strategy
-                    break;
+                    if !measure_all {
+                        break;
+                    }
                 }
             }
         }
         .instrument(strategy_span.clone())
         .await;
+
+        rows.push(row);
 
         if ok_count == total_run && ok_count == passes {
             // All passes OK
@@ -185,6 +215,12 @@ pub async fn run_check(
         }
     }
 
+    crate::pipeline::verify::report_stability(
+        &crate::pipeline::verify::stability_of(&rows, passes),
+        domain,
+        screen,
+    );
+
     // Sort by speed descending (all are 100% success rate due to early-exit)
     verified.sort_by(|a, b| {
         b.median_speed_kbps
@@ -218,6 +254,7 @@ async fn check_single_strategy(
     let args_str = tagged.args.join(" ");
 
     let make_failed = |error: String| CheckedStrategy {
+        failure: Some("engine_error".to_string()),
         protocol: protocol.to_string(),
         args: args_str.clone(),
         working: false,
@@ -291,7 +328,7 @@ async fn check_single_strategy(
 
     // 6. Interpret for check: got an HTTP status code = strategy works.
     //    DPI blocks manifest as timeouts/connection resets — never as HTTP responses.
-    let (working, error) = interpret_check_result(&result, domain);
+    let (working, error, named) = interpret_check_result(&result, domain);
     let bytes_downloaded = result.size_download.unwrap_or(0);
     let speed_kbps = if working && latency_ms > 0 {
         (bytes_downloaded as f64 / 1024.0) / (latency_ms as f64 / 1000.0)
@@ -307,6 +344,15 @@ async fn check_single_strategy(
         latency_ms,
         speed_kbps,
         error,
+        // Имя провала — с провода, где он есть; иначе по тому, что видно сверху.
+        failure: match working {
+            true => None,
+            false => Some(match (result.cause, named) {
+                (Some(c), _) => c.name(),
+                (None, Some(name)) => name.to_string(),
+                (None, None) => "unknown".to_string(),
+            }),
+        },
     }
 }
 
@@ -317,35 +363,47 @@ async fn check_single_strategy(
 /// - HTTP 400 → FAIL (server received our fakes — broken strategy)
 /// - Redirect to a different domain → FAIL (ISP captive portal / block page)
 /// - Any other HTTP response → OK (strategy works)
-fn interpret_check_result(result: &HttpResult, domain: &str) -> (bool, Option<String>) {
+fn interpret_check_result(
+    result: &HttpResult,
+    domain: &str,
+) -> (bool, Option<String>, Option<&'static str>) {
     if let Some(err) = &result.error {
-        return (false, Some(err.clone()));
+        return (false, Some(err.clone()), None);
     }
 
     match result.status_code {
-        Some(400) => (false, Some("server received fakes (HTTP 400)".to_string())),
+        Some(400) => (
+            false,
+            Some("server received fakes (HTTP 400)".to_string()),
+            Some("server_receives_fakes"),
+        ),
         Some(code @ (301 | 302 | 307 | 308)) => {
             let location = extract_redirect_location(&result.headers);
             if location.to_lowercase().contains(&domain.to_lowercase()) {
-                (true, None)
+                (true, None, None)
             } else {
                 (
                     false,
                     Some(format!(
                         "redirect to foreign domain: {location} (HTTP {code})"
                     )),
+                    Some("foreign_redirect"),
                 )
             }
         }
         Some(code) => {
             let size = result.size_download.unwrap_or(0);
             if size == 0 {
-                (false, Some(format!("empty body (HTTP {code})")))
+                (
+                    false,
+                    Some(format!("empty body (HTTP {code})")),
+                    Some("empty_body"),
+                )
             } else {
-                (true, None)
+                (true, None, None)
             }
         }
-        None => (false, Some("no response".to_string())),
+        None => (false, Some("no response".to_string()), Some("no_response")),
     }
 }
 
@@ -387,6 +445,39 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_body_failure_is_named_and_not_left_unknown() {
+        let result = HttpResult {
+            status_code: Some(200),
+            headers: String::new(),
+            error: None,
+            size_download: Some(0),
+            cause: None,
+        };
+        let (working, _, failure) = interpret_check_result(&result, "rutracker.org");
+        assert!(!working);
+        assert_eq!(
+            failure,
+            Some("empty_body"),
+            "пустое тело при живом коде — вероятная обрезка данных цензором; \
+             без имени она уходит в «unknown» и перестаёт быть уликой"
+        );
+    }
+
+    #[test]
+    fn a_redirect_to_a_foreign_domain_is_named_apart() {
+        let result = HttpResult {
+            status_code: Some(302),
+            headers: "Location: http://blocked.gov.ru/\r\n".to_string(),
+            error: None,
+            size_download: None,
+            cause: None,
+        };
+        let (working, _, failure) = interpret_check_result(&result, "rutracker.org");
+        assert!(!working);
+        assert_eq!(failure, Some("foreign_redirect"));
+    }
+
+    #[test]
     fn timestamp_is_utc_iso_8601() {
         let timestamp = timestamp_iso();
         assert_eq!(timestamp.len(), 20);
@@ -405,6 +496,7 @@ mod tests {
             latency_ms: 340,
             speed_kbps: 147.2,
             error: None,
+            failure: None,
         };
         let json = serde_json::to_string(&cs).unwrap();
         assert!(json.contains("\"working\":true"));

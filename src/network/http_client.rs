@@ -10,6 +10,8 @@ use hyper::client::conn::http1;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
 use rustls::ClientConfig;
+
+use crate::network::cause::{classify, Cause, Phase, Reached};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
@@ -56,16 +58,43 @@ pub struct HttpResult {
     pub headers: String,
     pub error: Option<String>,
     pub size_download: Option<u64>,
+    /// Причина провала — инструментовка замера (спайк #verify-histogram).
+    pub cause: Option<Cause>,
+}
+
+impl HttpResult {
+    /// Результат сорванной внешним таймаутом пробы. Отдельный конструктор, а не
+    /// литерал на месте: только здесь известно, что фазу надо взять из отметки,
+    /// — сам таймаут о ней не знает.
+    pub fn timed_out(reached: &Reached) -> HttpResult {
+        HttpResult {
+            status_code: None,
+            headers: String::new(),
+            error: Some("timeout".to_string()),
+            size_download: None,
+            cause: Some(Cause::Timeout(reached.phase())),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum HttpVerdict {
     Available,
-    SuspiciousRedirect { code: u16, location: String },
+    SuspiciousRedirect {
+        code: u16,
+        location: String,
+    },
     ServerReceivesFakes,
-    Unavailable { reason: String },
-    DataTransferFailed { size_download: u64 },
-    DpiDataLimit { size_download: u64 },
+    Unavailable {
+        reason: String,
+        cause: Option<Cause>,
+    },
+    DataTransferFailed {
+        size_download: u64,
+    },
+    DpiDataLimit {
+        size_download: u64,
+    },
 }
 
 impl fmt::Display for HttpVerdict {
@@ -78,7 +107,7 @@ impl fmt::Display for HttpVerdict {
             HttpVerdict::ServerReceivesFakes => {
                 write!(f, "http code 400. likely the server receives fakes.")
             }
-            HttpVerdict::Unavailable { reason } => {
+            HttpVerdict::Unavailable { reason, .. } => {
                 write!(f, "UNAVAILABLE {reason}")
             }
             HttpVerdict::DataTransferFailed { size_download } => {
@@ -179,19 +208,24 @@ pub async fn http_test(
 ) -> HttpResult {
     let timeout = Duration::from_secs(timeout_secs);
 
+    let reached = Reached::default();
     match tokio::time::timeout(
         timeout,
-        http_test_inner(protocol, domain, ip, fwmark, BodyMode::Head, via, None),
+        http_test_inner(
+            protocol,
+            domain,
+            ip,
+            fwmark,
+            BodyMode::Head,
+            via,
+            None,
+            &reached,
+        ),
     )
     .await
     {
         Ok(result) => result,
-        Err(_) => HttpResult {
-            status_code: None,
-            headers: String::new(),
-            error: Some("timeout".to_string()),
-            size_download: None,
-        },
+        Err(_) => HttpResult::timed_out(&reached),
     }
 }
 
@@ -207,19 +241,15 @@ pub async fn http_test_data(
 ) -> HttpResult {
     let timeout = Duration::from_secs(timeout_secs);
 
+    let reached = Reached::default();
     match tokio::time::timeout(
         timeout,
-        http_test_inner(protocol, domain, ip, fwmark, mode, via, None),
+        http_test_inner(protocol, domain, ip, fwmark, mode, via, None, &reached),
     )
     .await
     {
         Ok(result) => result,
-        Err(_) => HttpResult {
-            status_code: None,
-            headers: String::new(),
-            error: Some("timeout".to_string()),
-            size_download: None,
-        },
+        Err(_) => HttpResult::timed_out(&reached),
     }
 }
 
@@ -244,6 +274,7 @@ pub async fn http_test_data_capturing(
     let outer = Duration::from_secs(connect_timeout_secs + stall_secs + 1);
     let stall = Some(Duration::from_secs(stall_secs));
 
+    let reached = Reached::default();
     match tokio::time::timeout(
         outer,
         http_test_inner(
@@ -254,22 +285,19 @@ pub async fn http_test_data_capturing(
             BodyMode::LimitedTo(limit),
             None,
             stall,
+            &reached,
         ),
     )
     .await
     {
         Ok(result) => result,
-        Err(_) => HttpResult {
-            status_code: None,
-            headers: String::new(),
-            error: Some("timeout".to_string()),
-            size_download: None,
-        },
+        Err(_) => HttpResult::timed_out(&reached),
     }
 }
 
 /// Inner implementation: connect, optional TLS, send HTTP request, parse response.
 /// Follows one level of same-domain redirects (e.g. xnxx.com → www.xnxx.com).
+#[allow(clippy::too_many_arguments)] // отметка фазы добавлена замером поверх уже широкого набора
 async fn http_test_inner(
     protocol: Protocol,
     domain: &str,
@@ -278,8 +306,9 @@ async fn http_test_inner(
     mode: BodyMode,
     via: Option<&crate::network::via::Via>,
     stall: Option<Duration>,
+    reached: &Reached,
 ) -> HttpResult {
-    let result = http_single_request(protocol, domain, ip, fwmark, mode, via, stall).await;
+    let result = http_single_request(protocol, domain, ip, fwmark, mode, via, stall, reached).await;
 
     // Follow one redirect if it points to the same domain
     if let Some(code) = result.status_code {
@@ -295,6 +324,7 @@ async fn http_test_inner(
                             mode,
                             via,
                             stall,
+                            reached,
                         )
                         .await;
                     }
@@ -308,6 +338,7 @@ async fn http_test_inner(
 
 /// Perform a single HTTP(S) request without following redirects.
 ///
+#[allow(clippy::too_many_arguments)] // отметка фазы добавлена замером поверх уже широкого набора
 async fn http_single_request(
     protocol: Protocol,
     domain: &str,
@@ -316,6 +347,7 @@ async fn http_single_request(
     mode: BodyMode,
     via: Option<&crate::network::via::Via>,
     stall: Option<Duration>,
+    reached: &Reached,
 ) -> HttpResult {
     let port = protocol.port();
     let addr: SocketAddr = match format!("{ip}:{port}").parse() {
@@ -326,6 +358,7 @@ async fn http_single_request(
                 headers: String::new(),
                 error: Some(format!("invalid address: {e}")),
                 size_download: None,
+                cause: None,
             };
         }
     };
@@ -340,6 +373,7 @@ async fn http_single_request(
                     headers: String::new(),
                     error: Some(format!("proxy connect: {e}")),
                     size_download: None,
+                    cause: Some(classify(&e, Phase::Connect)),
                 };
             }
         },
@@ -351,14 +385,24 @@ async fn http_single_request(
                     headers: String::new(),
                     error: Some(format!("connect: {e}")),
                     size_download: None,
+                    cause: Some(classify(&e, Phase::Connect)),
                 };
             }
         },
     };
 
+    // Соединение есть. Для простого HTTP следующая фаза — сразу запрос; для TLS
+    // между ними стоит рукопожатие, и именно на нём цензор рвёт по имени.
+    reached.mark(match protocol {
+        Protocol::Http => Phase::Request,
+        Protocol::HttpsTls12 | Protocol::HttpsTls13 => Phase::Tls,
+    });
+
     // Step 2: Optionally wrap in TLS
     match protocol {
-        Protocol::Http => do_http_request(TokioIo::new(tcp_stream), domain, mode, stall).await,
+        Protocol::Http => {
+            do_http_request(TokioIo::new(tcp_stream), domain, mode, stall, reached).await
+        }
         Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
             let tls_config = make_tls_config(protocol);
             let connector = TlsConnector::from(tls_config);
@@ -370,6 +414,7 @@ async fn http_single_request(
                         headers: String::new(),
                         error: Some(format!("invalid server name: {e}")),
                         size_download: None,
+                        cause: Some(Cause::Protocol(Phase::Tls)),
                     };
                 }
             };
@@ -382,11 +427,15 @@ async fn http_single_request(
                         headers: String::new(),
                         error: Some(format!("tls: {e}")),
                         size_download: None,
+                        cause: None,
                     };
                 }
             };
 
-            do_http_request_https(TokioIo::new(tls_stream), domain, mode, stall).await
+            // Рукопожатие состоялось — дальше молчание уже открытого разговора,
+            // а не чёрная дыра.
+            reached.mark(Phase::Request);
+            do_http_request_https(TokioIo::new(tls_stream), domain, mode, stall, reached).await
         }
     }
 }
@@ -423,6 +472,7 @@ async fn do_http_request<IO>(
     domain: &str,
     mode: BodyMode,
     stall: Option<Duration>,
+    reached: &Reached,
 ) -> HttpResult
 where
     IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
@@ -435,6 +485,7 @@ where
                 headers: String::new(),
                 error: Some(format!("handshake: {e}")),
                 size_download: None,
+                cause: Some(classify(&e, Phase::Request)),
             };
         }
     };
@@ -450,7 +501,7 @@ where
         .body(Empty::<Bytes>::new())
         .expect("static request build");
 
-    send_and_parse(sender.send_request(req).await, mode, stall).await
+    send_and_parse(sender.send_request(req).await, mode, stall, reached).await
 }
 
 /// Send HTTP/1.1 request over a TLS connection (HTTPS).
@@ -460,6 +511,7 @@ async fn do_http_request_https<IO>(
     domain: &str,
     mode: BodyMode,
     stall: Option<Duration>,
+    reached: &Reached,
 ) -> HttpResult
 where
     IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
@@ -472,6 +524,7 @@ where
                 headers: String::new(),
                 error: Some(format!("handshake: {e}")),
                 size_download: None,
+                cause: Some(classify(&e, Phase::Request)),
             };
         }
     };
@@ -490,7 +543,7 @@ where
         .body(Empty::<Bytes>::new())
         .expect("static request build");
 
-    send_and_parse(sender.send_request(req).await, mode, stall).await
+    send_and_parse(sender.send_request(req).await, mode, stall, reached).await
 }
 
 /// Parse hyper response into HttpResult.
@@ -499,6 +552,7 @@ async fn send_and_parse(
     result: Result<hyper::Response<hyper::body::Incoming>, hyper::Error>,
     mode: BodyMode,
     stall: Option<Duration>,
+    reached: &Reached,
 ) -> HttpResult {
     let response = match result {
         Ok(r) => r,
@@ -508,9 +562,13 @@ async fn send_and_parse(
                 headers: String::new(),
                 error: Some(format!("request: {e}")),
                 size_download: None,
+                cause: Some(classify(&e, Phase::Request)),
             };
         }
     };
+
+    // Заголовки на руках: всё, что случится дальше, случится на теле.
+    reached.mark(Phase::Body);
 
     let status_code = Some(response.status().as_u16());
 
@@ -528,6 +586,7 @@ async fn send_and_parse(
         ));
     }
 
+    let mut body_cause: Option<Cause> = None;
     let size_download = if mode.is_get() {
         let limit = mode.max_bytes();
         let mut total: u64 = 0;
@@ -552,7 +611,12 @@ async fn send_and_parse(
                         }
                     }
                 }
-                Some(Err(_)) => break,
+                // Обрыв тела — та же улика, что и обрыв рукопожатия, и терять её
+                // нельзя: цензор, режущий на данных, виден только здесь.
+                Some(Err(e)) => {
+                    body_cause = Some(classify(&e, Phase::Body));
+                    break;
+                }
                 None => break,
             }
         }
@@ -566,6 +630,7 @@ async fn send_and_parse(
         headers,
         error: None,
         size_download,
+        cause: body_cause,
     }
 }
 
@@ -575,6 +640,7 @@ pub fn interpret_http_result(result: &HttpResult, domain: &str) -> HttpVerdict {
     if let Some(err) = &result.error {
         return HttpVerdict::Unavailable {
             reason: err.clone(),
+            cause: result.cause,
         };
     }
 
@@ -655,6 +721,55 @@ pub fn pick_random_ip(ips: &[String]) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// Реальный сокет, не выдумка: цепочку `io::Error` от tokio никакой макет не
+    /// воспроизведёт, а сломаться она может именно в ней. Порт 80 на петле взят
+    /// затем, что `Protocol::Http` берёт его сам; если на машине его кто-то
+    /// занял, тест об этом честно скажет отказом, а не тихо позеленеет.
+    #[tokio::test]
+    async fn a_probe_into_a_closed_port_carries_a_refused_cause() {
+        let result = http_test(Protocol::Http, "localhost", "127.0.0.1", 0, 2, None).await;
+        assert_eq!(
+            result.cause,
+            Some(Cause::Refused),
+            "проба обязана донести причину отказа наружу, а не только строку \
+             (ошибка была: {:?})",
+            result.error
+        );
+    }
+
+    #[test]
+    fn an_unavailable_verdict_carries_the_cause_that_produced_it() {
+        let result = HttpResult {
+            status_code: None,
+            headers: String::new(),
+            error: Some("tls: connection reset".to_string()),
+            size_download: None,
+            cause: Some(Cause::Reset(Phase::Tls)),
+        };
+        match interpret_http_result(&result, "example.com") {
+            HttpVerdict::Unavailable { cause, .. } => assert_eq!(
+                cause,
+                Some(Cause::Reset(Phase::Tls)),
+                "вердикт обязан донести причину до счётчика: без неё провал \
+                 неотличим от любого другого и гистограмма не собирается"
+            ),
+            other => panic!("ожидался Unavailable, получен {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_expired_outer_timeout_is_a_timeout_on_the_phase_reached() {
+        let reached = Reached::default();
+        reached.mark(Phase::Tls);
+        let result = HttpResult::timed_out(&reached);
+        assert_eq!(
+            result.cause,
+            Some(Cause::Timeout(Phase::Tls)),
+            "внешний таймаут обязан назвать фазу: таймаут на connect есть чёрная \
+             дыра, таймаут после рукопожатия — тишина открытого разговора"
+        );
+    }
+
     #[test]
     fn test_interpret_available_200() {
         let result = HttpResult {
@@ -662,6 +777,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: None,
+            cause: None,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -676,6 +792,7 @@ mod tests {
             headers: String::new(),
             error: Some("timeout".to_string()),
             size_download: None,
+            cause: None,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -690,6 +807,7 @@ mod tests {
             headers: "HTTP/1.1 400 Bad Request\r\n".to_string(),
             error: None,
             size_download: None,
+            cause: None,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -704,6 +822,7 @@ mod tests {
             headers: "HTTP/1.1 301 Moved\r\nLocation: https://example.com/\r\n".to_string(),
             error: None,
             size_download: None,
+            cause: None,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -719,6 +838,7 @@ mod tests {
                 .to_string(),
             error: None,
             size_download: None,
+            cause: None,
         };
         assert!(matches!(
             interpret_http_result(&result, "example.com"),
@@ -753,6 +873,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: Some(50_000),
+            cause: None,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -767,6 +888,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: Some(500),
+            cause: None,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -781,6 +903,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: Some(DATA_TRANSFER_MIN_BYTES),
+            cause: None,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -795,6 +918,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: None,
+            cause: None,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -809,6 +933,7 @@ mod tests {
             headers: String::new(),
             error: Some("connection refused".to_string()),
             size_download: None,
+            cause: None,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -823,6 +948,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: Some(16_384),
+            cause: None,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -840,6 +966,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: Some(10_240),
+            cause: None,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result_low, "example.com", DATA_TRANSFER_MIN_BYTES),
@@ -854,6 +981,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: Some(26_000),
+            cause: None,
         };
         assert!(matches!(
             interpret_data_transfer_result(&result_above, "example.com", DATA_TRANSFER_MIN_BYTES),

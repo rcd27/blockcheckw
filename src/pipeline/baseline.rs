@@ -53,6 +53,7 @@ pub async fn test_baseline(
                 protocol,
                 verdict: HttpVerdict::Unavailable {
                     reason: "no IPs available".to_string(),
+                    cause: None,
                 },
             };
         }
@@ -117,7 +118,7 @@ pub fn format_baseline_verdict_styled(result: &BaselineResult) -> String {
         HttpVerdict::ServerReceivesFakes => {
             ui::verdict_warning(&proto, "server receives fakes (HTTP 400)")
         }
-        HttpVerdict::Unavailable { reason } => {
+        HttpVerdict::Unavailable { reason, .. } => {
             ui::verdict_blocked(&proto, &format!("UNAVAILABLE {reason}"))
         }
         HttpVerdict::DataTransferFailed { size_download } => ui::verdict_warning(
@@ -145,6 +146,7 @@ mod tests {
             Protocol::Http,
             HttpVerdict::Unavailable {
                 reason: "timeout".to_string(),
+                cause: None,
             },
         );
         assert!(r.is_blocked());
@@ -180,6 +182,7 @@ mod tests {
             Protocol::Http,
             HttpVerdict::Unavailable {
                 reason: "timeout".to_string(),
+                cause: None,
             },
         );
         let s = format_baseline_verdict(&r);
@@ -207,6 +210,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: Some(12_000),
+            cause: None,
         };
         let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::HttpsTls12);
         assert!(
@@ -223,6 +227,7 @@ mod tests {
             headers: "HTTP/1.1 200 OK\r\n".to_string(),
             error: None,
             size_download: Some(64_000),
+            cause: None,
         };
         let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::HttpsTls12);
         assert!(
@@ -241,6 +246,7 @@ mod tests {
                 .to_string(),
             error: None,
             size_download: Some(0),
+            cause: None,
         };
         let verdict = interpret_baseline(&result, "www.cloudflare.com", Protocol::Http);
         assert!(
@@ -268,7 +274,8 @@ mod tests {
     #[test]
     fn throttle_verdict_false_for_unavailable_and_available() {
         assert!(!is_throttle_verdict(&HttpVerdict::Unavailable {
-            reason: "timeout".to_string()
+            reason: "timeout".to_string(),
+            cause: None
         }));
         assert!(!is_throttle_verdict(&HttpVerdict::Available));
     }

@@ -78,6 +78,10 @@ pub struct CheckedStrategy {
     pub circle: Admits,
 }
 
+/// Строка отчёта `check`. РАСШИРЕНА судьбой цели (`observed`, `admits`, `working`):
+/// прежние поля остались на местах с прежним смыслом, но читать надо `observed` —
+/// «не наблюдали» и «наблюдали пустоту» суть разное, и `working: false` в этих двух
+/// случаях означает не одно и то же.
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifiedStrategy {
     pub protocol: String,
@@ -85,9 +89,22 @@ pub struct VerifiedStrategy {
     pub coverage: usize,
     pub success_rate: f64,
     pub median_latency_ms: u64,
+    /// СЫРАЯ СПРАВКА, вердикта не несёт. Считается как `bytes / latency_ms`, а
+    /// знаменатель включает `connect` и TLS-рукопожатие: на коротком ответе поле мерит
+    /// рукопожатие, а не канал. Спека §9 объявила метод негодным; поле сохранено ради
+    /// совместимости JSON. Темп судят `Waited` и `Sag` — через `admits`.
     pub median_speed_kbps: f64,
     pub passes_ok: usize,
     pub passes_total: usize,
+    /// Что установило наблюдение: `Bytes`, `Mute`, `NoConnect`, `Unobserved`,
+    /// `Inconsistent`. Потребителю JSON читать НАДО ЭТО, а не `working`.
+    pub observed: String,
+    /// Круг допускаемых судеб. Одна судьба — сузили; несколько — не сузили; это не одно
+    /// и то же, и `working: false` в обоих случаях означает разное.
+    pub admits: Vec<String>,
+    /// Производное от судьбы: `working = (admits == [Good])`. Основанием быть перестало
+    /// (спека §10.4), но сохранено — по нему работает пайп `universal → check`.
+    pub working: bool,
 }
 
 /// Что вышло у пробы БЕЗ десинка. Без неё «работает» ниже может быть свойством линии.
@@ -102,8 +119,14 @@ pub struct CheckReport {
     pub domain: String,
     pub timestamp: String,
     pub total: usize,
+    /// Сколько строк в `strategies` привели цель к `Good`. НЕ длина списка: в него
+    /// идёт всякая наблюдённая стратегия.
     pub working: usize,
     pub elapsed_secs: f64,
+    /// Всякая НАБЛЮДЁННАЯ стратегия — та, чей круг судеб уже полного, — а не только
+    /// приведшая цель к `Good` (спека §6.2: человек видит лучшее из имеющегося вместо
+    /// пустого списка). Порядок — по судьбе (`rank::fate_order`). Судьба каждой строки
+    /// стоит рядом с ней: `observed` и `admits`.
     pub strategies: Vec<VerifiedStrategy>,
     /// Контроль без десинка. `None` — не прогоняли.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -65,8 +65,37 @@ pub enum Ended {
     BodyError,
     /// Мы перестали ждать: `stall` или внешний таймаут. О цели НИЧЕГО.
     WeStoppedWaiting,
-    /// До тела не дошло вовсе (`HEAD`, провал раньше).
+    /// До тела не дошло, и отказ ОПРЕДЕЛЁН: `ECONNREFUSED`, `EHOSTUNREACH`, `RST`.
+    /// Цель (или цензор за неё) высказалась — это ОТВЕТ, а не его отсутствие, и
+    /// повтор скажет то же самое (`Cause::deterministic`). Без этой ветки всякий
+    /// доконтентный отказ уезжал в `NeverStarted`, то есть в «мы не досмотрели», и
+    /// `Observed::NoConnect` с `Fate::Dead` не производились никогда.
+    Denied,
+    /// До тела не дошло вовсе (`HEAD`, провал раньше), и почему — не установлено.
     NeverStarted,
+}
+
+/// Чем кончилось чтение, когда до тела не дошло. Разбор тотален: определённый отказ
+/// есть ответ цели, неопределённый — наша слепота, и слить их значит списать всякий
+/// свой промах на цензора.
+fn ended_before_body(cause: Cause) -> Ended {
+    match cause {
+        Cause::Refused | Cause::Unreachable | Cause::Reset(_) => Ended::Denied,
+        Cause::Timeout(_) | Cause::Io(_) | Cause::Protocol(_) => Ended::NeverStarted,
+    }
+}
+
+/// Добить ряд секундных окон нулями до фактической длительности чтения тела.
+///
+/// Окно закрывается ВРЕМЕНЕМ, а не приходом кадра (`sag.rs`: `Cadence::Own { 1000 }`,
+/// «иначе прибор молчал бы, когда байты перестали идти совсем»). Замерший навсегда
+/// поток — классический DPI-cap — не заводит новых окон сам, и секунды тишины подряд
+/// в ряд не попадали вовсе: `Sag` оставался слеп ровно там, где он и нужен.
+fn pad_windows(windows: &mut Vec<u64>, seconds: u64) {
+    let needed = seconds as usize + 1;
+    if windows.len() < needed {
+        windows.resize(needed, 0);
+    }
 }
 
 #[derive(Debug)]
@@ -394,13 +423,14 @@ async fn http_single_request(
         Some(v) => match v.tcp_connect(addr).await {
             Ok(s) => s,
             Err(e) => {
+                let cause = classify(&e, Phase::Connect);
                 return HttpResult {
                     status_code: None,
                     headers: String::new(),
                     error: Some(format!("proxy connect: {e}")),
                     size_download: None,
-                    cause: Some(classify(&e, Phase::Connect)),
-                    ended: Ended::NeverStarted,
+                    cause: Some(cause),
+                    ended: ended_before_body(cause),
                     windows: Vec::new(),
                 };
             }
@@ -408,13 +438,14 @@ async fn http_single_request(
         None => match marked_tcp_connect(addr, fwmark).await {
             Ok(s) => s,
             Err(e) => {
+                let cause = classify(&e, Phase::Connect);
                 return HttpResult {
                     status_code: None,
                     headers: String::new(),
                     error: Some(format!("connect: {e}")),
                     size_download: None,
-                    cause: Some(classify(&e, Phase::Connect)),
-                    ended: Ended::NeverStarted,
+                    cause: Some(cause),
+                    ended: ended_before_body(cause),
                     windows: Vec::new(),
                 };
             }
@@ -454,13 +485,17 @@ async fn http_single_request(
             let tls_stream = match connector.connect(server_name, tcp_stream).await {
                 Ok(s) => s,
                 Err(e) => {
+                    // Самый цензурно-значимый отказ (RST по SNI) — и он один уходил в
+                    // гистограмму как `unknown`, а `Phase::Tls` не появлялась в замере
+                    // никогда. Зовём `classify`, как все восемь соседних веток.
+                    let cause = classify(&e, Phase::Tls);
                     return HttpResult {
                         status_code: None,
                         headers: String::new(),
                         error: Some(format!("tls: {e}")),
                         size_download: None,
-                        cause: None,
-                        ended: Ended::NeverStarted,
+                        cause: Some(cause),
+                        ended: ended_before_body(cause),
                         windows: Vec::new(),
                     };
                 }
@@ -514,13 +549,14 @@ where
     let (mut sender, conn) = match http1::handshake(io).await {
         Ok(h) => h,
         Err(e) => {
+            let cause = classify(&e, Phase::Request);
             return HttpResult {
                 status_code: None,
                 headers: String::new(),
                 error: Some(format!("handshake: {e}")),
                 size_download: None,
-                cause: Some(classify(&e, Phase::Request)),
-                ended: Ended::NeverStarted,
+                cause: Some(cause),
+                ended: ended_before_body(cause),
                 windows: Vec::new(),
             };
         }
@@ -555,13 +591,14 @@ where
     let (mut sender, conn) = match http1::handshake(io).await {
         Ok(h) => h,
         Err(e) => {
+            let cause = classify(&e, Phase::Request);
             return HttpResult {
                 status_code: None,
                 headers: String::new(),
                 error: Some(format!("handshake: {e}")),
                 size_download: None,
-                cause: Some(classify(&e, Phase::Request)),
-                ended: Ended::NeverStarted,
+                cause: Some(cause),
+                ended: ended_before_body(cause),
                 windows: Vec::new(),
             };
         }
@@ -595,13 +632,14 @@ async fn send_and_parse(
     let response = match result {
         Ok(r) => r,
         Err(e) => {
+            let cause = classify(&e, Phase::Request);
             return HttpResult {
                 status_code: None,
                 headers: String::new(),
                 error: Some(format!("request: {e}")),
                 size_download: None,
-                cause: Some(classify(&e, Phase::Request)),
-                ended: Ended::NeverStarted,
+                cause: Some(cause),
+                ended: ended_before_body(cause),
                 windows: Vec::new(),
             };
         }
@@ -680,6 +718,8 @@ async fn send_and_parse(
                 }
             }
         }
+        // Хвостовая тишина — часть ряда, а не его отсутствие: см. `pad_windows`.
+        pad_windows(&mut windows, body_started.elapsed().as_secs());
         Some(total)
     } else {
         None
@@ -819,6 +859,53 @@ mod tests {
             ),
             other => panic!("ожидался Unavailable, получен {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_definite_denial_before_the_body_is_an_answer_not_our_blindness() {
+        // `Refused`, `Unreachable`, `Reset` — цель (или цензор за неё) высказалась.
+        // Уезжая в `NeverStarted`, они давали `Delivery::Abandoned` и `Unobserved`:
+        // `Observed::NoConnect` и `Fate::Dead` не производились никогда.
+        assert_eq!(ended_before_body(Cause::Refused), Ended::Denied);
+        assert_eq!(ended_before_body(Cause::Unreachable), Ended::Denied);
+        assert_eq!(ended_before_body(Cause::Reset(Phase::Tls)), Ended::Denied);
+    }
+
+    #[test]
+    fn an_indefinite_failure_before_the_body_stays_our_blindness() {
+        // Тишина неотличима от потери пакета, а `Io`/`Protocol` мы не берёмся звать
+        // определёнными: приговор за них выносить не за что.
+        assert_eq!(
+            ended_before_body(Cause::Timeout(Phase::Connect)),
+            Ended::NeverStarted
+        );
+        assert_eq!(
+            ended_before_body(Cause::Io(Phase::Tls)),
+            Ended::NeverStarted
+        );
+        assert_eq!(
+            ended_before_body(Cause::Protocol(Phase::Tls)),
+            Ended::NeverStarted
+        );
+    }
+
+    #[test]
+    fn tail_silence_lands_in_the_series_instead_of_ending_it() {
+        // Замерший навсегда поток (DPI-cap): два окна с байтами, дальше тишина до
+        // пятой секунды. Без добивки ряд обрывался на приходе последнего кадра, и
+        // `Sag` слеп ровно там, где он и нужен.
+        let mut windows = vec![100_000, 100_000];
+        pad_windows(&mut windows, 5);
+        assert_eq!(windows, vec![100_000, 100_000, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn padding_never_shortens_a_series_it_already_covers() {
+        // Кадр пришёл в ту же секунду, на которой чтение и кончилось: добивать нечего,
+        // и отрезать уже посчитанное добивка не смеет.
+        let mut windows = vec![1, 2, 3];
+        pad_windows(&mut windows, 1);
+        assert_eq!(windows, vec![1, 2, 3]);
     }
 
     #[test]

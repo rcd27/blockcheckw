@@ -17,11 +17,17 @@ use crate::strategy::generator::TaggedStrategy;
 use crate::strategy::rank;
 use crate::ui;
 
-/// Verify strategies from a vanilla report with real data transfer.
+/// Прогнать стратегии из vanilla-отчёта с настоящей передачей данных и СУДИТЬ СУДЬБУ
+/// цели по каждой.
 ///
-/// Each strategy is tested `passes` times. If the first pass fails, the strategy
-/// is dropped immediately (early-exit). `--take N` stops after finding N strategies
-/// with 100% success rate per protocol.
+/// В отчёт идёт всякая НАБЛЮДЁННАЯ стратегия — та, чей круг судеб уже полного, — а не
+/// только приведшая цель к `Good`. Порядок выдачи задаёт `rank::fate_order`. `--take N`
+/// считает только `Good`: он останавливает ПОИСК, а не урезает выдачу, и когда `Good`
+/// нет ни у кого, список всё равно выдаётся ранжированным, а не пустым (спека §6.2).
+///
+/// `passes` жёстко равен единице у единственного вызывающего: повторять сужение круга
+/// судеб нечем (спека §9). Параметр сохранён — цикл проходов и ранний выход на первом
+/// провале ждут возврата повторов.
 #[allow(clippy::too_many_arguments)] // witness добавлен задачей 7 поверх уже широкого набора параметров
 pub async fn run_check(
     config: &CoreConfig,
@@ -110,24 +116,17 @@ pub async fn run_check(
         .underlined(),
     ));
 
-    // ЗАМЕР (спайк #verify-histogram): под переменной ранний выход снимается —
-    // иначе флапающих не видно вовсе, они умирают на первом же провале, и
-    // вопрос «стоило ли повторять» остаётся без данных.
-    let measure_all = std::env::var("BCW_MEASURE_ALL_PASSES").is_ok();
-    if measure_all {
-        screen.println(&format!(
-            "  {} ранний выход снят: гоняем все {passes} проходов",
-            style("замер").bold(),
-        ));
-    }
-    let mut rows: Vec<Vec<crate::pipeline::verify::Outcome>> = Vec::new();
-
+    // В отчёт идёт всякая НАБЛЮДЁННАЯ стратегия, а не только приведшая цель к `Good`
+    // (спека §6.2). Порядок задаёт `rank::fate_order` ниже.
     let mut verified: Vec<VerifiedStrategy> = Vec::new();
     // Ранг по судьбе, нога в ногу с `verified`: запись сюда происходит ровно там же,
-    // где `verified.push` — в ветке «все проходы OK», иначе `zip` ниже разъедется.
+    // где `verified.push`, иначе `zip` ниже разъедется.
     let mut judged: Vec<rank::Ranked> = Vec::new();
     let mut checked_count: usize = 0;
-    // --take: count perfect (all passes OK) strategies per protocol
+    // Сколько строк привели цель к `Good` — это и есть `working` отчёта, а вовсе не
+    // длина списка.
+    let mut working_count: usize = 0;
+    // --take: count strategies that brought the target to `Good`, per protocol
     let mut perfect_per_proto: std::collections::HashMap<Protocol, usize> =
         std::collections::HashMap::new();
 
@@ -163,8 +162,13 @@ pub async fn run_check(
         let mut speeds: Vec<f64> = Vec::with_capacity(passes);
         let mut latencies: Vec<u64> = Vec::with_capacity(passes);
         let mut last_error: Option<String> = None;
-        // Круг последнего успешного прохода — для `judged`, если все проходы окажутся OK.
+        // Круг ПОСЛЕДНЕГО прохода, каким бы он ни был. Прежде он переписывался только
+        // в ветке `checked.working`, и оттого у всякой строки в `judged` стоял круг
+        // `[Good]`: ступени 1–6 в `rank::step` были в бою недостижимы.
         let mut last_circle: Admits = Admits(&ALL_FATES);
+        // Само последнее наблюдение — из него растёт строка отчёта: судьба, имя
+        // показания, замеры. Без него в отчёт попадали только `Good`.
+        let mut last_checked: Option<CheckedStrategy> = None;
 
         // Span на проверку конкретной стратегии (ребёнок bcw.check). Здесь живёт
         // причина FAIL (connect/timeout) — то, ради чего трейсинг и затевался.
@@ -175,7 +179,6 @@ pub async fn run_check(
             status = tracing::field::Empty,
             reason = tracing::field::Empty,
         );
-        let mut row: Vec<crate::pipeline::verify::Outcome> = Vec::with_capacity(passes);
         async {
             for pass_idx in 0..passes {
                 let started = crate::pipeline::verify::now_epoch();
@@ -198,64 +201,90 @@ pub async fn run_check(
                     ),
                 };
                 crate::pipeline::verify::log_pass(started, checked_count, pass_idx + 1, &outcome);
-                row.push(outcome);
 
-                if checked.working {
+                last_circle = checked.circle;
+                let working = checked.working;
+                if working {
                     ok_count += 1;
                     speeds.push(checked.speed_kbps);
                     latencies.push(checked.latency_ms);
-                    last_circle = checked.circle;
                 } else {
-                    last_error = checked.error;
-                    // Early-exit: first fail → drop this strategy
-                    if !measure_all {
-                        break;
-                    }
+                    last_error = checked.error.clone();
+                }
+                last_checked = Some(checked);
+                if !working {
+                    // Early-exit: first fail → no more passes for this strategy
+                    break;
                 }
             }
         }
         .instrument(strategy_span.clone())
         .await;
 
-        rows.push(row);
+        speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        latencies.sort();
+        // Медиана по УСПЕШНЫМ проходам; их может не быть вовсе — наблюдённая, но не
+        // приведшая к `Good` стратегия тоже идёт в отчёт, и замер у неё свой.
+        let median_speed = speeds.get(speeds.len() / 2).copied();
+        let median_latency = latencies.get(latencies.len() / 2).copied();
 
-        if all_passes_succeeded(ok_count, total_run, passes) {
-            // All passes OK
+        let good = all_passes_succeeded(ok_count, total_run, passes);
+        if good {
             strategy_span.record("status", "working");
-            speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            latencies.sort();
-            let median_speed = speeds[speeds.len() / 2];
-            let median_latency = latencies[latencies.len() / 2];
-
             screen.println(&format!(
                 "    {} median {}ms, {:.1} KB/s",
                 style("OK").green().bold(),
-                median_latency,
-                median_speed,
+                median_latency.unwrap_or(0),
+                median_speed.unwrap_or(0.0),
             ));
-
             *perfect_per_proto.entry(tagged.protocol).or_insert(0) += 1;
+            working_count += 1;
+        } else {
+            let reason = last_error.as_deref().unwrap_or("failed");
+            strategy_span.record("status", "fail");
+            strategy_span.record("reason", reason);
+            screen.println(&format!(
+                "    {} {}/{} {} [{}]",
+                style("FAIL").red().bold(),
+                ok_count,
+                total_run,
+                style(reason).red(),
+                style(circle_name(last_circle)).dim(),
+            ));
+        }
 
-            verified.push(VerifiedStrategy {
-                protocol: tagged.protocol.to_string(),
-                args: args_str.clone(),
-                coverage: tagged.coverage,
-                success_rate: 1.0,
-                median_latency_ms: median_latency,
-                median_speed_kbps: median_speed,
-                passes_ok: ok_count,
-                passes_total: passes,
-            });
+        // Критерий попадания в отчёт — стратегия была НАБЛЮДЕНА, а не «работает».
+        // Спека §6.2: `Grinding` (и всё прочее суженное) выдаётся, когда `Good` нет ни
+        // у кого, — человек видит лучшее из имеющегося ВМЕСТО ПУСТОГО СПИСКА. Прежде в
+        // `verified` пускали только `working`, и без `--reference-via` круг не сужался
+        // до `[Good]` ни у кого: отчёт был всегда пуст.
+        if let Some(checked) = last_checked.filter(|c| observed_at_all(c.circle)) {
             // Прибор, а не голая длительность: `waited_of` молчит (`None`) на нулевом
             // ожидании — «не мерили», а не «мерили и вышел ноль». Подставить 0 значило
             // бы объявить неизмеренное лучшим из всех: в ранге меньше — значит быстрее
             // (`rank::fate_order`). Кладём наибольшее возможное значение, чтобы
             // неизмеренное никогда не обошло измеренное внутри одной ступени круга.
-            let waited_ms =
-                match observe::waited_of(std::time::Duration::from_millis(median_latency)) {
-                    Some(waited) => waited.0.as_millis() as u64,
-                    None => u64::MAX,
-                };
+            let latency_ms = median_latency.unwrap_or(checked.latency_ms);
+            let waited_ms = match observe::waited_of(std::time::Duration::from_millis(latency_ms)) {
+                Some(waited) => waited.0.as_millis() as u64,
+                None => u64::MAX,
+            };
+            verified.push(VerifiedStrategy {
+                protocol: tagged.protocol.to_string(),
+                args: args_str.clone(),
+                coverage: tagged.coverage,
+                success_rate: match total_run {
+                    0 => 0.0,
+                    run => ok_count as f64 / run as f64,
+                },
+                median_latency_ms: latency_ms,
+                median_speed_kbps: median_speed.unwrap_or(checked.speed_kbps),
+                passes_ok: ok_count,
+                passes_total: passes,
+                observed: checked.observed.clone(),
+                admits: checked.admits.clone(),
+                working: checked.working,
+            });
             judged.push(rank::Ranked {
                 // Круг едет в `CheckedStrategy.circle` значением — строки из `admits`
                 // для сортировки не годятся.
@@ -263,17 +292,6 @@ pub async fn run_check(
                 waited_ms,
                 simplicity: rank::simplicity_key(&args_str),
             });
-        } else {
-            let reason = last_error.as_deref().unwrap_or("failed");
-            strategy_span.record("status", "fail");
-            strategy_span.record("reason", reason);
-            screen.println(&format!(
-                "    {} {}/{} {}",
-                style("FAIL").red().bold(),
-                ok_count,
-                total_run,
-                style(reason).red(),
-            ));
         }
 
         // Check if all protocols have reached the take limit
@@ -285,7 +303,7 @@ pub async fn run_check(
                 .all(|p| perfect_per_proto.get(p).copied().unwrap_or(0) >= take);
             if all_satisfied {
                 screen.println(&format!(
-                    "  {} found {} verified strategies per protocol, stopping",
+                    "  {} found {} Good strategies per protocol, stopping",
                     style("--take").bold(),
                     take,
                 ));
@@ -294,11 +312,11 @@ pub async fn run_check(
         }
     }
 
-    crate::pipeline::verify::report_stability(
-        &crate::pipeline::verify::stability_of(&rows, passes),
-        domain,
-        screen,
-    );
+    // Замер устойчивости снят: `passes` жёстко равен единице, значит всякая строка в
+    // `stability_of` либо `always`, либо `never`, а `flapping` не может быть ненулевым
+    // никогда. Печатать «0 флапают» как РЕЗУЛЬТАТ замера значит рапортовать о том, чего
+    // не делали. Сами функции в `verify.rs` остались — они понадобятся, когда вернутся
+    // повторы.
 
     // Порядок обхода был по простоте — это разумно для ПРОБ. Порядок ВЫДАЧИ задаёт
     // измеренное: до этой строки ранг не знал ни одного факта о канале.
@@ -317,7 +335,7 @@ pub async fn run_check(
         domain: domain.to_string(),
         timestamp: timestamp_iso(),
         total: checked_count,
-        working: verified.len(),
+        working: working_count,
         elapsed_secs: start.elapsed().as_secs_f64(),
         strategies: verified,
         control,
@@ -530,6 +548,29 @@ fn timestamp_iso() -> String {
     crate::pipeline::test_report::chrono_like_timestamp()
 }
 
+/// Стратегия была НАБЛЮДЕНА: её круг судеб уже полного. Полный круг — это
+/// `Observed::Unobserved`, то есть «о судьбе ничего»; такая строка не ранжируется вовсе
+/// (спека §6) и в отчёт не идёт. Всё остальное идёт — включая `Mirage`, `Trap` и `Dead`:
+/// они не рабочие, но они УСТАНОВЛЕНЫ, и человек видит лучшее из имеющегося вместо
+/// пустого списка.
+fn observed_at_all(circle: Admits) -> bool {
+    circle.0 != ALL_FATES.as_slice()
+}
+
+/// Круг судеб одной строкой — для экрана. Одна судьба значит «сузили», несколько —
+/// «не сузили», и человеку надо видеть разницу: «не наблюдали» ≠ «наблюдали пустоту».
+fn circle_name(circle: Admits) -> String {
+    match observed_at_all(circle) {
+        false => "не наблюдали".to_string(),
+        true => circle
+            .0
+            .iter()
+            .map(|f| format!("{f:?}"))
+            .collect::<Vec<_>>()
+            .join("|"),
+    }
+}
+
 /// Все проходы стратегии прошли. Наивная проверка `ok_count == total_run &&
 /// ok_count == passes` истинна и при `passes == 0` (`0 == 0 && 0 == 0`) — то есть
 /// «все прошли», хотя не прошло ни одного, и `speeds`/`latencies` тогда пусты:
@@ -630,24 +671,82 @@ mod tests {
         assert!(!timestamp[..19].chars().all(|ch| ch.is_ascii_digit()));
     }
 
+    /// `CheckedStrategy` НЕ сериализуется ничем: `CheckReport.strategies` — это
+    /// `Vec<VerifiedStrategy>`. Прежний тест зеленел на сериализации структуры, которой
+    /// никто не сериализует, и потому пропустил ровно то, что ревью и нашло: судьба до
+    /// JSON не доезжала. Тест перенаправлен на ту структуру, что в отчёт и попадает.
     #[test]
-    fn test_checked_strategy_serialization() {
-        let cs = CheckedStrategy {
+    fn a_report_row_carries_the_fate_it_was_judged_by() {
+        let vs = VerifiedStrategy {
             protocol: "HTTPS/TLS1.2".to_string(),
             args: "--payload=tls_client_hello --lua-desync=fake".to_string(),
-            working: true,
-            bytes_downloaded: 51234,
-            latency_ms: 340,
-            speed_kbps: 147.2,
-            error: None,
-            failure: None,
+            coverage: 1,
+            success_rate: 1.0,
+            median_latency_ms: 340,
+            median_speed_kbps: 147.2,
+            passes_ok: 1,
+            passes_total: 1,
             observed: "Bytes".to_string(),
             admits: vec!["Good".to_string()],
-            circle: Admits(&[Fate::Good]),
+            working: true,
         };
-        let json = serde_json::to_string(&cs).unwrap();
-        assert!(json.contains("\"working\":true"));
-        assert!(!json.contains("\"error\""));
+        let json = serde_json::to_string(&vs).unwrap();
+        assert!(json.contains("\"observed\":\"Bytes\""), "{json}");
+        assert!(json.contains("\"admits\":[\"Good\"]"), "{json}");
+        assert!(json.contains("\"working\":true"), "{json}");
+    }
+
+    #[test]
+    fn a_row_that_is_not_working_still_carries_its_fate_into_json() {
+        // Ради этого отчёт и расширен: отказ движка, `Mirage`, `Trap` и таймаут прежде
+        // ОДИНАКОВО отсутствовали в JSON, и «не наблюдали» было неотличимо от
+        // «наблюдали пустоту».
+        let vs = VerifiedStrategy {
+            protocol: "HTTPS/TLS1.2".to_string(),
+            args: "--lua-desync=fake".to_string(),
+            coverage: 1,
+            success_rate: 0.0,
+            median_latency_ms: 120,
+            median_speed_kbps: 0.0,
+            passes_ok: 0,
+            passes_total: 1,
+            observed: "Bytes".to_string(),
+            admits: vec!["Mirage".to_string()],
+            working: false,
+        };
+        let json = serde_json::to_string(&vs).unwrap();
+        assert!(json.contains("\"admits\":[\"Mirage\"]"), "{json}");
+        assert!(json.contains("\"working\":false"), "{json}");
+    }
+
+    #[test]
+    fn a_strategy_whose_circle_is_still_full_is_not_in_the_report() {
+        // Полный круг значит «о судьбе ничего». Это не последнее место — это отсутствие
+        // места (спека §6): такая строка не ранжируется и в отчёт не идёт.
+        assert!(!observed_at_all(Admits(&ALL_FATES)));
+        assert_eq!(circle_name(Admits(&ALL_FATES)), "не наблюдали");
+    }
+
+    #[test]
+    fn every_narrowed_circle_is_in_the_report_not_only_good() {
+        // Ровно то, чего не хватало: без `--reference-via` круг не сужается до `[Good]`
+        // ни у кого, и критерий `working` оставлял отчёт пустым на всех ~300 стратегиях.
+        for circle in [
+            [Fate::Good].as_slice(),
+            [Fate::Grinding].as_slice(),
+            [Fate::Mirage].as_slice(),
+            [Fate::Trap].as_slice(),
+            [Fate::Dead].as_slice(),
+            // Круг из трёх — то, что выдаёт `narrow` без эталона: уже полного, значит
+            // наблюдение состоялось.
+            [Fate::Mirage, Fate::Grinding, Fate::Good].as_slice(),
+        ] {
+            assert!(observed_at_all(Admits(circle)), "круг {circle:?}");
+        }
+        assert_eq!(
+            circle_name(Admits(&[Fate::Mirage, Fate::Grinding, Fate::Good])),
+            "Mirage|Grinding|Good"
+        );
     }
 
     #[test]
@@ -678,6 +777,9 @@ mod tests {
             median_speed_kbps: 5.5,
             passes_ok: 3,
             passes_total: 3,
+            observed: "Bytes".to_string(),
+            admits: vec!["Good".to_string()],
+            working: true,
         };
         let report = CheckReport {
             domain: "rutracker.org".to_string(),
@@ -704,6 +806,9 @@ mod tests {
             median_speed_kbps: 2.5,
             passes_ok: 2,
             passes_total: 3,
+            observed: "Bytes".to_string(),
+            admits: vec!["Grinding".to_string()],
+            working: false,
         };
         let json = serde_json::to_string(&vs).unwrap();
         assert!(json.contains("\"success_rate\":0.67"));

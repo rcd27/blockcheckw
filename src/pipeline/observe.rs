@@ -9,8 +9,12 @@ use reflex_core::DetectorEvent;
 use reflex_instrument::pace::{PaceInstrument, Waited};
 use reflex_instrument::sag::{Sag, SagInstrument};
 
-/// Что доставило плечо. `Abandoned` — единственный честный ответ там, где ждать
-/// перестали мы: окно не досмотрено, и о цели не установлено ничего.
+/// Что доставило плечо. `Abandoned` — честный ответ там, где о цели не установлено
+/// ничего: мы перестали ждать (`WeStoppedWaiting`) либо до тела не дошло и почему —
+/// неизвестно (`NeverStarted`: таймаут, `Io`, `Protocol`). `Silent` — там, где окно
+/// досмотрено и пусто, ЛИБО отказ пришёл определённый (`Denied`): `ECONNREFUSED`,
+/// отсутствие маршрута и `RST` есть ОТВЕТ цели, а не его отсутствие, и повторять
+/// пробу незачем (`Cause::deterministic`).
 pub fn delivery_of(bytes: u64, ended: Ended) -> Delivery {
     match (bytes, ended) {
         // Байты были — остальное неважно: факт о цели состоялся.
@@ -19,7 +23,7 @@ pub fn delivery_of(bytes: u64, ended: Ended) -> Delivery {
         // Лимит без единого байта недостижим (лимит считается от байтов), но разбор
         // тотален: ветка есть, и она честнее, чем `unreachable!()`.
         (0, Ended::LimitReached) => Delivery::Abandoned,
-        (0, Ended::BodyComplete | Ended::BodyError) => Delivery::Silent,
+        (0, Ended::BodyComplete | Ended::BodyError | Ended::Denied) => Delivery::Silent,
     }
 }
 
@@ -85,6 +89,30 @@ mod tests {
         // Поток закрыт сервером или оборван им: окно досмотрено, и пусто — факт о ЦЕЛИ.
         assert_eq!(delivery_of(0, Ended::BodyComplete), Delivery::Silent);
         assert_eq!(delivery_of(0, Ended::BodyError), Delivery::Silent);
+    }
+
+    #[test]
+    fn определённый_отказ_до_тела_есть_молчание_цели_а_не_наша_слепота() {
+        // `Refused`/`Unreachable`/`RST` приезжают как `Ended::Denied`. Пока они ехали
+        // как `NeverStarted`, выходило `Abandoned` → `Unobserved` при любом `connected`,
+        // и результат `connected_of` игнорировался всегда, когда байтов не было.
+        assert_eq!(delivery_of(0, Ended::Denied), Delivery::Silent);
+    }
+
+    #[test]
+    fn мёртвая_цель_и_ловушка_становятся_достижимы() {
+        // Ровно то, ради чего заведён `Denied`: `Fate::Dead` и `Fate::Trap` рекламируются
+        // в README и держат ступени в `rank::step`, а не производились никогда.
+        use crate::pipeline::fate::{observe, Fate, Observed};
+        let denied = delivery_of(0, Ended::Denied);
+        // Отказ на коннекте: TCP не встал.
+        let no_connect = observe(connected_of(Some(Cause::Refused)), denied);
+        assert_eq!(no_connect, Observed::NoConnect);
+        assert_eq!(no_connect.admits(), [Fate::Dead].as_slice());
+        // Сброс по SNI: рукопожатие началось, значит TCP встал.
+        let mute = observe(connected_of(Some(Cause::Reset(Phase::Tls))), denied);
+        assert_eq!(mute, Observed::Mute);
+        assert_eq!(mute.admits(), [Fate::Trap].as_slice());
     }
 
     #[test]

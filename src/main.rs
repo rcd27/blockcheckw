@@ -118,7 +118,9 @@ enum Command {
         install: bool,
     },
 
-    /// Check strategies from a vanilla report with real data transfer
+    /// Check strategies from a vanilla report with real data transfer.
+    /// В JSON читать надо `observed`/`admits` (судьба цели), а не `working`:
+    /// «не наблюдали» и «наблюдали пустоту» оба дают `working: false`.
     Check {
         /// Path to report file (reads from stdin if omitted and pipe detected)
         #[arg(long)]
@@ -136,7 +138,9 @@ enum Command {
         #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u64).range(1..=60))]
         timeout: u64,
 
-        /// Stop after finding N verified strategies per protocol (0 = check all)
+        /// Stop the SEARCH after N strategies bringing the target to Good, per protocol
+        /// (0 = check all). Выдачу не урезает: в отчёт идёт всякая наблюдённая стратегия,
+        /// ранжированная по судьбе.
         #[arg(long, default_value_t = 0)]
         take: usize,
 

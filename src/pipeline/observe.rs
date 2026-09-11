@@ -6,6 +6,7 @@ use crate::network::http_client::Ended;
 use crate::pipeline::fate::Delivery;
 use reflex_core::mealy::Mealy;
 use reflex_core::DetectorEvent;
+use reflex_instrument::pace::{PaceInstrument, Waited};
 use reflex_instrument::sag::{Sag, SagInstrument};
 
 /// Что доставило плечо. `Abandoned` — единственный честный ответ там, где ждать
@@ -42,6 +43,17 @@ pub fn connected_of(cause: Option<Cause>) -> bool {
 pub fn sag_of(windows: &[u64]) -> Option<Sag> {
     let (_, spoken, ()) = SagInstrument.step(DetectorEvent::Packet {
         input: windows.to_vec(),
+        at: std::time::Instant::now(),
+    });
+    spoken.into_iter().next()
+}
+
+/// Сколько человек ждал запрошенного. Прибор мерит не «сколько байт», а «сколько ждал»:
+/// поток, отдавший мегабайт за две минуты и за две секунды, по объёму неразличим, а
+/// переживается противоположно.
+pub fn waited_of(elapsed: std::time::Duration) -> Option<Waited> {
+    let (_, spoken, ()) = PaceInstrument.step(DetectorEvent::Packet {
+        input: elapsed,
         at: std::time::Instant::now(),
     });
     spoken.into_iter().next()
@@ -113,5 +125,17 @@ mod tests {
         // Меньше четырёх окон — прибор молчит, и это НЕ «всё хорошо».
         assert_eq!(sag_of(&[100_000, 1]), None);
         assert_eq!(sag_of(&[]), None);
+    }
+
+    #[test]
+    fn нулевое_ожидание_не_показание() {
+        // Прибор молчит о нуле: «ждал ноль» значит «не мерили».
+        assert_eq!(waited_of(std::time::Duration::ZERO), None);
+    }
+
+    #[test]
+    fn ожидание_называется_с_адресом_а_не_голой_длительностью() {
+        let waited = waited_of(std::time::Duration::from_millis(1500)).expect("показание");
+        assert_eq!(waited.0, std::time::Duration::from_millis(1500));
     }
 }

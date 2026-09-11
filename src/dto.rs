@@ -90,6 +90,13 @@ pub struct VerifiedStrategy {
     pub passes_total: usize,
 }
 
+/// Что вышло у пробы БЕЗ десинка. Без неё «работает» ниже может быть свойством линии.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControlVerdict {
+    pub observed: String,
+    pub admits: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CheckReport {
     pub domain: String,
@@ -98,6 +105,11 @@ pub struct CheckReport {
     pub working: usize,
     pub elapsed_secs: f64,
     pub strategies: Vec<VerifiedStrategy>,
+    /// Контроль без десинка. `None` — не прогоняли.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control: Option<ControlVerdict>,
+    /// Контроль сам привёл цель к `Good`: о стратегиях прогон не говорит ничего.
+    pub inconclusive: bool,
 }
 
 // ── Universal report ─────────────────────────────────────────────────────────

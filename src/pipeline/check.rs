@@ -4,7 +4,7 @@ use console::style;
 use tracing::{info_span, Instrument};
 
 use crate::config::{CoreConfig, Protocol};
-use crate::dto::{CheckReport, CheckedStrategy, VerifiedStrategy};
+use crate::dto::{CheckReport, CheckedStrategy, ControlVerdict, VerifiedStrategy};
 use crate::firewall::nft::{OwnedTable, SystemNft};
 use crate::firewall::nftables;
 use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, HttpResult};
@@ -50,9 +50,57 @@ pub async fn run_check(
                 working: 0,
                 elapsed_secs: start.elapsed().as_secs_f64(),
                 strategies: vec![],
+                control: None,
+                inconclusive: false,
             };
         }
     };
+
+    // КОНТРОЛЬ. `fwmark = 0` не совпадает с правилом диспетчеризации, и проба идёт мимо
+    // движка: это и есть «а что будет без десинка вообще». Без него всякое «работает»
+    // ниже может оказаться свойством линии, а не стратегии.
+    let control_ip = pick_random_ip(ips).expect("ips проверены вызывающим");
+    let control_started = Instant::now();
+    let control_result = http_test_data(
+        Protocol::HttpsTls12,
+        domain,
+        control_ip,
+        0,
+        config.request_timeout,
+        BodyMode::Unlimited,
+        None,
+    )
+    .await;
+    let control_observed = fate::observe(
+        observe::connected_of(control_result.cause),
+        observe::delivery_of(
+            control_result.size_download.unwrap_or(0),
+            control_result.ended,
+        ),
+    );
+    let control_admits = fate::narrow(fate::Evidence {
+        observed: control_observed,
+        sag: observe::sag_of(&control_result.windows),
+        attempts: 1,
+        reference,
+        print: crate::pipeline::reference::ContentPrint::of(&control_result),
+    });
+    // Замер ни о чём: цель открывается и без нас.
+    let inconclusive = matches!(control_admits.0, [Fate::Good]);
+    let _ = control_started;
+
+    if inconclusive {
+        screen.println(&format!(
+            "  {} контроль без десинка привёл цель к Good — домен на этой линии не режется. \
+             О стратегиях этот прогон молчит.",
+            style("ВНИМАНИЕ:").yellow().bold(),
+        ));
+    }
+
+    let control = Some(ControlVerdict {
+        observed: control_observed.name().to_string(),
+        admits: control_admits.0.iter().map(|f| format!("{f:?}")).collect(),
+    });
 
     screen.println(&format!(
         "  {}",
@@ -264,6 +312,8 @@ pub async fn run_check(
         working: verified.len(),
         elapsed_secs: start.elapsed().as_secs_f64(),
         strategies: verified,
+        control,
+        inconclusive,
     }
 }
 
@@ -572,6 +622,8 @@ mod tests {
             working: 1,
             elapsed_secs: 5.3,
             strategies: vec![],
+            control: None,
+            inconclusive: false,
         };
         let json = serde_json::to_string_pretty(&report).unwrap();
         assert!(json.contains("\"domain\": \"rutracker.org\""));
@@ -597,6 +649,8 @@ mod tests {
             working: 3,
             elapsed_secs: 10.0,
             strategies: vec![best],
+            control: None,
+            inconclusive: false,
         };
         let json = serde_json::to_string_pretty(&report).unwrap();
         assert!(json.contains("\"success_rate\": 1.0"));

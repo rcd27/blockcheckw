@@ -119,8 +119,9 @@ enum Command {
     },
 
     /// Check strategies from a vanilla report with real data transfer.
-    /// В JSON читать надо `observed`/`admits` (судьба цели), а не `working`:
-    /// «не наблюдали» и «наблюдали пустоту» оба дают `working: false`.
+    /// В JSON две оси: `working` — прошёл ли канал (главная), `observed`/`admits` —
+    /// подлинность ресурса (побочная). Читать надо обе: «не наблюдали» и «наблюдали
+    /// пустоту» оба дают `working: false`, но это разные вещи.
     Check {
         /// Path to report file (reads from stdin if omitted and pipe detected)
         #[arg(long)]
@@ -138,9 +139,9 @@ enum Command {
         #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u64).range(1..=60))]
         timeout: u64,
 
-        /// Stop the SEARCH after N strategies bringing the target to Good, per protocol
-        /// (0 = check all). Выдачу не урезает: в отчёт идёт всякая наблюдённая стратегия,
-        /// ранжированная по судьбе.
+        /// Stop the SEARCH after N PASSING strategies, per protocol (0 = check all).
+        /// Выдачу не урезает: в отчёт идёт всякая наблюдённая стратегия, ранжированная
+        /// по судьбе.
         #[arg(long, default_value_t = 0)]
         take: usize,
 
@@ -153,6 +154,17 @@ enum Command {
         /// «байты текут» и «ресурс тот самый» неразличимы (см. Fate::Mirage).
         #[arg(long, value_name = "ENDPOINT")]
         reference_via: Option<String>,
+
+        /// Путь пробы. Умолчание детерминировано: `/robots.txt` не редиректит и не
+        /// гуляет в объёме, значит сверка с эталоном точна (спека §6-бис).
+        ///
+        /// ОТКАТА НА `/` ЗДЕСЬ НЕТ, И ЭТО НЕ БАГ. Если `robots.txt` у домена нет,
+        /// сервер отдаст `404` — и это ПОЛНОЦЕННАЯ проба: `404` от настоящего сервера,
+        /// прошедший через DPI, доказывает проход канала ровно так же, как `200`, а
+        /// эталон получит тот же `404` и сойдётся. Откат на `/` вернул бы ровно ту беду,
+        /// ради которой флаг и заведён: редиректы и разброс объёма.
+        #[arg(long, value_name = "PATH", default_value = "/robots.txt")]
+        probe_path: String,
 
         /// Save JSON report to file (default: stdout)
         #[arg(short, long)]
@@ -494,6 +506,7 @@ async fn main() {
                 take,
                 passes,
                 reference_via,
+                probe_path,
                 output,
             }) => {
                 let sub = matches
@@ -552,6 +565,7 @@ async fn main() {
                     output: output.as_deref(),
                     via: via.as_ref(),
                     reference_via: reference_via.as_ref(),
+                    probe_path: &probe_path,
                     prereq: prereq
                         .as_ref()
                         .expect("check requires prerequisites (skipped only for `status`)"),
@@ -877,6 +891,35 @@ mod tests {
             install_dir_from_exe(&exe),
             Some(std::path::Path::new("custom").join("bin"))
         );
+    }
+
+    #[test]
+    fn check_probe_path_defaults_to_robots_txt() {
+        // Детерминированный путь — умолчание, а не опция: он не редиректит и не гуляет
+        // в объёме (спека §6-бис). Корень возвращается только явной просьбой.
+        let cli =
+            Cli::try_parse_from(["blockcheckw", "check", "--from-file", "v.json"]).expect("parse");
+        match cli.command {
+            Some(Command::Check { probe_path, .. }) => assert_eq!(probe_path, "/robots.txt"),
+            _ => panic!("expected Check command"),
+        }
+    }
+
+    #[test]
+    fn check_accepts_probe_path_flag() {
+        let cli = Cli::try_parse_from([
+            "blockcheckw",
+            "check",
+            "--from-file",
+            "v.json",
+            "--probe-path",
+            "/forum/index.php",
+        ])
+        .expect("parse");
+        match cli.command {
+            Some(Command::Check { probe_path, .. }) => assert_eq!(probe_path, "/forum/index.php"),
+            _ => panic!("expected Check command"),
+        }
     }
 
     #[test]

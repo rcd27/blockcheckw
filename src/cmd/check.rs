@@ -20,6 +20,8 @@ pub struct CheckParams<'a> {
     pub output: Option<&'a str>,
     pub via: Option<&'a Via>,
     pub reference_via: Option<&'a Via>,
+    /// Путь пробы (`--probe-path`). Тем же путём снимается эталон.
+    pub probe_path: &'a str,
     pub prereq: &'a super::Prerequisites,
 }
 
@@ -41,8 +43,13 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         output,
         via,
         reference_via,
+        probe_path,
         prereq,
     } = params;
+
+    // Путь приводится к абсолютному один раз, здесь: дальше он едет и в пробу, и в
+    // эталон, и разойтись они не должны.
+    let probe_path = blockcheckw::network::http_client::normalize_probe_path(probe_path);
 
     if passes != 1 {
         eprintln!(
@@ -117,9 +124,16 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
     // движок не должен работать вхолостую, пока мы ходим за эталоном.
     let reference = match reference_via {
         Some(clean) => {
-            let taken =
-                reference::take_reference(clean, Protocol::HttpsTls12, domain, &ips, timeout, 2)
-                    .await;
+            let taken = reference::take_reference(
+                clean,
+                Protocol::HttpsTls12,
+                domain,
+                &ips,
+                timeout,
+                2,
+                &probe_path,
+            )
+            .await;
             match &taken {
                 Some(_) => screen.add_info_line("  эталон снят через чистый egress"),
                 None => screen.add_info_line(
@@ -155,6 +169,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
     // Run check
     screen.newline();
     screen.println(&ui::section("Checking strategies (data transfer)"));
+    screen.println(&format!("  путь пробы: {}", style(&probe_path).bold()));
     screen.println(&format!(
         "  {}",
         style("Tip: use --take 10 to stop after 10 verified per protocol").yellow()
@@ -171,6 +186,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         // и повторять сужение круга судеб нечем.
         1,
         reference.as_ref(),
+        &probe_path,
         &mut screen,
     )
     .await;

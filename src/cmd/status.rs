@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 use blockcheckw::config::{DnsMode, Protocol};
 use blockcheckw::dto::{BlockType, DomainStatus, StatusReport};
 use blockcheckw::network::http_client::{
-    http_test_data, pick_random_ip, BodyMode, DATA_TRANSFER_MIN_BYTES,
+    http_test_data, pick_random_ip, BodyMode, DATA_TRANSFER_MIN_BYTES, ROOT_PATH,
 };
 use blockcheckw::network::{dns, isp, via::Via};
 use blockcheckw::pipeline::test_report::chrono_like_timestamp;
@@ -91,6 +91,8 @@ async fn resolve_and_probe(
         timeout_secs,
         BodyMode::LimitedTo(DATA_TRANSFER_MIN_BYTES * 2),
         via,
+        // Проба в корень: здесь меряют САМ САЙТ, а не путь `check`.
+        ROOT_PATH,
     )
     .await;
     let elapsed = start.elapsed();

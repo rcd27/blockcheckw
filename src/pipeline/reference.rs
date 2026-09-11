@@ -80,6 +80,9 @@ pub fn agrees(reference: &Reference, probe: &ContentPrint) -> bool {
 ///
 /// `samples` — сколько выборок. Меньше двух эталона не даёт (см. `Reference::take`):
 /// вторая нужна не для точности, а для ДОПУСКА.
+///
+/// `path` — ТОТ ЖЕ путь, каким идут пробы стратегий. Сверка эталона с пробой по разным
+/// путям сравнивала бы разные ресурсы, и всякая стратегия выходила бы `Mirage`.
 pub async fn take_reference(
     clean: &Via,
     protocol: Protocol,
@@ -87,6 +90,7 @@ pub async fn take_reference(
     ips: &[String],
     timeout_secs: u64,
     samples: usize,
+    path: &str,
 ) -> Option<Reference> {
     let ip = ips.first()?;
     // Два режима `Via` доходят до цели РАЗНЫМИ путями, и оба поддержаны:
@@ -110,6 +114,7 @@ pub async fn take_reference(
             timeout_secs,
             BodyMode::Unlimited,
             Some(clean),
+            path,
         )
         .await;
         if result.error.is_none() {

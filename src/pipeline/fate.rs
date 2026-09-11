@@ -3,6 +3,7 @@
 
 pub use reflex_instrument::fate::{observe, Admits, Delivery, Fate, Observed, ALL_FATES};
 
+use crate::network::http_client::Ended;
 use crate::pipeline::reference::{agrees, ContentPrint, Reference};
 use reflex_instrument::sag::Sag;
 
@@ -43,6 +44,29 @@ pub fn narrow(evidence: Evidence<'_>) -> Admits {
         true => Admits(GRINDING_ONLY),
         false => Admits(GOOD_ONLY),
     }
+}
+
+/// Прошла ли стратегия. ГЛАВНАЯ ось замера, и она НЕ проекция круга судеб (спека
+/// §6-бис): круг отвечает на вопрос о подлинности ресурса, а здесь спрашивается другое —
+/// провёл ли десинк нас через DPI.
+///
+/// ```text
+/// passed = байты цели потекли
+///        И разговор не прервали
+///        И (эталона нет ИЛИ содержимое сошлось)
+/// ```
+///
+/// `false` — только при ПОЛОЖИТЕЛЬНОМ свидетельстве против: байтов не было
+/// (`observed != Bytes`), разговор прервали (`Ended::BodyError` — сброс или TLS-алерт
+/// посреди передачи), либо содержимое с эталоном разошлось (круг сузился до
+/// `[Fate::Mirage]`). НЕУСТАНОВЛЕННАЯ подлинность — широкий круг без эталона — вердикта
+/// о канале не отменяет: «подлинность не доказана, значит не работает» хоронит рабочую
+/// стратегию, которую человек уже никогда не увидит.
+///
+/// `Ended::WeStoppedWaiting` обрывом НЕ считается: до `Observed::Bytes` оно доезжает
+/// только с непустым телом, то есть это МЫ перестали ждать, тогда как канал отдавал.
+pub fn passed(observed: Observed, ended: Ended, circle: Admits) -> bool {
+    observed == Observed::Bytes && ended != Ended::BodyError && !matches!(circle.0, [Fate::Mirage])
 }
 
 #[cfg(test)]
@@ -224,6 +248,148 @@ mod tests {
             });
             assert_eq!(circle.0, observed.admits(), "показание {observed:?}");
         }
+    }
+
+    // ── Главная ось: `passed` ────────────────────────────────────────────────
+    //
+    // Таблица на все сочетания показания, исхода чтения и круга судеб. Она — предмет
+    // продукта, и проверяется без сети.
+
+    const ШИРОКИЙ: &[Fate] = &[Fate::Mirage, Fate::Grinding, Fate::Good];
+
+    #[test]
+    fn таблица_прохода_по_показанию_и_исходу() {
+        // Круг взят широкий — тот, что выдаёт `narrow` БЕЗ эталона. По побочной оси он
+        // не говорит ничего, и потому главную ось не трогает.
+        let таблица: &[(Observed, Ended, bool)] = &[
+            // Байты потекли: прошла всюду, кроме обрыва тела.
+            (Observed::Bytes, Ended::BodyComplete, true),
+            (Observed::Bytes, Ended::LimitReached, true),
+            (Observed::Bytes, Ended::WeStoppedWaiting, true),
+            (Observed::Bytes, Ended::Denied, true),
+            (Observed::Bytes, Ended::NeverStarted, true),
+            // Разговор прервали посреди передачи — свидетельство ПРОТИВ.
+            (Observed::Bytes, Ended::BodyError, false),
+            // Байтов не было: ни один исход чтения этого не исправляет.
+            (Observed::Mute, Ended::BodyComplete, false),
+            (Observed::Mute, Ended::LimitReached, false),
+            (Observed::Mute, Ended::BodyError, false),
+            (Observed::Mute, Ended::WeStoppedWaiting, false),
+            (Observed::Mute, Ended::Denied, false),
+            (Observed::Mute, Ended::NeverStarted, false),
+            (Observed::NoConnect, Ended::BodyComplete, false),
+            (Observed::NoConnect, Ended::LimitReached, false),
+            (Observed::NoConnect, Ended::BodyError, false),
+            (Observed::NoConnect, Ended::WeStoppedWaiting, false),
+            (Observed::NoConnect, Ended::Denied, false),
+            (Observed::NoConnect, Ended::NeverStarted, false),
+            (Observed::Unobserved, Ended::BodyComplete, false),
+            (Observed::Unobserved, Ended::LimitReached, false),
+            (Observed::Unobserved, Ended::BodyError, false),
+            (Observed::Unobserved, Ended::WeStoppedWaiting, false),
+            (Observed::Unobserved, Ended::Denied, false),
+            (Observed::Unobserved, Ended::NeverStarted, false),
+            (Observed::Inconsistent, Ended::BodyComplete, false),
+            (Observed::Inconsistent, Ended::LimitReached, false),
+            (Observed::Inconsistent, Ended::BodyError, false),
+            (Observed::Inconsistent, Ended::WeStoppedWaiting, false),
+            (Observed::Inconsistent, Ended::Denied, false),
+            (Observed::Inconsistent, Ended::NeverStarted, false),
+        ];
+        for &(observed, ended, ожидание) in таблица {
+            assert_eq!(
+                passed(observed, ended, Admits(ШИРОКИЙ)),
+                ожидание,
+                "{observed:?} + {ended:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn таблица_прохода_по_кругу_судеб() {
+        // Показание и исход держим лучшими: меняется только побочная ось.
+        let таблица: &[(&[Fate], bool)] = &[
+            // Содержимое сошлось с эталоном.
+            (&[Fate::Good], true),
+            (&[Fate::Grinding], true),
+            // Содержимое РАЗОШЛОСЬ — единственное, чем побочная ось топит главную.
+            (&[Fate::Mirage], false),
+            // Эталона не было: подлинность не установлена — и это не свидетельство против.
+            (ШИРОКИЙ, true),
+            // Круг полон: показание `Bytes` такого круга не даёт, но закон всё равно
+            // читается по показанию, а не по ширине круга.
+            (&ALL_FATES, true),
+        ];
+        for &(circle, ожидание) in таблица {
+            assert_eq!(
+                passed(Observed::Bytes, Ended::BodyComplete, Admits(circle)),
+                ожидание,
+                "круг {circle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn неустановленная_подлинность_не_топит_вердикт_о_канале() {
+        // Тот самый девятикратный случай с живой линии: байты через DPI прошли, а
+        // эталона нет либо страница гуляет между узлами CDN. Круг честно широк, и
+        // стратегия ОБЯЗАНА считаться рабочей.
+        assert!(passed(
+            Observed::Bytes,
+            Ended::BodyComplete,
+            Admits(ШИРОКИЙ)
+        ));
+        // Мутация «working = (круг == [Good])» красит ровно здесь.
+        assert!(!matches!(Admits(ШИРОКИЙ).0, [Fate::Good]));
+    }
+
+    #[test]
+    fn мы_перестали_ждать_это_не_обрыв_разговора() {
+        // `WeStoppedWaiting` при непустом теле значит «канал отдавал, а мы ушли».
+        // Списать это на цензора значило бы похоронить рабочую стратегию за свой промах.
+        assert!(passed(
+            Observed::Bytes,
+            Ended::WeStoppedWaiting,
+            Admits(ШИРОКИЙ)
+        ));
+        // А сброс посреди передачи — именно обрыв.
+        assert!(!passed(Observed::Bytes, Ended::BodyError, Admits(ШИРОКИЙ)));
+    }
+
+    #[test]
+    fn разошедшееся_содержимое_топит_даже_при_целом_разговоре() {
+        // Блок-страница провайдера доезжает целиком и без единой ошибки чтения.
+        // Побочная ось здесь высказалась ПОЛОЖИТЕЛЬНО — и только потому топит.
+        assert!(!passed(
+            Observed::Bytes,
+            Ended::BodyComplete,
+            Admits(MIRAGE_ONLY)
+        ));
+    }
+
+    #[test]
+    fn проход_и_круг_судеб_живут_порознь() {
+        // Ради этого правка и делалась: у одного и того же прохода круг может быть
+        // любым из трёх, и вердикт о КАНАЛЕ от этого не меняется.
+        let reference = эталон();
+        let сошлось = narrow(Evidence {
+            observed: Observed::Bytes,
+            sag: None,
+            attempts: 1,
+            reference: Some(&reference),
+            print: проба(105_000),
+        });
+        let без_эталона = narrow(Evidence {
+            observed: Observed::Bytes,
+            sag: None,
+            attempts: 1,
+            reference: None,
+            print: проба(105_000),
+        });
+        assert_eq!(сошлось.0, [Fate::Good].as_slice());
+        assert_eq!(без_эталона.0, ШИРОКИЙ);
+        assert!(passed(Observed::Bytes, Ended::BodyComplete, сошлось));
+        assert!(passed(Observed::Bytes, Ended::BodyComplete, без_эталона));
     }
 
     #[test]

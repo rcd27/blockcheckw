@@ -4,7 +4,7 @@ use crate::config::{CoreConfig, Protocol};
 use crate::error::{BlockcheckError, HttpVerdictAvailable, TaskResult};
 use crate::network::http_client::{
     http_test, http_test_data, interpret_data_transfer_result, interpret_http_result,
-    pick_random_ip, BodyMode, HttpVerdict,
+    pick_random_ip, BodyMode, HttpVerdict, ROOT_PATH,
 };
 use crate::nfqws2::mark::ProfileMark;
 
@@ -74,6 +74,7 @@ pub async fn probe_profile(
                 config.request_timeout,
                 BodyMode::Unlimited,
                 None,
+                ROOT_PATH,
             )
             .await;
             interpret_data_transfer_result(&result, &task.domain, min_bytes)

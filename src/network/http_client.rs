@@ -52,6 +52,23 @@ impl BodyMode {
 
 const REDIRECT_CODES: &[u16] = &[301, 302, 307, 308];
 
+/// Корень сайта. Путь пробы стал параметром (спека §6-бис), и тем, кто мерит САМ САЙТ
+/// (baseline, scan, status), корень по-прежнему нужен — но теперь это выбор вызывающего,
+/// а не константа, вшитая в построение запроса.
+pub const ROOT_PATH: &str = "/";
+
+/// Привести путь пробы к виду, пригодному для строки запроса. Пустое и относительное
+/// hyper отвергает построением URI, и отвергает уже ПОСЛЕ коннекта — то есть отказ
+/// выглядел бы уликой против цензора.
+pub fn normalize_probe_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    match trimmed {
+        "" => ROOT_PATH.to_string(),
+        p if p.starts_with('/') => p.to_string(),
+        p => format!("/{p}"),
+    }
+}
+
 /// Чем кончилось чтение. Различает ДОСМОТРЕННОЕ окно от брошенного — без этого
 /// «цель молчала» неотличимо от «мы не дождались», и всякий наш промах становится
 /// уликой против цензора.
@@ -269,6 +286,7 @@ pub async fn http_test(
             domain,
             ip,
             fwmark,
+            ROOT_PATH,
             BodyMode::Head,
             via,
             None,
@@ -283,6 +301,11 @@ pub async fn http_test(
 }
 
 /// Perform an HTTP(S) data transfer test (GET with streaming download).
+///
+/// `path` — путь пробы. Корень годится там, где меряют сам сайт (`ROOT_PATH`); `check`
+/// передаёт `--probe-path`, потому что от пути зависит СВЕРКА С ЭТАЛОНОМ, а не вердикт
+/// о канале (спека §6-бис).
+#[allow(clippy::too_many_arguments)] // путь пробы добавлен спекой §6-бис поверх уже широкого набора
 pub async fn http_test_data(
     protocol: Protocol,
     domain: &str,
@@ -291,13 +314,16 @@ pub async fn http_test_data(
     timeout_secs: u64,
     mode: BodyMode,
     via: Option<&crate::network::via::Via>,
+    path: &str,
 ) -> HttpResult {
     let timeout = Duration::from_secs(timeout_secs);
 
     let reached = Reached::default();
     match tokio::time::timeout(
         timeout,
-        http_test_inner(protocol, domain, ip, fwmark, mode, via, None, &reached),
+        http_test_inner(
+            protocol, domain, ip, fwmark, path, mode, via, None, &reached,
+        ),
     )
     .await
     {
@@ -335,6 +361,7 @@ pub async fn http_test_data_capturing(
             domain,
             ip,
             fwmark,
+            ROOT_PATH,
             BodyMode::LimitedTo(limit),
             None,
             stall,
@@ -356,31 +383,26 @@ async fn http_test_inner(
     domain: &str,
     ip: &str,
     fwmark: u32,
+    path: &str,
     mode: BodyMode,
     via: Option<&crate::network::via::Via>,
     stall: Option<Duration>,
     reached: &Reached,
 ) -> HttpResult {
-    let result = http_single_request(protocol, domain, ip, fwmark, mode, via, stall, reached).await;
+    let result = http_single_request(
+        protocol, domain, ip, fwmark, path, mode, via, stall, reached,
+    )
+    .await;
 
-    // Follow one redirect if it points to the same domain
+    // Follow one redirect if it points to the same domain — хостом И ПУТЁМ.
     if let Some(code) = result.status_code {
         if REDIRECT_CODES.contains(&code) {
             if let Some(location) = extract_location(&result.headers) {
-                if location.to_lowercase().contains(&domain.to_lowercase()) {
-                    if let Some(redirect_host) = extract_host_from_url(&location) {
-                        return http_single_request(
-                            protocol,
-                            &redirect_host,
-                            ip,
-                            fwmark,
-                            mode,
-                            via,
-                            stall,
-                            reached,
-                        )
-                        .await;
-                    }
+                if let Some((host, target)) = redirect_target(&location, domain) {
+                    return http_single_request(
+                        protocol, &host, ip, fwmark, &target, mode, via, stall, reached,
+                    )
+                    .await;
                 }
             }
         }
@@ -397,6 +419,7 @@ async fn http_single_request(
     domain: &str,
     ip: &str,
     fwmark: u32,
+    path: &str,
     mode: BodyMode,
     via: Option<&crate::network::via::Via>,
     stall: Option<Duration>,
@@ -462,7 +485,7 @@ async fn http_single_request(
     // Step 2: Optionally wrap in TLS
     match protocol {
         Protocol::Http => {
-            do_http_request(TokioIo::new(tcp_stream), domain, mode, stall, reached).await
+            do_http_request(TokioIo::new(tcp_stream), domain, path, mode, stall, reached).await
         }
         Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
             let tls_config = make_tls_config(protocol);
@@ -504,7 +527,8 @@ async fn http_single_request(
             // Рукопожатие состоялось — дальше молчание уже открытого разговора,
             // а не чёрная дыра.
             reached.mark(Phase::Request);
-            do_http_request_https(TokioIo::new(tls_stream), domain, mode, stall, reached).await
+            do_http_request_https(TokioIo::new(tls_stream), domain, path, mode, stall, reached)
+                .await
         }
     }
 }
@@ -534,11 +558,42 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     }
 }
 
+/// Куда ведёт редирект: хост И ПУТЬ. Прежде брался только хост, а путь снова просился
+/// корневой — и `rutracker.org/` → `301` на `/forum/index.php` → снова `GET /` давал тот
+/// же `301`: «ресурсом» меряли 529-байтовое тело редиректа вместо 96334-байтовой страницы.
+///
+/// `None` — идти некуда: чужой домен (блок-страница провайдера ловится именно так),
+/// пустой или относительный без ведущей косой черты `Location`.
+fn redirect_target(location: &str, domain: &str) -> Option<(String, String)> {
+    let location = location.trim();
+    if location.is_empty() {
+        return None;
+    }
+    // Относительный `Location` — законная форма (RFC 9110 §10.2.2) и на самом же
+    // `rutracker.org` встречается. Хост при нём прежний, значит и проверять нечего.
+    if location.starts_with('/') {
+        return Some((domain.to_string(), location.to_string()));
+    }
+    let host = extract_host_from_url(location)?;
+    if !host.to_lowercase().contains(&domain.to_lowercase()) {
+        return None;
+    }
+    let after_scheme = location
+        .strip_prefix("https://")
+        .or_else(|| location.strip_prefix("http://"))?;
+    let path = match after_scheme.find('/') {
+        Some(at) => after_scheme[at..].to_string(),
+        None => ROOT_PATH.to_string(),
+    };
+    Some((host, path))
+}
+
 /// Send HTTP/1.1 request over a plain TCP connection (HTTP).
 /// Always uses GET for HTTP (need to see redirects/body).
 async fn do_http_request<IO>(
     io: IO,
     domain: &str,
+    path: &str,
     mode: BodyMode,
     stall: Option<Duration>,
     reached: &Reached,
@@ -566,12 +621,26 @@ where
         let _ = conn.await;
     });
 
-    // infallible: static headers + empty body
-    let req = Request::get("/")
+    // Путь пришёл параметром и уже нормализован (`normalize_probe_path`): построение
+    // URI может отказать только на пути, которого нормализация не выдаёт.
+    let req = match Request::get(path)
         .header("Host", domain)
         .header("User-Agent", "Mozilla")
         .body(Empty::<Bytes>::new())
-        .expect("static request build");
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResult {
+                status_code: None,
+                headers: String::new(),
+                error: Some(format!("bad probe path {path:?}: {e}")),
+                size_download: None,
+                cause: Some(Cause::Protocol(Phase::Request)),
+                ended: Ended::NeverStarted,
+                windows: Vec::new(),
+            };
+        }
+    };
 
     send_and_parse(sender.send_request(req).await, mode, stall, reached).await
 }
@@ -581,6 +650,7 @@ where
 async fn do_http_request_https<IO>(
     io: IO,
     domain: &str,
+    path: &str,
     mode: BodyMode,
     stall: Option<Duration>,
     reached: &Reached,
@@ -609,14 +679,28 @@ where
     });
 
     let method = if mode.is_get() { "GET" } else { "HEAD" };
-    // infallible: static headers + empty body
-    let req = Request::builder()
+    // Путь пришёл параметром и уже нормализован (`normalize_probe_path`): построение
+    // URI может отказать только на пути, которого нормализация не выдаёт.
+    let req = match Request::builder()
         .method(method)
-        .uri("/")
+        .uri(path)
         .header("Host", domain)
         .header("User-Agent", "Mozilla")
         .body(Empty::<Bytes>::new())
-        .expect("static request build");
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResult {
+                status_code: None,
+                headers: String::new(),
+                error: Some(format!("bad probe path {path:?}: {e}")),
+                size_download: None,
+                cause: Some(Cause::Protocol(Phase::Request)),
+                ended: Ended::NeverStarted,
+                windows: Vec::new(),
+            };
+        }
+    };
 
     send_and_parse(sender.send_request(req).await, mode, stall, reached).await
 }
@@ -1181,6 +1265,69 @@ mod tests {
     fn test_extract_location_missing() {
         let headers = "HTTP/1.1 200 OK\r\nServer: nginx\r\n";
         assert_eq!(extract_location(headers), None);
+    }
+
+    #[test]
+    fn переход_по_редиректу_берёт_путь_а_не_только_хост() {
+        // Замер на живой линии: `rutracker.org/` отдаёт `301` на `/forum/index.php`.
+        // Прежний код брал из `Location` только ХОСТ и снова просил `/` — получал тот же
+        // `301`, и 529-байтовое тело редиректа шло в сверку как «ресурс». Отсутствие
+        // этого теста и есть причина, по которой баг дожил до живого замера.
+        assert_eq!(
+            redirect_target("https://rutracker.org/forum/index.php", "rutracker.org"),
+            Some(("rutracker.org".to_string(), "/forum/index.php".to_string()))
+        );
+    }
+
+    #[test]
+    fn переход_по_редиректу_меняет_и_хост_и_путь() {
+        assert_eq!(
+            redirect_target("https://www.xnxx.com/some/page?a=1", "xnxx.com"),
+            Some(("www.xnxx.com".to_string(), "/some/page?a=1".to_string()))
+        );
+    }
+
+    #[test]
+    fn редирект_без_пути_ведёт_в_корень() {
+        assert_eq!(
+            redirect_target("https://www.xnxx.com", "xnxx.com"),
+            Some(("www.xnxx.com".to_string(), ROOT_PATH.to_string()))
+        );
+        assert_eq!(
+            redirect_target("https://www.xnxx.com/", "xnxx.com"),
+            Some(("www.xnxx.com".to_string(), "/".to_string()))
+        );
+    }
+
+    #[test]
+    fn относительный_редирект_сохраняет_хост_и_берёт_путь() {
+        // `Location: /forum/index.php` — законная форма, и прежняя проверка
+        // «`Location` содержит домен» отвергала её вовсе.
+        assert_eq!(
+            redirect_target("/forum/index.php", "rutracker.org"),
+            Some(("rutracker.org".to_string(), "/forum/index.php".to_string()))
+        );
+    }
+
+    #[test]
+    fn редирект_на_чужой_домен_не_переход_а_улика() {
+        // Блок-страница провайдера ловится именно так: идти туда незачем.
+        assert_eq!(
+            redirect_target("https://warning.rkn.gov.ru/blocked", "rutracker.org"),
+            None
+        );
+        assert_eq!(redirect_target("", "rutracker.org"), None);
+        assert_eq!(redirect_target("   ", "rutracker.org"), None);
+    }
+
+    #[test]
+    fn путь_пробы_нормализуется_до_абсолютного() {
+        assert_eq!(normalize_probe_path("/robots.txt"), "/robots.txt");
+        assert_eq!(normalize_probe_path("robots.txt"), "/robots.txt");
+        assert_eq!(normalize_probe_path(" /robots.txt "), "/robots.txt");
+        // Пустой путь — корень: hyper отверг бы пустой URI уже ПОСЛЕ коннекта, и отказ
+        // выглядел бы уликой против цензора.
+        assert_eq!(normalize_probe_path(""), ROOT_PATH);
     }
 
     #[test]

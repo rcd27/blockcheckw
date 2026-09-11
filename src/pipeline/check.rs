@@ -10,7 +10,7 @@ use crate::firewall::nftables;
 use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, HttpResult};
 use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
 use crate::nfqws2::run::SystemNfqws2;
-use crate::pipeline::fate::{self, Admits, Fate, Observed, ALL_FATES};
+use crate::pipeline::fate::{self, Admits, Observed, ALL_FATES};
 use crate::pipeline::observe;
 use crate::pipeline::reference::{ContentPrint, Reference};
 use crate::strategy::generator::TaggedStrategy;
@@ -21,13 +21,21 @@ use crate::ui;
 /// цели по каждой.
 ///
 /// В отчёт идёт всякая НАБЛЮДЁННАЯ стратегия — та, чей круг судеб уже полного, — а не
-/// только приведшая цель к `Good`. Порядок выдачи задаёт `rank::fate_order`. `--take N`
-/// считает только `Good`: он останавливает ПОИСК, а не урезает выдачу, и когда `Good`
-/// нет ни у кого, список всё равно выдаётся ранжированным, а не пустым (спека §6.2).
+/// только прошедшая. Порядок выдачи задаёт `rank::fate_order`. `--take N` считает только
+/// ПРОШЕДШИЕ (`fate::passed`): он останавливает ПОИСК, а не урезает выдачу, и когда не
+/// прошёл никто, список всё равно выдаётся ранжированным, а не пустым (спека §6.2).
 ///
 /// `passes` жёстко равен единице у единственного вызывающего: повторять сужение круга
 /// судеб нечем (спека §9). Параметр сохранён — цикл проходов и ранний выход на первом
 /// провале ждут возврата повторов.
+///
+/// ГЛАВНЫЙ вердикт (`working`) выносит `fate::passed`, а НЕ круг судеб (спека §6-бис):
+/// «провёл ли десинк нас через DPI» и «подлинный ли ресурс вернулся» — два разных
+/// вопроса, и неустановленная подлинность первого не отменяет. Круг остаётся честным и
+/// едет в отчёт рядом.
+///
+/// `probe_path` — путь пробы. Тем же путём снят эталон: сверка по разным путям сравнила
+/// бы разные ресурсы.
 #[allow(clippy::too_many_arguments)] // witness добавлен задачей 7 поверх уже широкого набора параметров
 pub async fn run_check(
     config: &CoreConfig,
@@ -38,6 +46,7 @@ pub async fn run_check(
     take: usize,
     passes: usize,
     reference: Option<&Reference>,
+    probe_path: &str,
     screen: &mut ui::Console,
 ) -> CheckReport {
     let start = Instant::now();
@@ -74,6 +83,7 @@ pub async fn run_check(
         config.request_timeout,
         BodyMode::Unlimited,
         None,
+        probe_path,
     )
     .await;
     let control_observed = fate::observe(
@@ -90,12 +100,15 @@ pub async fn run_check(
         reference,
         print: crate::pipeline::reference::ContentPrint::of(&control_result),
     });
-    // Замер ни о чём: цель открывается и без нас.
-    let inconclusive = matches!(control_admits.0, [Fate::Good]);
+    // Замер ни о чём: цель открывается и без нас. Контроль судится ТОЙ ЖЕ мерой, что и
+    // стратегии (спека §6-бис) — иначе на линии без эталона круг контроля до `[Good]` не
+    // сужается никогда, и `inconclusive` не срабатывает ни разу, сколько бы домен ни
+    // открывался без десинка.
+    let inconclusive = fate::passed(control_observed, control_result.ended, control_admits);
 
     if inconclusive {
         screen.println(&format!(
-            "  {} контроль без десинка привёл цель к Good — домен на этой линии не режется. \
+            "  {} контроль без десинка сам прошёл — домен на этой линии не режется. \
              О стратегиях этот прогон молчит.",
             style("ВНИМАНИЕ:").yellow().bold(),
         ));
@@ -123,10 +136,10 @@ pub async fn run_check(
     // где `verified.push`, иначе `zip` ниже разъедется.
     let mut judged: Vec<rank::Ranked> = Vec::new();
     let mut checked_count: usize = 0;
-    // Сколько строк привели цель к `Good` — это и есть `working` отчёта, а вовсе не
+    // Сколько строк ПРОШЛО (`fate::passed`) — это и есть `working` отчёта, а вовсе не
     // длина списка.
     let mut working_count: usize = 0;
-    // --take: count strategies that brought the target to `Good`, per protocol
+    // --take: count strategies that PASSED (`fate::passed`), per protocol
     let mut perfect_per_proto: std::collections::HashMap<Protocol, usize> =
         std::collections::HashMap::new();
 
@@ -186,7 +199,7 @@ pub async fn run_check(
                     config, witness, &table, domain, tagged, ips,
                     // `check` пока не делает повторов внутри одной пробы — они появятся
                     // вместе с многопрофильным прогоном (вне этого плана).
-                    1, reference,
+                    1, reference, probe_path,
                 )
                 .await;
                 total_run = pass_idx + 1;
@@ -303,7 +316,7 @@ pub async fn run_check(
                 .all(|p| perfect_per_proto.get(p).copied().unwrap_or(0) >= take);
             if all_satisfied {
                 screen.println(&format!(
-                    "  {} found {} Good strategies per protocol, stopping",
+                    "  {} found {} passing strategies per protocol, stopping",
                     style("--take").bold(),
                     take,
                 ));
@@ -354,6 +367,7 @@ async fn check_single_strategy(
     ips: &[String],
     attempts: u32,
     reference: Option<&Reference>,
+    probe_path: &str,
 ) -> CheckedStrategy {
     let protocol = tagged.protocol;
     let args_str = tagged.args.join(" ");
@@ -428,6 +442,7 @@ async fn check_single_strategy(
         config.request_timeout,
         BodyMode::Unlimited,
         None,
+        probe_path,
     )
     .await;
     let latency_ms = test_start.elapsed().as_millis() as u64;
@@ -453,7 +468,10 @@ async fn check_single_strategy(
         reference,
         print: ContentPrint::of(&result),
     });
-    let working = matches!(admits.0, [Fate::Good]);
+    // ГЛАВНАЯ ось, и она НЕ проекция круга (спека §6-бис): байты потекли, разговор не
+    // прервали, содержимое с эталоном не разошлось. Неустановленная подлинность — не
+    // свидетельство против.
+    let working = fate::passed(observed, result.ended, admits);
 
     let speed_kbps = if working && latency_ms > 0 {
         (bytes_downloaded as f64 / 1024.0) / (latency_ms as f64 / 1000.0)
@@ -584,6 +602,7 @@ fn all_passes_succeeded(ok_count: usize, total_run: usize, passes: usize) -> boo
 mod tests {
     use super::*;
     use crate::network::http_client::Ended;
+    use crate::pipeline::fate::Fate;
 
     #[test]
     fn passes_zero_does_not_masquerade_as_all_passes_ok() {

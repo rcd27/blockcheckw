@@ -9,7 +9,8 @@ use blockcheckw::firewall::nft::{OwnedTableMarker, SystemNft};
 use blockcheckw::firewall::nftables;
 use blockcheckw::network::dns::DnsSpoofResult;
 use blockcheckw::network::http_client::{
-    http_test_data, interpret_data_transfer_result, BodyMode, DATA_TRANSFER_MIN_BYTES,
+    self as http_client, http_test_data, interpret_data_transfer_result, BodyMode,
+    DATA_TRANSFER_MIN_BYTES,
 };
 use blockcheckw::network::{dns, isp, via::Via};
 use blockcheckw::pipeline::baseline;
@@ -224,6 +225,8 @@ pub async fn run_scan(params: ScanParams<'_>) {
                     DATA_PROBE_TIMEOUT_SECS,
                     BodyMode::LimitedTo(DATA_TRANSFER_MIN_BYTES * 2),
                     None,
+                    // Проба в корень: здесь меряют САМ САЙТ, а не путь `check`.
+                    http_client::ROOT_PATH,
                 )
                 .await;
                 let verdict =

@@ -26,6 +26,36 @@ jobs:
       - run: cargo clippy --features otel -- -D warnings
       - run: cargo test --lib --bins --features otel
 
+  # Экзотические цели собираются ТОЛЬКО в релизном воркфлоу, поэтому их поломка
+  # всплывала уже после нарезки тега: v0.11.0 потерял mips, mipsel и ppc на
+  # `AtomicU64` в зависимости — при зелёном CI на самом PR. Здесь они проверяются
+  # до мерджа.
+  #
+  # `check`, а не `build --release`: ловим типы, которых на цели нет, не платя за
+  # кодоген, UPX и линковку. C-компилятор всё равно нужен — build-скрипт
+  # `aws-lc-sys` (приезжает через `rustls`) компилирует C безусловно, поэтому идём
+  # через cross, а не голым cargo.
+  #
+  # mips и mipsel — представители класса «32 бита, нет 64-битных атомиков», оба
+  # порядка байтов. ppc из того же класса, но образа cross для него нет, а качать
+  # musl-cross на каждый PR дорого: по исходной совместимости он совпадает с mips.
+  check-exotic:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [mips-unknown-linux-musl, mipsel-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@cross
+      - run: cross +nightly check --release --target ${{ matrix.target }} -Zbuild-std=std,panic_abort
+
   integration:
     needs: test
     runs-on: ubuntu-latest

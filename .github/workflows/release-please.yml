@@ -148,6 +148,10 @@ jobs:
           if-no-files-found: error
 
   upload-assets:
+    # `always()` оставлен НАМЕРЕННО: задача обязана запуститься и при упавшей
+    # сборке — иначе о неполноте релиза никто не узнает. Полноту стережёт шаг
+    # ниже; без него цикл `for dir in artifacts/*` молча паковал столько, сколько
+    # нашёл, и v0.11.0 уехал с шестью архивами вместо девяти при зелёной задаче.
     if: always() && needs.release-please.outputs.release_created == 'true'
     needs: [release-please, build-stable, build-nightly, build-musl-cross]
     runs-on: ubuntu-latest
@@ -156,6 +160,23 @@ jobs:
         with:
           pattern: blockcheckw-*
           path: artifacts
+
+      - name: Verify every target produced a binary
+        run: |
+          # Список обязан совпадать с матрицами трёх сборочных задач выше.
+          # Добавили цель в матрицу — добавьте сюда: расхождение уронит релиз с
+          # внятным текстом, а не опубликует его неполным.
+          expected="arm arm64 mips mips64 mipsel ppc riscv64 x86 x86_64"
+          missing=""
+          for arch in $expected; do
+            # Проверяем ФАЙЛ, а не каталог: download-artifact создаёт каталог и
+            # тогда, когда артефакта нет.
+            test -f "artifacts/blockcheckw-linux-${arch}/blockcheckw" || missing="$missing $arch"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::релиз неполон, не собрались цели:$missing — ассеты не загружены"
+            exit 1
+          fi
 
       - name: Package archives
         run: |

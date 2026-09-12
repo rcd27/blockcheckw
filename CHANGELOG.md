@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/rcd27/blockcheckw/compare/v0.11.0...v0.11.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **deps:** пин reflex на 08bc0b4 — AtomicU64 в тестовых часах уносил mips, mipsel и ppc ([ebf597e](https://github.com/rcd27/blockcheckw/commit/ebf597eb6260c865c70408c3f2e33161a45a46c5))
+
 ## [0.11.0](https://github.com/rcd27/blockcheckw/compare/v0.10.0...v0.11.0) (2026-09-12)
 
 

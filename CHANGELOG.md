@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.11.0](https://github.com/rcd27/blockcheckw/compare/v0.10.0...v0.11.0) (2026-09-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **check:** --passes больше не игнорируется, а реально повторяет байтовую ось (M раз вместо одного). --probe-path сменил умолчание с /robots.txt на / (байтовая ось, главная). Появился новый флаг --identity-path (умолчание /robots.txt, ось подлинности). working в JSON больше не проекция круга судеб, а частота полной доставки == M/M. У VerifiedStrategy/CheckedStrategy новое поле median_share.
+* **check:** смысл поля `working` изменился. Было «круг сузился ровно до Good», стало «канал прошёл и не опровергнут». Стратегия, чья подлинность не установлена из-за отсутствия эталона, теперь считается рабочей, а не отбрасывается. проба ходит не в корень домена, а в `/robots.txt` (меняется флагом `--probe-path`). Отчёты, сравниваемые с прежними, меряют другой объект. `--take N` сменил смысл вместе с `working` — останавливает поиск после N прошедших. На линии без эталона он прежде не мог сработать вовсе.
+* **check:** `check` судит судьбу цели, а не факт прихода байтов. 1. Стратегия, у которой стояла галочка, может её потерять — если приводила цель    к `Mirage` (блок-страница, заглушка CDN) или `Trap`. Это исправление, а    выглядит как регрессия. 2. Порядок выдачи меняется: судьба вместо длины строки аргументов. Простота    понижена до тай-брейкера. 3. `--passes` игнорируется (флаг оставлен с предупреждением: у людей есть    скрипты). Голосовать 3-из-3 было по чему, пока вердикт был булев. 4. `working` перестало быть основанием и стало производным от судьбы:    `working = (fate == Good)`. Поле сохранено — по нему работает пайп    `universal → check`. 5. Появился третий исход вместо двух: «не наблюдали». Потребитель JSON, читающий    `working` как булево, увидит `false` — и это неверно; рядом стоит    `observed: "Unobserved"`, и читать надо его. 6. `check` идёт дольше: разговоры длинные, а не один GET.
+* **check:** --passes устарел — голосовать по булеву больше не по чему
+* **verdict:** check ранжирует по судьбе цели, а не по длине аргументов
+
+### Features
+
+* **check:** --passes устарел — голосовать по булеву больше не по чему ([1857fa7](https://github.com/rcd27/blockcheckw/commit/1857fa7b5400b032312b8fd4334b6a4daad57cb7))
+* **check:** мера байтов вместо одной пробы — две оси, M повторов ([abfbade](https://github.com/rcd27/blockcheckw/commit/abfbade4288f3ce98fca03da959b9223d73b33d0))
+* **diagnostics:** причина провала пробы с фазой, на которой он случился ([3b39eec](https://github.com/rcd27/blockcheckw/commit/3b39eec3a91dac5d53ce794f8829c225534e9221))
+* **verdict:** check ранжирует по судьбе цели, а не по длине аргументов ([89c7d94](https://github.com/rcd27/blockcheckw/commit/89c7d94c61be584c162e5be91c8395b7cc61ca3a))
+* **verdict:** контроль без десинка и темп сервировки в отчёте check ([77f50a1](https://github.com/rcd27/blockcheckw/commit/77f50a1e0bfc003600cca8d8f6f7eb6050506304))
+* **verdict:** просадка канала прибором вместо эвристики 16КБ ([da9fbcb](https://github.com/rcd27/blockcheckw/commit/da9fbcb3e065e6831fb68f3dfdd8d9337e66f870))
+* **verdict:** словарь судьбы цели из парка reflex ([38e1c21](https://github.com/rcd27/blockcheckw/commit/38e1c2160af58fe815dd19da8e179860a2b5aae5))
+* **verdict:** сокет отличает молчание цели от нашего нетерпения ([e0df328](https://github.com/rcd27/blockcheckw/commit/e0df328fce819b87fb1c4884c21d83413c9413ca))
+* **verdict:** сужение круга судеб активной пробой ([f400837](https://github.com/rcd27/blockcheckw/commit/f4008372e76e6702ed22dd484c7c8fe495db6771))
+* **verdict:** эталон ответа через чистый egress для отделения Mirage ([8a36b1c](https://github.com/rcd27/blockcheckw/commit/8a36b1cc84654e934e5ad8dc8bd3dce7f33accbb))
+
+
+### Bug Fixes
+
+* **check:** вердикт о канале отделён от вердикта о подлинности ([8c3e460](https://github.com/rcd27/blockcheckw/commit/8c3e4605dca20a35f85ef94a3078d412880ffbf9))
+* **check:** рабочая стратегия не может отсутствовать в выдаче ([f5dd02a](https://github.com/rcd27/blockcheckw/commit/f5dd02aaf7d463b8b4bd7a67063ff351572dad90))
+* **check:** труба от сокета до экрана подключена до конца ([9737913](https://github.com/rcd27/blockcheckw/commit/97379138c2ed54aca500422bd2bc9f653a610387))
+
 ## [0.10.0](https://github.com/rcd27/blockcheckw/compare/v0.9.5...v0.10.0) (2026-09-07)
 
 

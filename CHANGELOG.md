@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.0](https://github.com/rcd27/blockcheckw/compare/v0.9.5...v0.10.0) (2026-09-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **performance:** требуется nfqws2 >= v1.0.5 (zapret2 8b50962). Старая сборка не понимает --filter-mark, преflight отказывает с кодом 6.
+
+### Features
+
+* **performance:** один инстанс nfqws2 с профилями вместо процесса на стратегию ([3df1f68](https://github.com/rcd27/blockcheckw/commit/3df1f68c7a5fa6fc4f229d7ae15499433bb7bbbc))
+
 ## [0.9.5](https://github.com/rcd27/blockcheckw/compare/v0.9.4...v0.9.5) (2026-09-05)
 
 

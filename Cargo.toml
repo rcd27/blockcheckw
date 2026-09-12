@@ -13,8 +13,13 @@ http-body-util = "0.1"
 # ни Linux, ни C-библиотек — берётся на всех девяти целях. `ring` у core `optional` (за
 # QUIC) и НЕ включается: он единственный с ассемблером и убил бы mips64/riscv64.
 # Пин на ревизию, не на ветку: воспроизводимость сборки важнее свежести (ср. zapret2).
-reflex-instrument = { git = "https://github.com/rcd27/reflex", rev = "a2ee7e9" }
-reflex-core = { git = "https://github.com/rcd27/reflex", rev = "a2ee7e9" }
+#
+# «На всех девяти» — теперь под охраной, а не на слово: на `a2ee7e9` эта строчка была
+# неправдой (`AtomicU64` в тестовых часах core уносил mips, mipsel и ppc), и узналось это
+# только когда v0.11.0 уехал с шестью архивами из девяти. Сторожат двое: `check-exotic`
+# в ci.yml на нашей стороне и `scripts/portable.sh` на стороне reflex.
+reflex-instrument = { git = "https://github.com/rcd27/reflex", rev = "08bc0b4" }
+reflex-core = { git = "https://github.com/rcd27/reflex", rev = "08bc0b4" }
 tokio-rustls = "0.26"
 rustls = "0.23"
 webpki-roots = "1"

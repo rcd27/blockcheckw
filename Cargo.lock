@@ -1068,7 +1068,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 [[package]]
 name = "reflex-core"
 version = "0.1.0"
-source = "git+https://github.com/rcd27/reflex?rev=a2ee7e9#a2ee7e9e3812a31cd173ab10fde2191242565874"
+source = "git+https://github.com/rcd27/reflex?rev=08bc0b4#08bc0b44aa4df4bf08d697c0a4c6450d44d96833"
 dependencies = [
  "bitflags",
  "futures",
@@ -1080,7 +1080,7 @@ dependencies = [
 [[package]]
 name = "reflex-instrument"
 version = "0.1.0"
-source = "git+https://github.com/rcd27/reflex?rev=a2ee7e9#a2ee7e9e3812a31cd173ab10fde2191242565874"
+source = "git+https://github.com/rcd27/reflex?rev=08bc0b4#08bc0b44aa4df4bf08d697c0a4c6450d44d96833"
 dependencies = [
  "reflex-core",
  "smallvec",

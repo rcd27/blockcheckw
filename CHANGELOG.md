@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.2](https://github.com/rcd27/blockcheckw/compare/v0.11.1...v0.11.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **nfqws2:** бинарь из nfq2/, а не из binaries/linux-* — самосборка и не-релизные установки не находились ([c03d96f](https://github.com/rcd27/blockcheckw/commit/c03d96fd607e97851a2721affb8c09f804371ea1))
+
+
+### Performance Improvements
+
+* **nft:** в очередь только первые 10 исходящих пакетов соединения — ct original packets ([881abe1](https://github.com/rcd27/blockcheckw/commit/881abe12259ae8dee22e7f8b60fce51740a283b9))
+
 ## [0.11.1](https://github.com/rcd27/blockcheckw/compare/v0.11.0...v0.11.1) (2026-09-12)
 
 

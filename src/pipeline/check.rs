@@ -816,6 +816,20 @@ fn belongs_in_report(circle: Admits, working: bool) -> bool {
     observed_at_all(circle) || working
 }
 
+/// Рабочие стратегии отчёта по протоколам — итог `check` для человека, которому нечем
+/// разбирать JSON (на роутере нет `jq`). Протоколы идут в порядке первого появления,
+/// стратегии внутри — в порядке отчёта, то есть по рангу (`rank::fate_order`).
+pub fn working_by_protocol(report: &CheckReport) -> Vec<(&str, Vec<&str>)> {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for strategy in report.strategies.iter().filter(|s| s.working) {
+        match groups.iter_mut().find(|(p, _)| *p == strategy.protocol) {
+            Some((_, args)) => args.push(&strategy.args),
+            None => groups.push((&strategy.protocol, vec![&strategy.args])),
+        }
+    }
+    groups
+}
+
 /// Круг судеб одной строкой — для экрана. Одна судьба значит «сузили», несколько —
 /// «не сузили», и человеку надо видеть разницу: «не наблюдали» ≠ «наблюдали пустоту».
 fn circle_name(circle: Admits) -> String {
@@ -1177,6 +1191,50 @@ mod tests {
         assert_eq!(
             byte_pass_reason(true, true, true, Admits(&[Fate::Good]), None),
             "unknown"
+        );
+    }
+
+    // ── Рабочие стратегии на экран: итог пайпа без jq ───────────────────────────────
+
+    fn row(protocol: &str, args: &str, working: bool) -> VerifiedStrategy {
+        VerifiedStrategy {
+            protocol: protocol.to_string(),
+            args: args.to_string(),
+            coverage: 0,
+            success_rate: 0.0,
+            median_latency_ms: 0,
+            median_speed_kbps: 0.0,
+            passes_ok: 0,
+            passes_total: 3,
+            median_share: None,
+            observed: "Bytes".to_string(),
+            admits: vec![],
+            working,
+        }
+    }
+
+    #[test]
+    fn на_экран_идут_только_рабочие_по_протоколам_в_порядке_отчёта() {
+        // На роутере нет jq: итог пайпа человек читает глазами, и в нём не место
+        // наблюдённым, но не прошедшим строкам. Порядок внутри протокола — ранг отчёта.
+        let report = CheckReport {
+            domain: "rutracker.org".to_string(),
+            timestamp: String::new(),
+            total: 4,
+            working: 3,
+            elapsed_secs: 0.0,
+            strategies: vec![
+                row("HTTPS/TLS1.2", "--a", true),
+                row("HTTP", "--b", true),
+                row("HTTPS/TLS1.2", "--c", false),
+                row("HTTPS/TLS1.2", "--d", true),
+            ],
+            control: None,
+            inconclusive: false,
+        };
+        assert_eq!(
+            working_by_protocol(&report),
+            vec![("HTTPS/TLS1.2", vec!["--a", "--d"]), ("HTTP", vec!["--b"])]
         );
     }
 

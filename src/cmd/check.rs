@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use console::style;
@@ -243,6 +244,41 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         report.elapsed_secs,
     ));
 
+    // Итог для человека: на роутере нет jq, а список, размазанный по логу между FAIL,
+    // глазами не собрать.
+    if report.inconclusive {
+        screen.println(&format!(
+            "  {} контроль без десинка прошёл сам — домен на этой линии не режется, обход не нужен",
+            style("ВНИМАНИЕ:").yellow().bold(),
+        ));
+    } else {
+        let working = check::working_by_protocol(&report);
+        if working.is_empty() {
+            screen.println(&format!(
+                "  {}",
+                style("рабочих стратегий не найдено").red().bold()
+            ));
+        }
+        for (protocol, args) in working {
+            screen.println(&format!(
+                "{}",
+                style(format!(
+                    "=== Рабочие стратегии {protocol} ({}) ===",
+                    args.len()
+                ))
+                .bold()
+                .green()
+            ));
+            for (i, strategy) in args.iter().enumerate() {
+                screen.println(&format!(
+                    "  #{:<2} nfqws2 {}",
+                    i + 1,
+                    style(strategy).cyan()
+                ));
+            }
+        }
+    }
+
     // Output JSON — file first (stdout may break on pipe), then stdout
     let json = serde_json::to_string_pretty(&report).expect("report serialization");
 
@@ -269,7 +305,11 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         }
     }
 
-    super::print_stdout_graceful(&json, &screen);
+    // В терминал JSON не льём: он уже в файле выше и похоронил бы итог. В stdout он нужен
+    // только тому, кто стоит дальше в пайпе или пишет в файл.
+    if !std::io::stdout().is_terminal() {
+        super::print_stdout_graceful(&json, &screen);
+    }
     screen.newline();
 
     // Cleanup routes + restore zapret2

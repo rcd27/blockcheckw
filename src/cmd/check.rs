@@ -126,43 +126,62 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
     // §6-тер), ПОСЛЕ резолва DNS и ДО подъёма движка — движок не должен работать
     // вхолостую, пока мы ходим за эталонами. Отсутствие одного эталона не отменяет
     // другого: без байтового эталона молчит доля, без эталона подлинности — `Mirage`.
-    let (byte_reference, identity_reference) = match reference_via {
+    // Эталон снимается тем транспортом, каким идут пробы (`reference_protocol`); TLS нужен
+    // всегда — им ходит контроль.
+    let mut references = reference::References::default();
+    match reference_via {
         Some(clean) => {
-            let byte_reference = reference::take_reference(
-                clean,
-                Protocol::HttpsTls12,
-                domain,
-                &ips,
-                timeout,
-                2,
-                &probe_path,
-            )
-            .await;
-            let identity_reference = reference::take_reference(
-                clean,
-                Protocol::HttpsTls12,
-                domain,
-                &ips,
-                timeout,
-                2,
-                &identity_path,
-            )
-            .await;
-            match &byte_reference {
-                Some(_) => screen.add_info_line("  эталон объёма снят через чистый egress"),
-                None => screen
-                    .add_info_line("  эталон объёма НЕ снят: доли не будет, working не утвердится"),
+            let mut transports = vec![Protocol::HttpsTls12];
+            for tagged in &strategies {
+                let transport = reference::reference_protocol(tagged.protocol);
+                if !transports.contains(&transport) {
+                    transports.push(transport);
+                }
             }
-            match &identity_reference {
-                Some(_) => screen.add_info_line("  эталон подлинности снят через чистый egress"),
-                None => screen.add_info_line(
-                    "  эталон подлинности НЕ снят: Mirage не проверяется, круг судеб останется широким",
-                ),
+            for transport in transports {
+                let byte_reference = reference::take_reference(
+                    clean,
+                    transport,
+                    domain,
+                    &ips,
+                    timeout,
+                    2,
+                    &probe_path,
+                )
+                .await;
+                let identity_reference = reference::take_reference(
+                    clean,
+                    transport,
+                    domain,
+                    &ips,
+                    timeout,
+                    2,
+                    &identity_path,
+                )
+                .await;
+                let scheme = match transport {
+                    Protocol::Http => "http",
+                    _ => "https",
+                };
+                screen.add_info_line(&match &byte_reference {
+                    Some(_) => format!("  {scheme}: эталон объёма снят через чистый egress"),
+                    None => format!(
+                        "  {scheme}: эталон объёма НЕ снят: доли не будет, полнота — по завершённому телу"
+                    ),
+                });
+                screen.add_info_line(&match &identity_reference {
+                    Some(_) => format!("  {scheme}: эталон подлинности снят через чистый egress"),
+                    None => format!(
+                        "  {scheme}: эталон подлинности НЕ снят: Mirage не проверяется, круг судеб останется широким"
+                    ),
+                });
+                references.insert(transport, byte_reference, identity_reference);
             }
-            (byte_reference, identity_reference)
         }
-        None => (None, None),
-    };
+        None => screen.add_info_line(
+            "  без --reference-via: полнота — по завершённому телу, заглушку (Mirage) не отличить",
+        ),
+    }
 
     // Remote gateway route setup
     if let Some(v) = via {
@@ -206,8 +225,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         &ips,
         take,
         passes,
-        byte_reference.as_ref(),
-        identity_reference.as_ref(),
+        &references,
         &probe_path,
         &identity_path,
         &mut screen,

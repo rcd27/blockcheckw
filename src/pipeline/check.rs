@@ -12,7 +12,7 @@ use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
 use crate::nfqws2::run::SystemNfqws2;
 use crate::pipeline::fate::{self, Admits, Fate, Observed, ALL_FATES};
 use crate::pipeline::observe;
-use crate::pipeline::reference::{agrees, ContentPrint, Reference};
+use crate::pipeline::reference::{agrees, ContentPrint, Reference, References};
 use crate::pipeline::verify::{self, Outcome};
 use crate::strategy::generator::TaggedStrategy;
 use crate::strategy::rank;
@@ -45,8 +45,7 @@ pub async fn run_check(
     ips: &[String],
     take: usize,
     passes: usize,
-    byte_reference: Option<&Reference>,
-    identity_reference: Option<&Reference>,
+    references: &References,
     probe_path: &str,
     identity_path: &str,
     screen: &mut ui::Console,
@@ -89,8 +88,8 @@ pub async fn run_check(
         probe_path,
         identity_path,
         passes,
-        byte_reference,
-        identity_reference,
+        references.byte(Protocol::HttpsTls12),
+        references.identity(Protocol::HttpsTls12),
         None,
     )
     .await;
@@ -191,8 +190,7 @@ pub async fn run_check(
                 tagged,
                 ips,
                 passes,
-                byte_reference,
-                identity_reference,
+                references,
                 probe_path,
                 identity_path,
                 checked_count,
@@ -363,20 +361,39 @@ fn connectivity_cause_name(
 /// в одно «failed»: сеть, содержимое и личность ресурса — разные болезни разного лечения.
 fn byte_pass_reason(
     connectivity_ok: bool,
-    agreed: bool,
+    volume: bool,
+    has_reference: bool,
     identity_circle: Admits,
     cause_name: Option<String>,
 ) -> String {
     if !connectivity_ok {
         return cause_name.unwrap_or_else(|| "unknown".to_string());
     }
-    if !agreed {
-        return "content_diverged_from_reference".to_string();
+    if !volume {
+        // Без эталона сверять было не с чем: объём не полон потому, что сервер не
+        // закончил тело, а не потому, что разошёлся с чем-то.
+        let name = match has_reference {
+            true => "content_diverged_from_reference",
+            false => "body_incomplete",
+        };
+        return name.to_string();
     }
     if matches!(identity_circle.0, [Fate::Mirage]) {
         return "identity_mirage".to_string();
     }
     "unknown".to_string()
+}
+
+/// Полон ли объём прохода байтовой оси. С эталоном — сверка с ним (`agrees`). Без эталона
+/// свидетель полноты — сам сервер: тело кончилось, потому что он его закончил
+/// (`Ended::BodyComplete`), а не потому, что мы бросили ждать или разговор оборвали —
+/// так выглядит потолок DPI. Заглушку так не отличить: это работа оси подлинности и
+/// эталона, а не объёма.
+fn volume_ok(ended: Ended, byte_reference: Option<&Reference>, print: &ContentPrint) -> bool {
+    match byte_reference {
+        Some(reference) => agrees(reference, print),
+        None => ended == Ended::BodyComplete,
+    }
 }
 
 /// Медиана доли `вытянуто/эталон` по `M` проходам байтовой оси. `None`, если хоть один
@@ -461,25 +478,33 @@ async fn measure_channel(
             observe::delivery_of(bytes, result.ended),
         );
         let connectivity_ok = observed == Observed::Bytes && result.ended != Ended::BodyError;
-        let agreed = byte_reference
-            .map(|r| agrees(r, &ContentPrint::of(&result)))
-            .unwrap_or(false);
-        // «Проба засчитана, если passed И agrees» — решение 6 спеки §6-тер. `passed`
+        let volume = volume_ok(result.ended, byte_reference, &ContentPrint::of(&result));
+        // «Проба засчитана, если passed И объём полон» — решение 6 спеки §6-тер. `passed`
         // читает круг ПОДЛИННОСТИ (`identity_circle`), а не круг этого прохода: только
         // ось подлинности вправе сказать `Mirage`.
-        let full_delivery = fate::passed(observed, result.ended, identity_circle) && agreed;
+        let full_delivery = fate::passed(observed, result.ended, identity_circle) && volume;
         let share = byte_reference.map(|r| r.share(bytes));
 
         let (_permissive, message_from_interpret, named) = interpret_check_result(&result, domain);
         let cause_name = (!connectivity_ok).then(|| connectivity_cause_name(result.cause, named));
-        let reason = (!full_delivery)
-            .then(|| byte_pass_reason(connectivity_ok, agreed, identity_circle, cause_name));
+        let reason = (!full_delivery).then(|| {
+            byte_pass_reason(
+                connectivity_ok,
+                volume,
+                byte_reference.is_some(),
+                identity_circle,
+                cause_name,
+            )
+        });
         let message = if full_delivery {
             None
         } else if !connectivity_ok {
             message_from_interpret
-        } else if !agreed {
-            Some(format!("объём {bytes} байт разошёлся с эталоном"))
+        } else if !volume {
+            Some(match byte_reference {
+                Some(_) => format!("объём {bytes} байт разошёлся с эталоном"),
+                None => format!("тело не докачано: {bytes} байт, сервер ответ не закончил"),
+            })
         } else {
             Some("подлинность разошлась с эталоном (Mirage)".to_string())
         };
@@ -521,8 +546,7 @@ async fn check_single_strategy(
     tagged: &TaggedStrategy,
     ips: &[String],
     passes: usize,
-    byte_reference: Option<&Reference>,
-    identity_reference: Option<&Reference>,
+    references: &References,
     probe_path: &str,
     identity_path: &str,
     log_index: usize,
@@ -607,8 +631,8 @@ async fn check_single_strategy(
         probe_path,
         identity_path,
         passes,
-        byte_reference,
-        identity_reference,
+        references.byte(protocol),
+        references.identity(protocol),
         Some(log_index),
     )
     .await;
@@ -1061,13 +1085,58 @@ mod tests {
 
     // ── Чистые функции байтовой оси (спека §6-тер): без сети ─────────────────
 
+    fn print(status: u16, bytes: u64) -> ContentPrint {
+        ContentPrint {
+            status: Some(status),
+            bytes,
+        }
+    }
+
     #[test]
-    fn полная_доставка_недостижима_без_эталона_объёма() {
-        // `byte_reference: None` → `agreed` всегда `false` в `measure_channel` — доля не
-        // существует, и «полной доставки» без эталона не бывает вовсе (решение 2).
-        // Здесь проверяется причина, которую видит пользователь в этом случае.
+    fn без_эталона_полноту_тела_свидетельствует_сам_сервер() {
+        // Эталон нужен против заглушки, а не для полноты: тело, которое сервер закончил
+        // сам, доставлено целиком — это видно с сокета. Без этого `check` без
+        // `--reference-via` не находил ни одной рабочей стратегии.
+        assert!(volume_ok(Ended::BodyComplete, None, &print(301, 162)));
+    }
+
+    #[test]
+    fn без_эталона_недокачанное_тело_не_полная_доставка() {
+        // Потолок DPI выглядит как брошенное ожидание или обрыв посреди тела: байты
+        // были, конца не было.
+        assert!(!volume_ok(
+            Ended::WeStoppedWaiting,
+            None,
+            &print(200, 16_384)
+        ));
+        assert!(!volume_ok(Ended::BodyError, None, &print(200, 16_384)));
+    }
+
+    #[test]
+    fn с_эталоном_объём_судится_эталоном() {
+        let reference = Reference::take(vec![print(200, 100_000), print(200, 110_000)])
+            .expect("две выборки — эталон");
+        assert!(!volume_ok(
+            Ended::BodyComplete,
+            Some(&reference),
+            &print(200, 1_200)
+        ));
+        assert!(volume_ok(
+            Ended::BodyComplete,
+            Some(&reference),
+            &print(200, 105_000)
+        ));
+    }
+
+    #[test]
+    fn без_эталона_причина_недокачанное_тело_а_не_расхождение_с_эталоном() {
+        // Сверять было не с чем — «разошёлся с эталоном» было бы неправдой.
         assert_eq!(
-            byte_pass_reason(true, false, Admits(&[Fate::Good]), None),
+            byte_pass_reason(true, false, false, Admits(&[Fate::Good]), None),
+            "body_incomplete"
+        );
+        assert_eq!(
+            byte_pass_reason(true, false, true, Admits(&[Fate::Good]), None),
             "content_diverged_from_reference"
         );
     }
@@ -1079,6 +1148,7 @@ mod tests {
         let reason = byte_pass_reason(
             false,
             false,
+            true,
             Admits(&[Fate::Mirage]),
             Some("reset/tls".to_string()),
         );
@@ -1087,7 +1157,7 @@ mod tests {
 
     #[test]
     fn причина_mirage_только_когда_связность_и_объём_в_порядке() {
-        let reason = byte_pass_reason(true, true, Admits(&[Fate::Mirage]), None);
+        let reason = byte_pass_reason(true, true, true, Admits(&[Fate::Mirage]), None);
         assert_eq!(reason, "identity_mirage");
     }
 
@@ -1095,7 +1165,7 @@ mod tests {
     fn причина_объёма_идёт_раньше_подлинности() {
         // Круг уже [Mirage], но объём САМ по себе разошёлся — сообщать надо про объём,
         // а не молча свалить в «identity_mirage»: у пользователя разное лечение.
-        let reason = byte_pass_reason(true, false, Admits(&[Fate::Mirage]), None);
+        let reason = byte_pass_reason(true, false, true, Admits(&[Fate::Mirage]), None);
         assert_eq!(reason, "content_diverged_from_reference");
     }
 
@@ -1105,7 +1175,7 @@ mod tests {
         // `!full_delivery`), но `byte_pass_reason` — чистая функция без контракта на
         // недостижимость, и обязана вести себя предсказуемо на любом входе.
         assert_eq!(
-            byte_pass_reason(true, true, Admits(&[Fate::Good]), None),
+            byte_pass_reason(true, true, true, Admits(&[Fate::Good]), None),
             "unknown"
         );
     }

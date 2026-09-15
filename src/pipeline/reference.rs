@@ -1,6 +1,8 @@
 //! Эталон ответа, снятый через чистый egress. Нужен, чтобы отделить `Mirage` (байты
 //! текут, ресурса нет) от настоящего ресурса: пассивно эти судьбы не делятся.
 
+use std::collections::HashMap;
+
 use crate::config::Protocol;
 use crate::network::http_client::{http_test_data, BodyMode, HttpResult};
 use crate::network::via::Via;
@@ -105,6 +107,50 @@ pub fn agrees(reference: &Reference, probe: &ContentPrint) -> bool {
     (floor..=ceiling).contains(&probe.bytes)
 }
 
+/// Каким транспортом снимать эталон для пробы протокола `protocol`. Эталон обязан идти
+/// тем же транспортом, что и проба: HTTP на `:80` и HTTPS на `:443` у одного домена
+/// отдают разные ответы (редирект на HTTPS против самой страницы), и сверка между ними
+/// топила всякую HTTP-стратегию. TLS 1.2 и 1.3 отдают одно содержимое — эталон общий.
+pub fn reference_protocol(protocol: Protocol) -> Protocol {
+    match protocol {
+        Protocol::Http => Protocol::Http,
+        Protocol::HttpsTls12 | Protocol::HttpsTls13 => Protocol::HttpsTls12,
+    }
+}
+
+/// Эталоны прогона: пара (объём, подлинность) на транспорт — см. [`reference_protocol`].
+/// Пустой набор — `--reference-via` не задан.
+#[derive(Debug, Default)]
+pub struct References {
+    by_transport: HashMap<Protocol, (Option<Reference>, Option<Reference>)>,
+}
+
+impl References {
+    pub fn insert(
+        &mut self,
+        protocol: Protocol,
+        byte: Option<Reference>,
+        identity: Option<Reference>,
+    ) {
+        self.by_transport
+            .insert(reference_protocol(protocol), (byte, identity));
+    }
+
+    /// Эталон объёма (`--probe-path`) для проб протокола `protocol`.
+    pub fn byte(&self, protocol: Protocol) -> Option<&Reference> {
+        self.by_transport
+            .get(&reference_protocol(protocol))
+            .and_then(|(byte, _)| byte.as_ref())
+    }
+
+    /// Эталон подлинности (`--identity-path`) для проб протокола `protocol`.
+    pub fn identity(&self, protocol: Protocol) -> Option<&Reference> {
+        self.by_transport
+            .get(&reference_protocol(protocol))
+            .and_then(|(_, identity)| identity.as_ref())
+    }
+}
+
 /// Снять эталон через чистый egress. Маршруты ставятся НА ВРЕМЯ снятия и снимаются
 /// сразу: иначе через шлюз пошли бы и пробы стратегий, и весь замер потерял бы смысл.
 ///
@@ -166,6 +212,22 @@ mod tests {
             status: Some(status),
             bytes,
         }
+    }
+
+    #[test]
+    fn эталон_снимается_тем_же_транспортом_что_и_проба() {
+        // HTTP-проба на :80 против эталона по TLS сравнивала разные ответы (у rutracker
+        // 534 байта против 162), и ни одна HTTP-стратегия не проходила с эталоном.
+        assert_eq!(reference_protocol(Protocol::Http), Protocol::Http);
+        // Содержимое у TLS 1.2 и 1.3 одно — эталон общий.
+        assert_eq!(
+            reference_protocol(Protocol::HttpsTls12),
+            Protocol::HttpsTls12
+        );
+        assert_eq!(
+            reference_protocol(Protocol::HttpsTls13),
+            Protocol::HttpsTls12
+        );
     }
 
     #[test]

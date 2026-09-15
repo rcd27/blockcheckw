@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.3](https://github.com/rcd27/blockcheckw/compare/v0.11.2...v0.11.3) (2026-09-15)
+
+
+### Features
+
+* **check:** итог рабочих стратегий на экран — JSON в терминал не льётся ([8997e30](https://github.com/rcd27/blockcheckw/commit/8997e302b6e634ea72b060c57d5cdaa1921ee70f))
+
+
+### Bug Fixes
+
+* **check:** working без --reference-via — полноту тела свидетельствует сервер, эталон HTTP снимается по HTTP ([69e7193](https://github.com/rcd27/blockcheckw/commit/69e7193fa6ad4663eb293610f54c0f22648fc826))
+
 ## [0.11.2](https://github.com/rcd27/blockcheckw/compare/v0.11.1...v0.11.2) (2026-09-15)
 
 

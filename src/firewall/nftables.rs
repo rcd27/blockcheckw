@@ -33,6 +33,14 @@ const CHAIN_POSTNAT: &str = "postnat";
 const CHAIN_PREDEFRAG: &str = "predefrag";
 const CHAIN_PRENAT: &str = "prenat";
 
+/// Сколько первых исходящих пакетов соединения отдавать движку (#68).
+///
+/// Обход DPI делается на первых пакетах — ClientHello, HTTP-запрос. Без лимита
+/// в очередь уходит и каждый ACK на тело ответа, а nfqws2 на каждом пакете
+/// линейно перебирает профили плана. Пакеты, порождённые самим nfqws2,
+/// помечены `notrack` в predefrag и в счётчик conntrack не попадают.
+const MAX_PKT_OUT: u32 = 10;
+
 pub async fn prepare_table<R: NftRun>(
     runner: &R,
     name: &str,
@@ -76,7 +84,7 @@ pub async fn apply_dispatch<R: NftRun>(
             format!(
                 "add rule inet {t} {CHAIN_POSTNAT} meta nfproto ipv4 tcp dport {port} \
                  mark and 0x{:08X} == 0 mark and 0x{:08X} == 0x{:08X} ip daddr {{ {ip_set} }} \
-                 ct mark set mark or 0x{:08X} queue num {q}",
+                 ct original packets 1-{MAX_PKT_OUT} ct mark set mark or 0x{:08X} queue num {q}",
                 d.out.require_clear, d.out.require_set, d.out.require_set, d.out.ct_set_or
             ),
             format!(
@@ -172,6 +180,21 @@ mod dispatch_tests {
                 .any(|c| c.contains("ct mark set mark or 0x10000000")),
             "{cmds:?}"
         );
+    }
+
+    /// #68: движку уходят только первые пакеты соединения, а не ACK на всё
+    /// тело ответа. Входящее правило не трогаем — оно и так берёт один SYN+ACK.
+    #[tokio::test]
+    async fn only_the_first_outgoing_packets_reach_the_queue() {
+        let cmds = rendered(443).await;
+        let limit = format!("ct original packets 1-{MAX_PKT_OUT}");
+        let rule = |chain: &str| {
+            cmds.iter()
+                .find(|c| c.starts_with(&format!("add rule inet bcw_test {chain} meta nfproto")))
+                .unwrap_or_else(|| panic!("нет правила в {chain}: {cmds:?}"))
+        };
+        assert!(rule(CHAIN_POSTNAT).contains(&limit), "{cmds:?}");
+        assert!(!rule(CHAIN_PRENAT).contains("packets"), "{cmds:?}");
     }
 
     /// Карт и цепочек воркеров больше не существует — вместе с гонкой #66.

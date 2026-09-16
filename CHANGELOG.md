@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.4](https://github.com/rcd27/blockcheckw/compare/v0.11.3...v0.11.4) (2026-09-16)
+
+
+### Features
+
+* **check:** терпение пробы — оператором сроков reflex: тишина 1 с вместо слепых 6 с на запрос ([02ef875](https://github.com/rcd27/blockcheckw/commit/02ef875c12db650f699b02ffaeb4627cc38c104d))
+
+
+### Bug Fixes
+
+* **test:** скрипт-заглушку nfqws2 пишет отдельный процесс — гонка ETXTBSY с fork соседнего теста ([9cf72f6](https://github.com/rcd27/blockcheckw/commit/9cf72f6b593343b48b4437b8abb8c265d0b3f762))
+
 ## [0.11.3](https://github.com/rcd27/blockcheckw/compare/v0.11.2...v0.11.3) (2026-09-15)
 
 

@@ -359,7 +359,6 @@ impl SystemNfqws2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn stub_env(binary: impl Into<std::path::PathBuf>) -> Env {
         Env {
@@ -392,20 +391,19 @@ mod tests {
                 .as_nanos()
         );
         path.push(unique);
-        {
-            let mut f = std::fs::File::create(&path).expect("создать скрипт-заглушку");
-            f.write_all(body.as_bytes())
-                .expect("записать скрипт-заглушку");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&path)
-                .expect("прочитать права скрипта-заглушки")
-                .permissions();
-            perms.set_mode(0o700);
-            std::fs::set_permissions(&path, perms).expect("сделать скрипт-заглушку исполняемой");
-        }
+        // Пишет ОТДЕЛЬНЫЙ процесс, а не мы: пока дескриптор записи открыт в нашем
+        // процессе, fork из соседнего теста наследует его до своего exec, и наш exec
+        // заглушки получает `ETXTBSY` («Text file busy»). Мигало тем чаще, чем плотнее
+        // параллельные тесты; процесс-писатель выходит раньше нашего exec — гонки нет.
+        let written = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf '%s' \"$1\" > \"$2\" && chmod 700 \"$2\"")
+            .arg("sh")
+            .arg(body)
+            .arg(&path)
+            .status()
+            .expect("запустить писателя скрипта-заглушки");
+        assert!(written.success(), "скрипт-заглушка не записан: {written}");
         TempScript(path)
     }
 

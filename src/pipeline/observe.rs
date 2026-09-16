@@ -34,7 +34,8 @@ pub fn connected_of(cause: Option<Cause>) -> bool {
         None => true,
         Some(Cause::Refused) | Some(Cause::Unreachable) => false,
         Some(Cause::Reset(p))
-        | Some(Cause::Timeout(p))
+        | Some(Cause::Idle(p))
+        | Some(Cause::Ceiling(p))
         | Some(Cause::Io(p))
         | Some(Cause::Protocol(p)) => p > Phase::Connect,
     }
@@ -118,7 +119,8 @@ mod tests {
     #[test]
     fn таймаут_коннекта_не_доказывает_что_коннекта_не_было() {
         // Мы перестали ждать SYN/ACK — о цели это не говорит ничего.
-        assert!(!connected_of(Some(Cause::Timeout(Phase::Connect))));
+        assert!(!connected_of(Some(Cause::Idle(Phase::Connect))));
+        assert!(!connected_of(Some(Cause::Ceiling(Phase::Connect))));
         // Отказ и отсутствие маршрута — ОТВЕТ, а не его отсутствие.
         assert!(!connected_of(Some(Cause::Refused)));
         assert!(!connected_of(Some(Cause::Unreachable)));
@@ -127,7 +129,7 @@ mod tests {
     #[test]
     fn отказ_на_фазе_выше_коннекта_означает_что_коннект_был() {
         assert!(connected_of(Some(Cause::Reset(Phase::Tls))));
-        assert!(connected_of(Some(Cause::Timeout(Phase::Body))));
+        assert!(connected_of(Some(Cause::Idle(Phase::Body))));
         // Причины нет вовсе — значит дошли до конца, коннект был.
         assert!(connected_of(None));
     }

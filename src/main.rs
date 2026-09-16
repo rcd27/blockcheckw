@@ -135,9 +135,20 @@ enum Command {
         #[arg(long, default_value = "auto")]
         dns: String,
 
-        /// Request timeout per strategy in seconds
-        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u64).range(1..=60))]
+        /// Потолок одной пробы в секундах — `Expiry::Ceiling`: сколько всего мы готовы
+        /// ждать, даже если цель ещё отдаёт байты. Утверждение о нас, не о цели.
+        /// Замер 16.09 на стенде: медиана полной доставки 0,7–1,4 с, потолок не наступил
+        /// ни разу — страница, идущая дольше трёх секунд, человеку уже не годится.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..=60))]
         timeout: u64,
+
+        /// Порог тишины в миллисекундах — `Expiry::Idle`: проба обрывается, когда цель
+        /// молчит дольше этого после последнего шага (коннект, рукопожатие, заголовки,
+        /// кадр тела). Мёртвая стратегия кончается здесь, а не на потолке. Замер 16.09 на
+        /// стенде: здоровая тишина 180–370 мс, наибольшая 857; check 170 → 54–74 с при
+        /// том же числе рабочих. Порог видно в отчёте рядом с `longest_silence_ms`.
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(100..=60_000))]
+        idle_ms: u64,
 
         /// Stop the SEARCH after N PASSING strategies, per protocol (0 = check all).
         /// Выдачу не урезает: в отчёт идёт всякая наблюдённая стратегия, ранжированная
@@ -517,6 +528,7 @@ async fn main() {
                 domain,
                 dns,
                 timeout,
+                idle_ms,
                 take,
                 passes,
                 reference_via,
@@ -575,6 +587,7 @@ async fn main() {
                     from_file: &source,
                     dns_mode,
                     timeout,
+                    idle_ms,
                     take,
                     passes,
                     output: output.as_deref(),

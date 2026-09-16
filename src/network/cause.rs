@@ -10,8 +10,9 @@
 //! открытого разговора. Это ровно тот раскол, который на проводе дают
 //! `Blackhole` и `Silence`.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Докуда дошла проба. Порядок — это порядок прохождения: каждая следующая
 /// фаза достижима только через предыдущую.
@@ -32,9 +33,15 @@ pub enum Phase {
 pub enum Cause {
     /// Пришёл RST. Детерминированный отказ — повторять пробу незачем.
     Reset(Phase),
-    /// Ничего не пришло за отведённое время. Недетерминированно: потеря пакета
-    /// даёт то же самое, и только здесь повтор осмыслен.
-    Timeout(Phase),
+    /// Цель замолчала на этой фазе дольше порога тишины — `Expiry::Idle` оператора
+    /// сроков reflex, либо ядро само сдалось ждать ответа (`ETIMEDOUT`). Вывод о мире,
+    /// но недетерминированный: потеря пакета даёт то же самое, и только здесь повтор
+    /// осмыслен.
+    Idle(Phase),
+    /// Мы перестали ждать, хотя цель ещё шла — `Expiry::Ceiling`. Утверждение о НАС:
+    /// о цели оно не говорит ничего, и слить его с тишиной значило бы приписать миру
+    /// наше нетерпение.
+    Ceiling(Phase),
     /// Порт закрыт (`ECONNREFUSED`) — цель жива и отвечает отказом.
     Refused,
     /// Маршрута нет (`EHOSTUNREACH`/`ENETUNREACH`).
@@ -50,7 +57,8 @@ impl Cause {
     pub fn name(&self) -> String {
         match self {
             Cause::Reset(p) => format!("reset/{}", p.name()),
-            Cause::Timeout(p) => format!("timeout/{}", p.name()),
+            Cause::Idle(p) => format!("idle/{}", p.name()),
+            Cause::Ceiling(p) => format!("ceiling/{}", p.name()),
             Cause::Refused => "refused".to_string(),
             Cause::Unreachable => "unreachable".to_string(),
             Cause::Io(p) => format!("io/{}", p.name()),
@@ -66,7 +74,7 @@ impl Cause {
             // цель или цензор высказались, и повтор скажет то же самое.
             Cause::Reset(_) | Cause::Refused | Cause::Unreachable => true,
             // Тишина неотличима от потери пакета — только здесь повтор осмыслен.
-            Cause::Timeout(_) => false,
+            Cause::Idle(_) | Cause::Ceiling(_) => false,
             // Прочее не берёмся звать детерминированным: не знаем.
             Cause::Io(_) | Cause::Protocol(_) => false,
         }
@@ -109,40 +117,84 @@ fn of_kind(io: &std::io::Error, phase: Phase) -> Cause {
     match io.kind() {
         // ECONNRESET и ECONNABORTED: разговор оборван встречной стороной.
         ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => Cause::Reset(phase),
-        ErrorKind::TimedOut => Cause::Timeout(phase),
+        ErrorKind::TimedOut => Cause::Idle(phase),
         ErrorKind::ConnectionRefused => Cause::Refused,
         _ => match io.raw_os_error() {
             // EHOSTUNREACH, ENETUNREACH, ENETDOWN.
             Some(113) | Some(101) | Some(100) => Cause::Unreachable,
             // ECONNRESET, ECONNABORTED, EPIPE — на случай, если вид не назван.
             Some(104) | Some(103) | Some(32) => Cause::Reset(phase),
-            Some(110) => Cause::Timeout(phase),
+            Some(110) => Cause::Idle(phase),
             _ => Cause::Io(phase),
         },
     }
 }
 
-/// Отметка достигнутой фазы. Нужна затем, что внешний `tokio::time::timeout`
-/// срывает пробу, не сказав, где она стояла, — а без фазы таймаут неотличим:
-/// чёрная дыра и тишина сливаются в одну букву.
+/// Отметка достигнутой фазы и последнего ШАГА пробы. Фаза нужна затем, что сторож
+/// срывает пробу, не зная, где она стояла, — а без фазы срок неотличим: чёрная дыра и
+/// тишина сливаются в одну букву. Шаг нужен сторожу (`patience`): тишина считается от
+/// последнего продвижения, а не от начала запроса.
+///
+/// Моменты — миллисекунды от рождения пробы в `AtomicU32`, а не `AtomicU64`: его нет на
+/// mips, mipsel и ppc (`ebf597e`). `u32` миллисекунд кончается через 49 суток — проба
+/// столько не живёт.
 #[derive(Debug, Clone)]
-pub struct Reached(Arc<AtomicU8>);
+pub struct Reached {
+    phase: Arc<AtomicU8>,
+    born: Instant,
+    last_stride_ms: Arc<AtomicU32>,
+    longest_silence_ms: Arc<AtomicU32>,
+}
 
 impl Default for Reached {
     fn default() -> Self {
-        Reached(Arc::new(AtomicU8::new(Phase::Connect as u8)))
+        Reached {
+            phase: Arc::new(AtomicU8::new(Phase::Connect as u8)),
+            born: Instant::now(),
+            last_stride_ms: Arc::new(AtomicU32::new(0)),
+            longest_silence_ms: Arc::new(AtomicU32::new(0)),
+        }
     }
 }
 
 impl Reached {
-    /// Отметить, что проба дошла до этой фазы.
+    /// Отметить, что проба дошла до этой фазы. Переход фазы — всегда шаг.
     pub fn mark(&self, phase: Phase) {
-        self.0.fetch_max(phase as u8, Ordering::Relaxed);
+        self.phase.fetch_max(phase as u8, Ordering::Relaxed);
+        self.stride();
+    }
+
+    /// Проба продвинулась: цель ответила чем-то новым (кадр тела, завершённая фаза).
+    pub fn stride(&self) {
+        let at = self.since_born(Instant::now());
+        let previous = self.last_stride_ms.swap(at, Ordering::Relaxed);
+        self.longest_silence_ms
+            .fetch_max(at.saturating_sub(previous), Ordering::Relaxed);
+    }
+
+    /// Когда проба родилась — отсюда сторож считает потолок.
+    pub fn born(&self) -> Instant {
+        self.born
+    }
+
+    /// Момент последнего шага.
+    pub fn last_stride(&self) -> Instant {
+        self.born + Duration::from_millis(u64::from(self.last_stride_ms.load(Ordering::Relaxed)))
+    }
+
+    /// Самая длинная тишина между шагами. Мерило порога: здоровая проба показывает,
+    /// сколько тишины живой разговор себе позволяет.
+    pub fn longest_silence(&self) -> Duration {
+        Duration::from_millis(u64::from(self.longest_silence_ms.load(Ordering::Relaxed)))
+    }
+
+    fn since_born(&self, at: Instant) -> u32 {
+        u32::try_from(at.saturating_duration_since(self.born).as_millis()).unwrap_or(u32::MAX)
     }
 
     /// Самая дальняя достигнутая фаза.
     pub fn phase(&self) -> Phase {
-        match self.0.load(Ordering::Relaxed) {
+        match self.phase.load(Ordering::Relaxed) {
             0 => Phase::Connect,
             1 => Phase::Tls,
             2 => Phase::Request,
@@ -207,7 +259,8 @@ mod tests {
     #[test]
     fn a_reset_is_deterministic_and_a_timeout_is_not() {
         assert!(Cause::Reset(Phase::Tls).deterministic());
-        assert!(!Cause::Timeout(Phase::Tls).deterministic());
+        assert!(!Cause::Idle(Phase::Tls).deterministic());
+        assert!(!Cause::Ceiling(Phase::Tls).deterministic());
     }
 
     #[test]

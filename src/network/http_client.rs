@@ -12,6 +12,8 @@ use hyper_util::rt::TokioIo;
 use rustls::ClientConfig;
 
 use crate::network::cause::{classify, Cause, Phase, Reached};
+use crate::network::patience::{self, Patience};
+use reflex_core::timeout::Expiry;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
@@ -98,7 +100,9 @@ pub enum Ended {
 fn ended_before_body(cause: Cause) -> Ended {
     match cause {
         Cause::Refused | Cause::Unreachable | Cause::Reset(_) => Ended::Denied,
-        Cause::Timeout(_) | Cause::Io(_) | Cause::Protocol(_) => Ended::NeverStarted,
+        Cause::Idle(_) | Cause::Ceiling(_) | Cause::Io(_) | Cause::Protocol(_) => {
+            Ended::NeverStarted
+        }
     }
 }
 
@@ -131,16 +135,22 @@ pub struct HttpResult {
 }
 
 impl HttpResult {
-    /// Результат сорванной внешним таймаутом пробы. Отдельный конструктор, а не
-    /// литерал на месте: только здесь известно, что фазу надо взять из отметки,
-    /// — сам таймаут о ней не знает.
-    pub fn timed_out(reached: &Reached) -> HttpResult {
+    /// Результат пробы, у которой наступил срок. Отдельный конструктор, а не литерал на
+    /// месте: только здесь известно, что фазу надо взять из отметки, — сам срок о ней не
+    /// знает. `ended` один на оба срока: тишина цели — вывод о мире, но окно всё равно
+    /// не досмотрено, и судьбу по нему сужать не из чего.
+    pub fn expired(reached: &Reached, expiry: Expiry) -> HttpResult {
+        let phase = reached.phase();
+        let (cause, error) = match expiry {
+            Expiry::Idle => (Cause::Idle(phase), "idle"),
+            Expiry::Ceiling => (Cause::Ceiling(phase), "ceiling"),
+        };
         HttpResult {
             status_code: None,
             headers: String::new(),
-            error: Some("timeout".to_string()),
+            error: Some(error.to_string()),
             size_download: None,
-            cause: Some(Cause::Timeout(reached.phase())),
+            cause: Some(cause),
             ended: Ended::WeStoppedWaiting,
             windows: Vec::new(),
         }
@@ -296,8 +306,16 @@ pub async fn http_test(
     .await
     {
         Ok(result) => result,
-        Err(_) => HttpResult::timed_out(&reached),
+        Err(_) => HttpResult::expired(&reached, Expiry::Ceiling),
     }
+}
+
+/// Итог пробы под сторожем: ответ и самая длинная тишина между шагами.
+#[derive(Debug)]
+pub struct Probed {
+    pub result: HttpResult,
+    /// Мерило порога тишины: сколько молчала цель между шагами, пока проба шла.
+    pub longest_silence: Duration,
 }
 
 /// Perform an HTTP(S) data transfer test (GET with streaming download).
@@ -316,19 +334,44 @@ pub async fn http_test_data(
     via: Option<&crate::network::via::Via>,
     path: &str,
 ) -> HttpResult {
-    let timeout = Duration::from_secs(timeout_secs);
-
-    let reached = Reached::default();
-    match tokio::time::timeout(
-        timeout,
-        http_test_inner(
-            protocol, domain, ip, fwmark, path, mode, via, None, &reached,
-        ),
+    http_probe(
+        protocol,
+        domain,
+        ip,
+        fwmark,
+        Patience::within(Duration::from_secs(timeout_secs)),
+        mode,
+        via,
+        path,
     )
     .await
-    {
-        Ok(result) => result,
-        Err(_) => HttpResult::timed_out(&reached),
+    .result
+}
+
+/// Проба под сторожем сроков reflex (`patience`): обрывается, когда цель замолчала
+/// дольше порога после последнего шага, или когда кончилось наше терпение, — и
+/// говорит, какой из двух сроков наступил. Проба в `select!` первой и `biased`: ответ,
+/// готовый в тот же опрос, что и срок, важнее срока.
+#[allow(clippy::too_many_arguments)] // терпение добавлено поверх уже широкого набора пробы
+pub async fn http_probe(
+    protocol: Protocol,
+    domain: &str,
+    ip: &str,
+    fwmark: u32,
+    patience: Patience,
+    mode: BodyMode,
+    via: Option<&crate::network::via::Via>,
+    path: &str,
+) -> Probed {
+    let reached = Reached::default();
+    let result = tokio::select! {
+        biased;
+        result = http_test_inner(protocol, domain, ip, fwmark, path, mode, via, None, &reached) => result,
+        expiry = patience::expired(patience, &reached) => HttpResult::expired(&reached, expiry),
+    };
+    Probed {
+        result,
+        longest_silence: reached.longest_silence(),
     }
 }
 
@@ -371,7 +414,7 @@ pub async fn http_test_data_capturing(
     .await
     {
         Ok(result) => result,
-        Err(_) => HttpResult::timed_out(&reached),
+        Err(_) => HttpResult::expired(&reached, Expiry::Ceiling),
     }
 }
 
@@ -775,6 +818,8 @@ async fn send_and_parse(
             match next {
                 Some(Ok(frame)) => {
                     if let Some(data) = frame.data_ref() {
+                        // Байты цели — шаг: сторож отодвигает тишину.
+                        reached.stride();
                         // Окно ≥ секунды — требование прибора: короче пачки оно даёт
                         // нули между пачками и ложную просадку (`sag.rs`, ловушка 3).
                         let second = body_started.elapsed().as_secs() as usize;
@@ -960,7 +1005,7 @@ mod tests {
         // Тишина неотличима от потери пакета, а `Io`/`Protocol` мы не берёмся звать
         // определёнными: приговор за них выносить не за что.
         assert_eq!(
-            ended_before_body(Cause::Timeout(Phase::Connect)),
+            ended_before_body(Cause::Idle(Phase::Connect)),
             Ended::NeverStarted
         );
         assert_eq!(
@@ -993,15 +1038,20 @@ mod tests {
     }
 
     #[test]
-    fn an_expired_outer_timeout_is_a_timeout_on_the_phase_reached() {
+    fn an_expiry_names_its_kind_and_the_phase_reached() {
         let reached = Reached::default();
         reached.mark(Phase::Tls);
-        let result = HttpResult::timed_out(&reached);
         assert_eq!(
-            result.cause,
-            Some(Cause::Timeout(Phase::Tls)),
-            "внешний таймаут обязан назвать фазу: таймаут на connect есть чёрная \
-             дыра, таймаут после рукопожатия — тишина открытого разговора"
+            HttpResult::expired(&reached, Expiry::Idle).cause,
+            Some(Cause::Idle(Phase::Tls)),
+            "срок обязан назвать фазу: тишина на connect есть чёрная дыра, тишина \
+             после рукопожатия — молчание открытого разговора"
+        );
+        assert_eq!(
+            HttpResult::expired(&reached, Expiry::Ceiling).cause,
+            Some(Cause::Ceiling(Phase::Tls)),
+            "потолок — о нас, а не о цели: слить его с тишиной значит приписать миру \
+             наше нетерпение"
         );
     }
 

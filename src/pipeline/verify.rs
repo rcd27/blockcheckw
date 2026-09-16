@@ -213,11 +213,11 @@ mod row_stability_tests {
     fn a_row_mixing_a_pass_and_a_failure_is_flapping_and_its_cause_is_kept() {
         let rows = vec![vec![
             Outcome::Passed,
-            Outcome::Failed(Cause::Timeout(Phase::Request).name()),
+            Outcome::Failed(Cause::Idle(Phase::Request).name()),
         ]];
         let report = stability_of(&rows, 2);
         assert_eq!(report.flapping, 1);
-        assert_eq!(report.causes_flapping.get("timeout/request"), Some(&1));
+        assert_eq!(report.causes_flapping.get("idle/request"), Some(&1));
     }
 
     #[test]
@@ -230,7 +230,7 @@ mod row_stability_tests {
             ],
             vec![
                 Outcome::Passed,
-                Outcome::Failed(Cause::Timeout(Phase::Request).name()),
+                Outcome::Failed(Cause::Idle(Phase::Request).name()),
             ],
         ];
         let report = stability_of(&rows, 2);
@@ -238,12 +238,12 @@ mod row_stability_tests {
         assert_eq!(report.flapping, 1);
         assert_eq!(report.causes_never.get("reset/tls"), Some(&2));
         assert_eq!(
-            report.causes_never.get("timeout/request"),
+            report.causes_never.get("idle/request"),
             None,
             "тишина флапающей не смеет попасть в счёт стабильно павшей: \
              смешение групп и есть та ошибка, ради устранения которой замер"
         );
-        assert_eq!(report.causes_flapping.get("timeout/request"), Some(&1));
+        assert_eq!(report.causes_flapping.get("idle/request"), Some(&1));
         assert_eq!(report.causes_flapping.get("reset/tls"), None);
     }
 

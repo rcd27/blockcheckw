@@ -4,6 +4,7 @@ use std::sync::Arc;
 use console::style;
 
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
+use blockcheckw::network::patience::Patience;
 use blockcheckw::network::{dns, isp, via::Via};
 use blockcheckw::pipeline::{check, reference};
 use blockcheckw::strategy::{generator, rank};
@@ -16,6 +17,8 @@ pub struct CheckParams<'a> {
     pub from_file: &'a str,
     pub dns_mode: DnsMode,
     pub timeout: u64,
+    /// Порог тишины пробы (`Expiry::Idle`), миллисекунды.
+    pub idle_ms: u64,
     pub take: usize,
     /// `M` — сколько раз мерить байтовую ось (спека §6-тер).
     pub passes: usize,
@@ -46,6 +49,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         from_file,
         dns_mode,
         timeout,
+        idle_ms,
         take,
         passes,
         output,
@@ -213,6 +217,15 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         style(&probe_path).bold(),
         style(&identity_path).bold(),
     ));
+    let patience = Patience::new(
+        std::time::Duration::from_millis(idle_ms),
+        std::time::Duration::from_secs(timeout),
+    );
+    screen.println(&format!(
+        "  терпение пробы: тишина {} мс, потолок {} с",
+        style(idle_ms).bold(),
+        style(timeout).bold(),
+    ));
     screen.println(&format!(
         "  {}",
         style("Tip: use --take 10 to stop after 10 verified per protocol").yellow()
@@ -226,6 +239,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         &ips,
         take,
         passes,
+        patience,
         &references,
         &probe_path,
         &identity_path,

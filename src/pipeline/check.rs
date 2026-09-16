@@ -7,7 +7,8 @@ use crate::config::{CoreConfig, Protocol};
 use crate::dto::{CheckReport, CheckedStrategy, ControlVerdict, VerifiedStrategy};
 use crate::firewall::nft::{OwnedTable, SystemNft};
 use crate::firewall::nftables;
-use crate::network::http_client::{http_test_data, pick_random_ip, BodyMode, Ended, HttpResult};
+use crate::network::http_client::{http_probe, pick_random_ip, BodyMode, Ended, HttpResult};
+use crate::network::patience::Patience;
 use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
 use crate::nfqws2::run::SystemNfqws2;
 use crate::pipeline::fate::{self, Admits, Fate, Observed, ALL_FATES};
@@ -45,6 +46,7 @@ pub async fn run_check(
     ips: &[String],
     take: usize,
     passes: usize,
+    patience: Patience,
     references: &References,
     probe_path: &str,
     identity_path: &str,
@@ -84,7 +86,7 @@ pub async fn run_check(
         domain,
         control_ip,
         0,
-        config.request_timeout,
+        patience,
         probe_path,
         identity_path,
         passes,
@@ -190,6 +192,7 @@ pub async fn run_check(
                 tagged,
                 ips,
                 passes,
+                patience,
                 references,
                 probe_path,
                 identity_path,
@@ -205,7 +208,7 @@ pub async fn run_check(
         if checked.working {
             strategy_span.record("status", "working");
             screen.println(&format!(
-                "    {} {}/{} full delivery, median {}ms, share {}",
+                "    {} {}/{} full delivery, median {}ms, share {}, тишина до {} мс",
                 style("OK").green().bold(),
                 checked.passes_ok,
                 checked.passes_total,
@@ -213,6 +216,10 @@ pub async fn run_check(
                 checked
                     .median_share
                     .map(|s| format!("{s:.2}"))
+                    .unwrap_or_else(|| "—".to_string()),
+                checked
+                    .longest_silence_ms
+                    .map(|ms| ms.to_string())
                     .unwrap_or_else(|| "—".to_string()),
             ));
             *perfect_per_proto.entry(tagged.protocol).or_insert(0) += 1;
@@ -250,6 +257,7 @@ pub async fn run_check(
                 passes_ok: checked.passes_ok,
                 passes_total: checked.passes_total,
                 median_share: checked.median_share,
+                longest_silence_ms: checked.longest_silence_ms,
                 observed: checked.observed.clone(),
                 admits: checked.admits.clone(),
                 working: checked.working,
@@ -323,6 +331,8 @@ struct BytePassReading {
     full_delivery: bool,
     /// `None` — эталона объёма нет, доли не существует (решение 2 спеки §6-тер).
     share: Option<f64>,
+    /// Самая длинная тишина цели между шагами пробы.
+    longest_silence: std::time::Duration,
     /// Короткое имя причины (для гистограммы `BCW_CAUSE_HISTOGRAM`). `None` при
     /// полной доставке.
     reason: Option<String>,
@@ -396,6 +406,17 @@ fn volume_ok(ended: Ended, byte_reference: Option<&Reference>, print: &ContentPr
     }
 }
 
+/// Самая длинная тишина цели у проходов с ПОЛНОЙ доставкой — только здоровый разговор
+/// говорит, сколько молчания себе позволяет живая цель. Сорванный проход меряет наш
+/// порог, а не цель. `None` — полной доставки не было.
+fn longest_healthy_silence_ms(passes: &[BytePassReading]) -> Option<u64> {
+    passes
+        .iter()
+        .filter(|p| p.full_delivery)
+        .map(|p| p.longest_silence.as_millis() as u64)
+        .max()
+}
+
 /// Медиана доли `вытянуто/эталон` по `M` проходам байтовой оси. `None`, если хоть один
 /// проход не имеет доли (эталона объёма не было вовсе — решение 2 спеки §6-тер: доли
 /// нет ни у одного прохода, либо у всех, поскольку эталон общий на весь прогон) или
@@ -422,7 +443,7 @@ async fn measure_channel(
     domain: &str,
     ip: &str,
     mark: u32,
-    timeout: u64,
+    patience: Patience,
     probe_path: &str,
     identity_path: &str,
     passes: usize,
@@ -431,17 +452,18 @@ async fn measure_channel(
     log_index: Option<usize>,
 ) -> ChannelReading {
     // Ось подлинности: один раз, детерминированный путь. Только она сужает до `Mirage`.
-    let identity_result = http_test_data(
+    let identity_result = http_probe(
         protocol,
         domain,
         ip,
         mark,
-        timeout,
+        patience,
         BodyMode::Unlimited,
         None,
         identity_path,
     )
-    .await;
+    .await
+    .result;
     let identity_bytes = identity_result.size_download.unwrap_or(0);
     let identity_observed = fate::observe(
         observe::connected_of(identity_result.cause),
@@ -460,17 +482,19 @@ async fn measure_channel(
     for pass_idx in 0..passes {
         let started_at = verify::now_epoch();
         let pass_start = Instant::now();
-        let result = http_test_data(
+        let probed = http_probe(
             protocol,
             domain,
             ip,
             mark,
-            timeout,
+            patience,
             BodyMode::Unlimited,
             None,
             probe_path,
         )
         .await;
+        let longest_silence = probed.longest_silence;
+        let result = probed.result;
         let latency_ms = pass_start.elapsed().as_millis() as u64;
         let bytes = result.size_download.unwrap_or(0);
         let observed = fate::observe(
@@ -522,6 +546,7 @@ async fn measure_channel(
             latency_ms,
             full_delivery,
             share,
+            longest_silence,
             reason,
             message,
         });
@@ -546,6 +571,7 @@ async fn check_single_strategy(
     tagged: &TaggedStrategy,
     ips: &[String],
     passes: usize,
+    patience: Patience,
     references: &References,
     probe_path: &str,
     identity_path: &str,
@@ -573,6 +599,7 @@ async fn check_single_strategy(
                 passes_ok: 0,
                 passes_total: 0,
                 median_share: None,
+                longest_silence_ms: None,
             },
             Vec::new(),
         )
@@ -627,7 +654,7 @@ async fn check_single_strategy(
         domain,
         ip,
         mark.so_mark(),
-        config.request_timeout,
+        patience,
         probe_path,
         identity_path,
         passes,
@@ -729,6 +756,7 @@ async fn check_single_strategy(
         passes_ok,
         passes_total,
         median_share,
+        longest_silence_ms: longest_healthy_silence_ms(&reading.byte_passes),
     };
 
     (checked, outcomes)
@@ -959,6 +987,7 @@ mod tests {
             passes_ok: 1,
             passes_total: 1,
             median_share: Some(1.02),
+            longest_silence_ms: None,
             observed: "Bytes".to_string(),
             admits: vec!["Good".to_string()],
             working: true,
@@ -985,6 +1014,7 @@ mod tests {
             passes_ok: 0,
             passes_total: 1,
             median_share: None,
+            longest_silence_ms: None,
             observed: "Bytes".to_string(),
             admits: vec!["Mirage".to_string()],
             working: false,
@@ -1057,6 +1087,7 @@ mod tests {
             passes_ok: 3,
             passes_total: 3,
             median_share: Some(1.0),
+            longest_silence_ms: None,
             observed: "Bytes".to_string(),
             admits: vec!["Good".to_string()],
             working: true,
@@ -1087,6 +1118,7 @@ mod tests {
             passes_ok: 2,
             passes_total: 3,
             median_share: Some(0.67),
+            longest_silence_ms: None,
             observed: "Bytes".to_string(),
             admits: vec!["Grinding".to_string()],
             working: false,
@@ -1207,6 +1239,7 @@ mod tests {
             passes_ok: 0,
             passes_total: 3,
             median_share: None,
+            longest_silence_ms: None,
             observed: "Bytes".to_string(),
             admits: vec![],
             working,

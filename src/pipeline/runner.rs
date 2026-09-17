@@ -73,6 +73,22 @@ pub struct RunParams<'a> {
     pub success_sink: Option<Arc<std::sync::Mutex<Vec<Vec<String>>>>>,
 }
 
+/// Прогресс-бары, которые человек действительно видит. `MultiProgress` без терминала скрыт
+/// (`ui::Console::new`), и `println` в скрытый молча теряет строку: на коробке, где scan
+/// идёт демоном, это дало `errors: 8648` без единого слова о причине.
+fn audible(multi: Option<&MultiProgress>) -> Option<&MultiProgress> {
+    multi.filter(|m| !m.is_hidden())
+}
+
+/// Сказать строку об отказе так, чтобы её услышали: над видимыми барами, иначе в stderr.
+fn speak(multi: Option<&MultiProgress>, pb: Option<&ProgressBar>, line: &str) {
+    match (audible(multi), pb) {
+        (Some(m), _) => m.println(line).unwrap_or(()),
+        (None, Some(pb)) => pb.suspend(|| eprintln!("{line}")),
+        (None, None) => eprintln!("{line}"),
+    }
+}
+
 fn record_plan_failure(
     chunk: &[Vec<String>],
     error: &BlockcheckError,
@@ -90,11 +106,7 @@ fn record_plan_failure(
             "strategies"
         }
     );
-    if let Some(m) = multi {
-        let _ = m.println(&line);
-    } else {
-        pb.suspend(|| eprintln!("{line}"));
-    }
+    speak(multi, Some(pb), &line);
     for strategy_args in chunk {
         *errors += 1;
         pb.inc(1);
@@ -111,7 +123,17 @@ fn all_as_error(
     strategies: &[Vec<String>],
     error: BlockcheckError,
     elapsed: Duration,
+    multi: Option<&MultiProgress>,
 ) -> (Vec<StrategyResult>, RunStats) {
+    // Прежде молчало вовсе: весь протокол уходил в ошибки, а причина — только в отчёт.
+    speak(
+        multi,
+        None,
+        &format!(
+            "nfqws2 run failed before any plan ({} strategies): {error}",
+            strategies.len()
+        ),
+    );
     let results: Vec<StrategyResult> = strategies
         .iter()
         .map(|args| StrategyResult {
@@ -157,12 +179,13 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
                     .to_string(),
             },
             start.elapsed(),
+            multi,
         );
     }
 
     let table = match nftables::prepare_table(&SystemNft, &config.nft_table).await {
         Ok(t) => t,
-        Err(e) => return all_as_error(strategies, e, start.elapsed()),
+        Err(e) => return all_as_error(strategies, e, start.elapsed(), multi),
     };
 
     let owned_pb;
@@ -329,12 +352,7 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
                 }
                 Err(join_err) => {
                     errors += 1;
-                    let line = format!("task join error: {join_err}");
-                    if let Some(m) = multi {
-                        let _ = m.println(&line);
-                    } else {
-                        pb.suspend(|| eprintln!("{line}"));
-                    }
+                    speak(multi, Some(pb), &format!("task join error: {join_err}"));
                     pb.inc(1);
 
                     let strategy_args = pending_args.remove(&join_err.id()).unwrap_or_default();
@@ -383,6 +401,34 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
     );
 
     (all_results, stats)
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+
+    /// Без терминала бары скрыты — и строка об отказе плана обязана уйти мимо них.
+    #[test]
+    fn hidden_bars_are_not_where_a_failure_is_said() {
+        let hidden = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
+        assert!(audible(Some(&hidden)).is_none());
+        assert!(audible(None).is_none());
+    }
+
+    #[test]
+    fn a_failed_run_before_any_plan_still_counts_every_strategy() {
+        let strategies = vec![vec!["--a".to_string()], vec!["--b".to_string()]];
+        let hidden = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
+        let (results, stats) = all_as_error(
+            &strategies,
+            BlockcheckError::InvalidConfig {
+                reason: "test".to_string(),
+            },
+            Duration::ZERO,
+            Some(&hidden),
+        );
+        assert_eq!((results.len(), stats.errors), (2, 2));
+    }
 }
 
 #[cfg(test)]

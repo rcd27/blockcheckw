@@ -80,8 +80,10 @@ jobs:
           components: rust-src
       - uses: taiki-e/install-action@cross
 
+      # Без QUIC-пробы (`--no-default-features`): quinn на этих целях не проверен, а
+      # цена поломки — релиз без архива. `-p quic` такая сборка отвергает на разборе.
       - name: Build
-        run: cross +nightly build --release --target ${{ matrix.target }} -Zbuild-std=std,panic_abort
+        run: cross +nightly build --release --no-default-features --target ${{ matrix.target }} -Zbuild-std=std,panic_abort
 
       - name: Compress with UPX
         if: matrix.upx
@@ -128,8 +130,9 @@ jobs:
           tar xJf /tmp/toolchain.tar.xz -C /opt
           echo "/opt/${{ matrix.musl_name }}/bin" >> "$GITHUB_PATH"
 
+      # Без QUIC-пробы — см. build-nightly.
       - name: Build
-        run: cargo +nightly build --release --target ${{ matrix.target }} -Zbuild-std=std,panic_abort
+        run: cargo +nightly build --release --no-default-features --target ${{ matrix.target }} -Zbuild-std=std,panic_abort
         env:
           ${{ matrix.linker_env }}: ${{ matrix.musl_name }}-gcc
 

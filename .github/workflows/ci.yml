@@ -24,6 +24,8 @@ jobs:
       # таргетов) и --features otel (OTLP-стек tonic/tower, см. Cargo.toml).
       - run: cargo clippy -- -D warnings
       - run: cargo clippy --features otel -- -D warnings
+      # Сборка без QUIC-пробы — та, что уезжает на mips/ppc/riscv.
+      - run: cargo clippy --no-default-features -- -D warnings
       - run: cargo test --lib --bins --features otel
 
   # Экзотические цели собираются ТОЛЬКО в релизном воркфлоу, поэтому их поломка
@@ -54,7 +56,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - uses: taiki-e/install-action@cross
-      - run: cross +nightly check --release --target ${{ matrix.target }} -Zbuild-std=std,panic_abort
+      # Так же, как их собирает релиз: без QUIC-пробы.
+      - run: cross +nightly check --release --no-default-features --target ${{ matrix.target }} -Zbuild-std=std,panic_abort
 
   integration:
     needs: test

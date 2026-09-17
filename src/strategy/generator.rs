@@ -3,7 +3,7 @@
 // Strategies are dumped from vanilla blockcheck2 scripts via:
 //   bash tools/update_strategies.sh
 //
-// This produces strategies/{http,tls12,tls13}.txt — one strategy per line,
+// This produces strategies/{http,tls12,tls13,quic}.txt — one strategy per line,
 // each line is space-separated nfqws2 arguments.
 
 use crate::config::Protocol;
@@ -24,6 +24,7 @@ pub struct TaggedStrategy {
 const HTTP_STRATEGIES: &str = include_str!("../../strategies/http.txt");
 const TLS12_STRATEGIES: &str = include_str!("../../strategies/tls12.txt");
 const TLS13_STRATEGIES: &str = include_str!("../../strategies/tls13.txt");
+const QUIC_STRATEGIES: &str = include_str!("../../strategies/quic.txt");
 
 /// Parse a strategy file: one strategy per line, each line split by whitespace.
 fn parse_strategies(data: &str) -> Vec<Strategy> {
@@ -39,6 +40,7 @@ pub fn generate_strategies(protocol: Protocol) -> Vec<Strategy> {
         Protocol::Http => parse_strategies(HTTP_STRATEGIES),
         Protocol::HttpsTls12 => parse_strategies(TLS12_STRATEGIES),
         Protocol::HttpsTls13 => parse_strategies(TLS13_STRATEGIES),
+        Protocol::Quic => parse_strategies(QUIC_STRATEGIES),
     }
 }
 
@@ -78,12 +80,7 @@ fn parse_vanilla_summary(data: &str, protocol: Option<Protocol>) -> Vec<Strategy
             }
             // Check protocol filter
             if let Some(proto) = protocol {
-                let prefix = match proto {
-                    Protocol::Http => "curl_test_http ",
-                    Protocol::HttpsTls12 => "curl_test_https_tls12 ",
-                    Protocol::HttpsTls13 => "curl_test_https_tls13 ",
-                };
-                if !line.starts_with(prefix) {
+                if Protocol::of_vanilla_line(line) != Some(proto) {
                     return None;
                 }
             }
@@ -139,12 +136,7 @@ fn parse_json_strategies(data: &str) -> Result<Vec<TaggedStrategy>, String> {
         .strategies
         .into_iter()
         .filter_map(|entry| {
-            let protocol = match entry.protocol.as_str() {
-                "HTTP" => Protocol::Http,
-                "HTTPS/TLS1.2" => Protocol::HttpsTls12,
-                "HTTPS/TLS1.3" => Protocol::HttpsTls13,
-                _ => return None,
-            };
+            let protocol = Protocol::from_report_name(&entry.protocol)?;
             Some(TaggedStrategy {
                 protocol,
                 args: entry.args.split_whitespace().map(String::from).collect(),
@@ -160,15 +152,7 @@ fn parse_json_strategies(data: &str) -> Result<Vec<TaggedStrategy>, String> {
 fn parse_vanilla_tagged(data: &str) -> Vec<TaggedStrategy> {
     data.lines()
         .filter_map(|line| {
-            let protocol = if line.starts_with("curl_test_https_tls13 ") {
-                Protocol::HttpsTls13
-            } else if line.starts_with("curl_test_https_tls12 ") {
-                Protocol::HttpsTls12
-            } else if line.starts_with("curl_test_http ") {
-                Protocol::Http
-            } else {
-                return None;
-            };
+            let protocol = Protocol::of_vanilla_line(line)?;
 
             line.split_once(": nfqws2 ")
                 .map(|(_, args)| TaggedStrategy {
@@ -186,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_strategies_load() {
-        for protocol in [Protocol::Http, Protocol::HttpsTls12, Protocol::HttpsTls13] {
+        for protocol in Protocol::all() {
             let strategies = generate_strategies(protocol);
             assert!(!strategies.is_empty(), "no strategies for {protocol}");
             for (i, s) in strategies.iter().enumerate() {
@@ -210,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_no_duplicates() {
-        for protocol in [Protocol::Http, Protocol::HttpsTls12, Protocol::HttpsTls13] {
+        for protocol in Protocol::all() {
             let strategies = generate_strategies(protocol);
             let mut seen = std::collections::HashSet::new();
             let mut dupes = 0;
@@ -284,5 +268,74 @@ curl_test_https_tls13 ipv4 rutracker.org : nfqws2 --payload=tls_client_hello --l
         let tagged = parse_vanilla_tagged(data);
         assert_eq!(tagged[0].protocol, Protocol::HttpsTls13);
         assert_eq!(tagged[1].protocol, Protocol::HttpsTls12);
+    }
+    /// Аргументы Lua-функций, которыми собран каталог QUIC, — выписаны из
+    /// `zapret-antidpi.lua`/`zapret-lib.lua` (функции `fake`, `send`, `drop`, `udplen`,
+    /// `ipfrag2`, `rawsend_opts`). Lua не ругается на незнакомый аргумент — он молча
+    /// игнорируется, и страта с опечаткой перебиралась бы как рабочая другой стратой.
+    fn quic_lua_args(func: &str) -> Option<&'static [&'static str]> {
+        match func {
+            "fake" => Some(&["blob", "repeats"]),
+            "send" => Some(&["ipfrag", "ipfrag_pos_udp"]),
+            "drop" => Some(&[]),
+            "udplen" => Some(&["increment", "min", "max", "pattern", "pattern_offset"]),
+            _unknown => None,
+        }
+    }
+
+    #[test]
+    fn quic_catalog_speaks_only_to_quic_initial_with_existing_lua_args() {
+        let quic = generate_strategies(Protocol::Quic);
+        assert!(quic.len() >= 30, "QUIC too few: {}", quic.len());
+        quic.iter().for_each(|strategy| {
+            assert_eq!(
+                strategy.first().map(String::as_str),
+                Some("--payload=quic_initial"),
+                "страта QUIC без фильтра пейлоада трогает и Handshake, и данные: {strategy:?}"
+            );
+            strategy
+                .iter()
+                .filter_map(|arg| arg.strip_prefix("--lua-desync="))
+                .for_each(|call| {
+                    let parts: Vec<&str> = call.split(':').collect();
+                    let known = quic_lua_args(parts[0])
+                        .unwrap_or_else(|| panic!("функции нет в каталоге: {call}"));
+                    parts[1..]
+                        .iter()
+                        .map(|kv| kv.split('=').next().unwrap_or(kv))
+                        .for_each(|name| {
+                            assert!(known.contains(&name), "аргумента {name} нет у {call}")
+                        });
+                });
+        });
+    }
+
+    #[test]
+    fn quic_catalog_carries_vanilla_and_named_additions() {
+        let quic: std::collections::HashSet<Vec<String>> =
+            generate_strategies(Protocol::Quic).into_iter().collect();
+        let parse = |s: &str| -> Strategy { s.split_whitespace().map(String::from).collect() };
+        [
+            // 90-quic.sh: фейк с повторами
+            "--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=5",
+            // 90-quic.sh: ipfrag по позиции UDP + drop оригинала
+            "--payload=quic_initial --lua-desync=send:ipfrag:ipfrag_pos_udp=16 --lua-desync=drop",
+            // 90-quic.sh: фейк + ipfrag
+            "--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=1 --lua-desync=send:ipfrag:ipfrag_pos_udp=64 --lua-desync=drop",
+            // custom/list_quic.txt
+            "--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11",
+            // udplen
+            "--payload=quic_initial --lua-desync=udplen:increment=8",
+        ]
+        .into_iter()
+        .for_each(|line| assert!(quic.contains(&parse(line)), "нет в каталоге: {line}"));
+    }
+
+    #[test]
+    fn a_vanilla_http3_line_is_tagged_quic() {
+        let data = "curl_test_http3 ipv4 x.org : nfqws2 --payload=quic_initial --lua-desync=drop\n";
+        let tagged = parse_vanilla_tagged(data);
+        assert_eq!(tagged.len(), 1);
+        assert_eq!(tagged[0].protocol, Protocol::Quic);
     }
 }

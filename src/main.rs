@@ -33,6 +33,7 @@ const AFTER_HELP: &str = "\
 Examples:
   blockcheckw scan -d rutracker.org                скан домена на работающие страты
   blockcheckw scan -d example.com -p tls12         проверка только TLS 1.2
+  blockcheckw scan -d example.com -p quic          подбор для HTTP/3 (QUIC, UDP 443)
   blockcheckw scan -d example.com -o report.json   сохранить отчёт в файл
   blockcheckw check --from-file report.json        проверка найденных страт
   blockcheckw universal --domain-list domains.txt  подбор пересекающихся страт для разных доменов
@@ -98,7 +99,7 @@ enum Command {
         #[arg(short, long, default_value = "rutracker.org")]
         domain: String,
 
-        /// Protocol to benchmark (http, tls12, tls13)
+        /// Protocol to benchmark (http, tls12, tls13, quic)
         #[arg(short, long, default_value = "tls12")]
         protocol: String,
 
@@ -202,7 +203,7 @@ enum Command {
         #[arg(short, long, default_value = "rutracker.org")]
         domain: String,
 
-        /// Protocols to test (comma-separated: http,tls12,tls13)
+        /// Protocols to test (comma-separated: http,tls12,tls13,quic)
         #[arg(short, long, default_value = "http,tls12,tls13")]
         protocols: String,
 
@@ -259,7 +260,7 @@ enum Command {
         #[arg(long)]
         domain_list: String,
 
-        /// Protocols to test (comma-separated: http,tls12,tls13)
+        /// Protocols to test (comma-separated: http,tls12,tls13,quic)
         #[arg(short, long, default_value = "tls12")]
         protocols: String,
 

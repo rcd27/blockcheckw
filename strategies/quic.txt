@@ -1,0 +1,38 @@
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=1
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=2
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=5
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=10
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=20
+--payload=quic_initial --lua-desync=send:ipfrag:ipfrag_pos_udp=8 --lua-desync=drop
+--payload=quic_initial --lua-desync=send:ipfrag:ipfrag_pos_udp=16 --lua-desync=drop
+--payload=quic_initial --lua-desync=send:ipfrag:ipfrag_pos_udp=32 --lua-desync=drop
+--payload=quic_initial --lua-desync=send:ipfrag:ipfrag_pos_udp=64 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=1 --lua-desync=send:ipfrag:ipfrag_pos_udp=8 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=1 --lua-desync=send:ipfrag:ipfrag_pos_udp=16 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=1 --lua-desync=send:ipfrag:ipfrag_pos_udp=32 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=1 --lua-desync=send:ipfrag:ipfrag_pos_udp=64 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11
+--payload=quic_initial --lua-desync=send:ipfrag --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=5 --lua-desync=send:ipfrag:ipfrag_pos_udp=8 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=5 --lua-desync=send:ipfrag:ipfrag_pos_udp=16 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=5 --lua-desync=send:ipfrag:ipfrag_pos_udp=32 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=5 --lua-desync=send:ipfrag:ipfrag_pos_udp=64 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=10 --lua-desync=send:ipfrag:ipfrag_pos_udp=8 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=10 --lua-desync=send:ipfrag:ipfrag_pos_udp=16 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=10 --lua-desync=send:ipfrag:ipfrag_pos_udp=32 --lua-desync=drop
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=10 --lua-desync=send:ipfrag:ipfrag_pos_udp=64 --lua-desync=drop
+--payload=quic_initial --lua-desync=udplen:increment=2
+--payload=quic_initial --lua-desync=udplen:increment=4
+--payload=quic_initial --lua-desync=udplen:increment=8
+--payload=quic_initial --lua-desync=udplen:increment=16
+--payload=quic_initial --lua-desync=udplen:increment=32
+--payload=quic_initial --lua-desync=udplen:increment=64
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=1 --lua-desync=udplen:increment=2
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=1 --lua-desync=udplen:increment=16
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=1 --lua-desync=udplen:increment=64
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=5 --lua-desync=udplen:increment=2
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=5 --lua-desync=udplen:increment=16
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=5 --lua-desync=udplen:increment=64
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=10 --lua-desync=udplen:increment=2
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=10 --lua-desync=udplen:increment=16
+--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=10 --lua-desync=udplen:increment=64

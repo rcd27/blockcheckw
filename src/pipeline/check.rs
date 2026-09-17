@@ -81,8 +81,16 @@ pub async fn run_check(
     // «проходит», и `inconclusive` не срабатывает, сколько бы домен ни открывался без
     // десинка. Контроль не кандидат: в гистограмму устойчивости (`stability_of`) не идёт.
     let control_ip = pick_random_ip(ips).expect("ips проверены вызывающим");
+    let control_transport = control_protocol(strategies);
+    if let ControlCoverage::Partial = control_coverage(strategies) {
+        screen.println(&format!(
+            "  {} в прогоне и QUIC, и TCP: контроль идёт по {control_transport} и о QUIC-стратах \
+             молчит — проверяйте их отдельным прогоном.",
+            style("ВНИМАНИЕ:").yellow().bold(),
+        ));
+    }
     let control_reading = measure_channel(
-        Protocol::HttpsTls12,
+        control_transport,
         domain,
         control_ip,
         0,
@@ -90,8 +98,8 @@ pub async fn run_check(
         probe_path,
         identity_path,
         passes,
-        references.byte(Protocol::HttpsTls12),
-        references.identity(Protocol::HttpsTls12),
+        references.byte(control_transport),
+        references.identity(control_transport),
         None,
     )
     .await;
@@ -318,6 +326,40 @@ pub async fn run_check(
         strategies: verified,
         control,
         inconclusive,
+    }
+}
+
+/// Каким транспортом идёт контроль (проба без десинка). Контроль отвечает на вопрос «а
+/// режется ли домен на этой линии вообще» — и отвечает только за свой транспорт: QUIC и
+/// TCP цензор режет порознь, и TLS, открывшийся без десинка, ничего не говорит о QUIC.
+/// Все страты — QUIC: контроль по QUIC. Иначе — по TLS 1.2, как прежде.
+pub fn control_protocol(strategies: &[TaggedStrategy]) -> Protocol {
+    match control_coverage(strategies) {
+        ControlCoverage::QuicOnly => Protocol::Quic,
+        ControlCoverage::TcpOnly | ControlCoverage::Partial => Protocol::HttpsTls12,
+    }
+}
+
+/// За какие страты контроль отвечает.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlCoverage {
+    /// Только QUIC — контроль по QUIC отвечает за всех.
+    QuicOnly,
+    /// Только TCP (или пусто) — контроль по TLS отвечает за всех.
+    TcpOnly,
+    /// Смесь: контроль по TLS, QUIC-страты без контроля.
+    Partial,
+}
+
+pub fn control_coverage(strategies: &[TaggedStrategy]) -> ControlCoverage {
+    let quic = strategies
+        .iter()
+        .filter(|s| s.protocol.transport() == crate::config::Transport::Udp)
+        .count();
+    match (quic, strategies.len() - quic) {
+        (0, _) => ControlCoverage::TcpOnly,
+        (_, 0) => ControlCoverage::QuicOnly,
+        (_quic, _tcp) => ControlCoverage::Partial,
     }
 }
 
@@ -626,14 +668,8 @@ async fn check_single_strategy(
     };
 
     // 3. Поставить диспетчеризацию — только теперь, когда слушатель точно есть
-    if let Err(e) = nftables::apply_dispatch(
-        &SystemNft,
-        table,
-        &ready,
-        &plan.dispatch(protocol.port()),
-        ips,
-    )
-    .await
+    if let Err(e) =
+        nftables::apply_dispatch(&SystemNft, table, &ready, &plan.dispatch(protocol), ips).await
     {
         // Батч атомарен, но `Err` тут может значить и таймаут
         // `run_process_stdin` (15с): нельзя быть уверенным, что nft не успел
@@ -1338,5 +1374,33 @@ mod tests {
     #[test]
     fn имя_причины_связности_падает_на_unknown_без_единой_улики() {
         assert_eq!(connectivity_cause_name(None, None), "unknown");
+    }
+
+    fn tagged(protocol: Protocol) -> TaggedStrategy {
+        TaggedStrategy {
+            protocol,
+            args: vec!["--a".to_string()],
+            coverage: 1,
+        }
+    }
+
+    #[test]
+    fn a_quic_run_is_controlled_over_quic() {
+        // Контроль по TLS на QUIC-прогоне отвечал бы за другой транспорт: TLS без десинка
+        // открылся — и «домен не режется», хотя человек страдает на QUIC.
+        let quic = vec![tagged(Protocol::Quic), tagged(Protocol::Quic)];
+        assert_eq!(control_protocol(&quic), Protocol::Quic);
+        assert_eq!(
+            control_protocol(&[tagged(Protocol::HttpsTls13)]),
+            Protocol::HttpsTls12
+        );
+        assert_eq!(control_protocol(&[]), Protocol::HttpsTls12);
+    }
+
+    #[test]
+    fn a_mixed_run_names_that_quic_goes_uncontrolled() {
+        let mixed = vec![tagged(Protocol::HttpsTls12), tagged(Protocol::Quic)];
+        assert_eq!(control_coverage(&mixed), ControlCoverage::Partial);
+        assert_eq!(control_protocol(&mixed), Protocol::HttpsTls12);
     }
 }

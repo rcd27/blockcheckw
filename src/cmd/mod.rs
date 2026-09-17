@@ -150,10 +150,21 @@ fn foreign_table_candidates(tables: &[(String, String)], own_table: &str) -> Vec
         .collect()
 }
 
-/// Похоже ли содержимое таблицы на DPI bypass: очередь на HTTPS-порт.
+/// Похоже ли содержимое таблицы на DPI bypass: очередь на порт 443 — TCP или UDP (QUIC).
+/// `dport 443` покрывает оба транспорта; проверка UDP названа тестом, а не совпадением.
 fn table_has_bypass_rules(table_content: &str) -> bool {
-    table_content.contains("queue")
-        && (table_content.contains("dport 443") || table_content.contains("dport { 80, 443"))
+    // Порт 443 — одиночный или в множестве в любом месте (`{ 443, 50000-51000 }`): UDP-обход
+    // QUIC пишется набором портов чаще, чем TCP, и прежний поиск `{ 80, 443` его не видел.
+    let names_443 = |after_dport: &str| {
+        let ports = match after_dport.strip_prefix('{') {
+            Some(set) => set.split('}').next().unwrap_or(""),
+            None => after_dport.split_whitespace().next().unwrap_or(""),
+        };
+        ports
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .any(|port| port == "443")
+    };
+    table_content.contains("queue") && table_content.split("dport ").skip(1).any(names_443)
 }
 
 fn pgrep_has_matches(exit_code: i32, stdout: &str) -> bool {
@@ -214,7 +225,7 @@ pub async fn handle_bypass_conflicts(
     }
     for table in &conflicts.conflicting_tables {
         con.warn(&format!(
-            "nft table '{} {}' has queue rules on port 443",
+            "nft table '{} {}' has queue rules on port 443 (tcp or udp)",
             table.family(),
             table.name(),
         ));
@@ -1008,6 +1019,20 @@ table inet zapret {
         assert!(table_has_bypass_rules(ZAPRET1_TABLE));
         assert!(table_has_bypass_rules(
             "\t\ttcp dport 443 queue num 100 bypass\n"
+        ));
+    }
+
+    #[test]
+    fn queue_on_quic_port_looks_like_bypass() {
+        // Чужой обход QUIC перехватил бы наши Initial так же, как чужой TLS — ClientHello.
+        assert!(table_has_bypass_rules(
+            "\t\tudp dport 443 ct original packets 1-20 queue num 300 bypass\n"
+        ));
+        assert!(table_has_bypass_rules(
+            "\t\tmeta l4proto udp udp dport { 443, 50000-51000 } queue num 300 bypass\n"
+        ));
+        assert!(!table_has_bypass_rules(
+            "\t\tudp dport 4433 queue num 300 bypass\n"
         ));
     }
 

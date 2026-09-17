@@ -16,16 +16,27 @@ use std::time::{Duration, Instant};
 
 /// Докуда дошла проба. Порядок — это порядок прохождения: каждая следующая
 /// фаза достижима только через предыдущую.
+///
+/// Фазы двух транспортов живут в одном порядке и не смешиваются в одной пробе: TCP идёт
+/// `Connect → Tls → Request → Body`, QUIC — `Initial → Handshake → Request → Body`.
+/// Номера разведены так, чтобы оба пути были возрастающими, — отметка берёт максимум.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Phase {
     /// TCP-соединение ещё не установлено.
-    Connect,
+    Connect = 0,
+    /// QUIC: Initial с ClientHello ушёл, ответа сервера ещё нет. Аналог `Connect`: у UDP
+    /// нет рукопожатия транспорта, и первый ответ цели приходит уже в криптографии —
+    /// тишина здесь и есть чёрная дыра QUIC.
+    Initial = 1,
     /// Соединение есть, идёт TLS-рукопожатие.
-    Tls,
+    Tls = 2,
+    /// QUIC: сервер ответил своим Handshake, рукопожатие не завершено. Аналог `Tls`:
+    /// цель слышит нас, и отказ здесь — уже не блок по адресу.
+    Handshake = 3,
     /// Рукопожатие прошло, послан запрос, ждём заголовки.
-    Request,
+    Request = 4,
     /// Заголовки получены, читаем тело.
-    Body,
+    Body = 5,
 }
 
 /// Вид отказа вместе с фазой.
@@ -85,9 +96,21 @@ impl Phase {
     pub fn name(&self) -> &'static str {
         match self {
             Phase::Connect => "connect",
+            Phase::Initial => "initial",
             Phase::Tls => "tls",
+            Phase::Handshake => "handshake",
             Phase::Request => "request",
             Phase::Body => "body",
+        }
+    }
+
+    /// Ответила ли цель хоть чем-то до этой фазы. TCP — встал ли коннект, QUIC — пришёл
+    /// ли от сервера хоть один пакет рукопожатия. Порядок номеров здесь не годится:
+    /// `Initial` стоит выше `Connect`, но так же ничего о цели не знает.
+    pub fn answered(&self) -> bool {
+        match self {
+            Phase::Connect | Phase::Initial => false,
+            Phase::Tls | Phase::Handshake | Phase::Request | Phase::Body => true,
         }
     }
 }
@@ -196,9 +219,11 @@ impl Reached {
     pub fn phase(&self) -> Phase {
         match self.phase.load(Ordering::Relaxed) {
             0 => Phase::Connect,
-            1 => Phase::Tls,
-            2 => Phase::Request,
-            _ => Phase::Body,
+            1 => Phase::Initial,
+            2 => Phase::Tls,
+            3 => Phase::Handshake,
+            4 => Phase::Request,
+            _body => Phase::Body,
         }
     }
 }
@@ -279,6 +304,40 @@ mod tests {
             "отметка назад не смеет откатывать достигнутое: иначе таймаут на теле \
              припишется рукопожатию"
         );
+    }
+
+    #[test]
+    fn every_phase_survives_the_atomic_mark() {
+        // Отметка хранит номер фазы; расшифровка, забывшая новый номер, приписала бы
+        // тишину на Initial телу — и чёрная дыра QUIC читалась бы как обрыв данных.
+        [
+            Phase::Connect,
+            Phase::Initial,
+            Phase::Tls,
+            Phase::Handshake,
+            Phase::Request,
+            Phase::Body,
+        ]
+        .into_iter()
+        .for_each(|phase| {
+            let reached = Reached::default();
+            reached.mark(phase);
+            assert_eq!(reached.phase(), phase);
+        });
+    }
+
+    #[test]
+    fn quic_phases_ascend_in_the_order_they_are_passed() {
+        assert!(Phase::Initial < Phase::Handshake);
+        assert!(Phase::Handshake < Phase::Request);
+    }
+
+    #[test]
+    fn silence_on_initial_is_no_answer_and_on_handshake_is_one() {
+        assert!(!Phase::Initial.answered());
+        assert!(!Phase::Connect.answered());
+        assert!(Phase::Handshake.answered());
+        assert_eq!(Cause::Idle(Phase::Initial).name(), "idle/initial");
     }
 
     #[test]

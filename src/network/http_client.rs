@@ -43,7 +43,7 @@ impl BodyMode {
         !matches!(self, BodyMode::Head)
     }
 
-    fn max_bytes(self) -> u64 {
+    pub(crate) fn max_bytes(self) -> u64 {
         match self {
             BodyMode::Head => 0,
             BodyMode::Unlimited => u64::MAX,
@@ -266,6 +266,17 @@ pub fn make_tls_config(protocol: Protocol) -> Arc<ClientConfig> {
                 .with_no_client_auth();
             config.alpn_protocols = vec![b"http/1.1".to_vec()];
         }
+        // QUIC несёт TLS 1.3 внутри себя, и ALPN у него свой: сервер без `h3` в ALPN
+        // рукопожатие HTTP/3 не примет.
+        Protocol::Quic => {
+            let versions = &[&rustls::version::TLS13];
+            config = ClientConfig::builder_with_protocol_versions(versions)
+                .with_root_certificates(rustls::RootCertStore::from_iter(
+                    webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+                ))
+                .with_no_client_auth();
+            config.alpn_protocols = vec![b"h3".to_vec()];
+        }
         Protocol::Http => {} // no TLS
     }
 
@@ -456,6 +467,9 @@ async fn http_test_inner(
 
 /// Perform a single HTTP(S) request without following redirects.
 ///
+/// Транспорт выбирается здесь, а не у вызывающих: все входы пробы (`http_test`,
+/// `http_probe`, `http_test_data_capturing`) и редирект приходят сюда, и QUIC получает их
+/// всех разом — с тем же терпением и тем же толкованием результата.
 #[allow(clippy::too_many_arguments)] // отметка фазы добавлена замером поверх уже широкого набора
 async fn http_single_request(
     protocol: Protocol,
@@ -468,6 +482,92 @@ async fn http_single_request(
     stall: Option<Duration>,
     reached: &Reached,
 ) -> HttpResult {
+    let tcp = match protocol {
+        Protocol::Http => TcpFlavor::Plain,
+        Protocol::HttpsTls12 => TcpFlavor::Tls12,
+        Protocol::HttpsTls13 => TcpFlavor::Tls13,
+        Protocol::Quic => {
+            return quic_request(domain, ip, fwmark, path, mode, via, stall, reached).await
+        }
+    };
+    tcp_single_request(tcp, domain, ip, fwmark, path, mode, via, stall, reached).await
+}
+
+#[cfg(feature = "quic")]
+#[allow(clippy::too_many_arguments)]
+async fn quic_request(
+    domain: &str,
+    ip: &str,
+    fwmark: u32,
+    path: &str,
+    mode: BodyMode,
+    via: Option<&crate::network::via::Via>,
+    stall: Option<Duration>,
+    reached: &Reached,
+) -> HttpResult {
+    crate::network::quic_client::quic_single_request(
+        domain, ip, fwmark, path, mode, via, stall, reached,
+    )
+    .await
+}
+
+/// Сборка без QUIC-пробы. `parse_protocols` не пропускает `quic` в такой сборке, но
+/// протокол может прийти и из отчёта (`check --from-file`) — и тогда честнее назвать
+/// отказ, чем молча мерить нулём.
+#[cfg(not(feature = "quic"))]
+#[allow(clippy::too_many_arguments)]
+async fn quic_request(
+    _domain: &str,
+    _ip: &str,
+    _fwmark: u32,
+    _path: &str,
+    _mode: BodyMode,
+    _via: Option<&crate::network::via::Via>,
+    _stall: Option<Duration>,
+    _reached: &Reached,
+) -> HttpResult {
+    HttpResult {
+        status_code: None,
+        headers: String::new(),
+        error: Some("this build has no QUIC probe (feature `quic`)".to_string()),
+        size_download: None,
+        cause: None,
+        ended: Ended::NeverStarted,
+        windows: Vec::new(),
+    }
+}
+
+/// Протоколы поверх TCP — всё, что умеет TCP-проба.
+#[derive(Debug, Clone, Copy)]
+enum TcpFlavor {
+    Plain,
+    Tls12,
+    Tls13,
+}
+
+impl TcpFlavor {
+    fn protocol(self) -> Protocol {
+        match self {
+            TcpFlavor::Plain => Protocol::Http,
+            TcpFlavor::Tls12 => Protocol::HttpsTls12,
+            TcpFlavor::Tls13 => Protocol::HttpsTls13,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // отметка фазы добавлена замером поверх уже широкого набора
+async fn tcp_single_request(
+    tcp: TcpFlavor,
+    domain: &str,
+    ip: &str,
+    fwmark: u32,
+    path: &str,
+    mode: BodyMode,
+    via: Option<&crate::network::via::Via>,
+    stall: Option<Duration>,
+    reached: &Reached,
+) -> HttpResult {
+    let protocol = tcp.protocol();
     let port = protocol.port();
     let addr: SocketAddr = match format!("{ip}:{port}").parse() {
         Ok(a) => a,
@@ -520,17 +620,17 @@ async fn http_single_request(
 
     // Соединение есть. Для простого HTTP следующая фаза — сразу запрос; для TLS
     // между ними стоит рукопожатие, и именно на нём цензор рвёт по имени.
-    reached.mark(match protocol {
-        Protocol::Http => Phase::Request,
-        Protocol::HttpsTls12 | Protocol::HttpsTls13 => Phase::Tls,
+    reached.mark(match tcp {
+        TcpFlavor::Plain => Phase::Request,
+        TcpFlavor::Tls12 | TcpFlavor::Tls13 => Phase::Tls,
     });
 
     // Step 2: Optionally wrap in TLS
-    match protocol {
-        Protocol::Http => {
+    match tcp {
+        TcpFlavor::Plain => {
             do_http_request(TokioIo::new(tcp_stream), domain, path, mode, stall, reached).await
         }
-        Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
+        TcpFlavor::Tls12 | TcpFlavor::Tls13 => {
             let tls_config = make_tls_config(protocol);
             let connector = TlsConnector::from(tls_config);
             let server_name = match rustls::pki_types::ServerName::try_from(domain.to_string()) {

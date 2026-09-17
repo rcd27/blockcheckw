@@ -88,11 +88,7 @@ pub fn build_vanilla_report(domain: &str, summary: &[ProtocolSummary]) -> (Strin
     let _ = writeln!(buf, "* SUMMARY");
 
     for entry in summary {
-        let test_name = match entry.protocol {
-            Protocol::Http => "curl_test_http",
-            Protocol::HttpsTls12 => "curl_test_https_tls12",
-            Protocol::HttpsTls13 => "curl_test_https_tls13",
-        };
+        let test_name = entry.protocol.vanilla_test_name();
         for s in &entry.strategies {
             let _ = writeln!(buf, "{test_name} ipv4 {domain} : nfqws2 {}", s.join(" "));
             total += 1;

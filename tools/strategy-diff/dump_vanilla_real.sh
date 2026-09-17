@@ -2,7 +2,7 @@
 # Dump strategies by sourcing REAL vanilla blockcheck2.d scripts.
 # Replaces pktws_curl_test_update with echo to capture all generated strategies.
 #
-# Usage: bash dump_vanilla_real.sh [http|tls12|tls13]
+# Usage: bash dump_vanilla_real.sh [http|tls12|tls13|quic]
 
 set +ue
 
@@ -65,11 +65,11 @@ HOSTFAKE=
 for script in "$TESTDIR/"*.sh; do
     basename="$(basename "$script")"
 
-    # QUIC вне корпуса НАМЕРЕННО: v1 движка подбора — TCP-only desync (решение от 20.06.2026).
-    # Цена решения замерена 17.08.2026 и записана в rcd27/nevod#135: nfqws2 распознаёт 13
-    # протоколов потока, корпус покрывает 2 (http, tls); в полевых профилях 45 % правил — UDP.
-    # Снимать этот continue — вместе с FAKE_*/SEQOVL_PATTERN_* выше, они обнулены той же границей.
-    [[ "$basename" == *quic* ]] && continue
+    # QUIC-фаза читается только для QUIC: в TCP-каталоги её функции не зовутся, а
+    # поднимать её там незачем. Прежде QUIC был вне корпуса вовсе (v1 — TCP-only desync,
+    # цена записана в rcd27/nevod#135: в полевых профилях 45 % правил — UDP).
+    # FAKE_QUIC пуст намеренно — фейк берётся встроенный `fake_default_quic`.
+    [[ "$basename" == *quic* && "$PROTO" != quic ]] && continue
 
     echo "# === $basename ==="
 
@@ -91,6 +91,11 @@ for script in "$TESTDIR/"*.sh; do
         tls13)
             if type pktws_check_https_tls13 >/dev/null 2>&1; then
                 pktws_check_https_tls13 "curl_test_https_tls13" "example.com" 2>/dev/null || true
+            fi
+            ;;
+        quic)
+            if type pktws_check_http3 >/dev/null 2>&1; then
+                pktws_check_http3 "curl_test_http3" "example.com" 2>/dev/null || true
             fi
             ;;
     esac

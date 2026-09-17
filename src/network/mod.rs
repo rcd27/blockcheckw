@@ -4,6 +4,8 @@ pub mod doh;
 pub mod http_client;
 pub mod isp;
 pub mod patience;
+#[cfg(feature = "quic")]
+pub mod quic_client;
 pub mod reachability;
 pub mod update_check;
 pub mod via;

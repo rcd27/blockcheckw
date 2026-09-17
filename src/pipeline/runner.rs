@@ -236,14 +236,9 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
             }
         };
 
-        if let Err(e) = nftables::apply_dispatch(
-            &SystemNft,
-            &table,
-            &ready,
-            &plan.dispatch(protocol.port()),
-            &ips,
-        )
-        .await
+        if let Err(e) =
+            nftables::apply_dispatch(&SystemNft, &table, &ready, &plan.dispatch(protocol), &ips)
+                .await
         {
             nftables::remove_dispatch(&SystemNft, &table).await;
             SystemNfqws2::stop(instance).await;

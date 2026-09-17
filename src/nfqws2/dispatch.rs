@@ -1,3 +1,4 @@
+use crate::config::{Protocol, Transport};
 use crate::nfqws2::mark::{DESYNC_MARK, RESTORE_MASK, WORKER_MARK_BASE};
 use crate::nfqws2::plan::{Plan, QueueNum};
 
@@ -27,16 +28,19 @@ pub struct InRestore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dispatch {
     pub queue: QueueNum,
+    /// Транспорт пробы: правило на `tcp dport` не увидит ни одной датаграммы QUIC.
+    pub transport: Transport,
     pub dport: u16,
     pub out: OutMatch,
     pub inc: InRestore,
 }
 
 impl Plan {
-    pub fn dispatch(&self, dport: u16) -> Dispatch {
+    pub fn dispatch(&self, protocol: Protocol) -> Dispatch {
         Dispatch {
             queue: self.queue(),
-            dport,
+            transport: protocol.transport(),
+            dport: protocol.port(),
             out: OutMatch {
                 require_set: WORKER_MARK_BASE,
                 require_clear: DESYNC_MARK,
@@ -58,7 +62,8 @@ mod tests {
 
     fn dispatch_of() -> Dispatch {
         let strategies = vec![vec!["--a".to_string()]];
-        Plan::from_strategies(&FilterMark::granted(), QueueNum::new(200), &strategies).dispatch(443)
+        Plan::from_strategies(&FilterMark::granted(), QueueNum::new(200), &strategies)
+            .dispatch(Protocol::HttpsTls12)
     }
 
     #[test]
@@ -86,5 +91,14 @@ mod tests {
         let d = dispatch_of();
         assert_eq!(d.queue.get(), 200);
         assert_eq!(d.dport, 443);
+        assert_eq!(d.transport, Transport::Tcp);
+    }
+
+    #[test]
+    fn quic_dispatch_goes_over_udp_443() {
+        let strategies = vec![vec!["--a".to_string()]];
+        let d = Plan::from_strategies(&FilterMark::granted(), QueueNum::new(200), &strategies)
+            .dispatch(Protocol::Quic);
+        assert_eq!((d.transport, d.dport), (Transport::Udp, 443));
     }
 }

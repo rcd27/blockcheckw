@@ -40,11 +40,25 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
 nix = { version = "0.29", features = ["user", "resource", "fs", "process"] }
+# QUIC-проба (`-p quic`). Криптопровайдер тот же `aws-lc-rs`, что уже приезжает через
+# `rustls`: второй провайдер (`ring`) — второй ассемблер на экзотических целях.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+http = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { version = "0.3", default-features = false, optional = true }
 
 # OTLP/gRPC-стек (tonic/tower) выключен по умолчанию: на router-таргетах
 # (mips/ppc/riscv через -Zbuild-std) tonic не компилируется и не нужен.
 # Родительские проекты включают `otel` явно.
 [features]
+# QUIC включён по умолчанию: человек страдает на HTTP/3 не реже, чем на TLS, и подбор
+# обязан идти тем транспортом, на котором болит. Экзотические цели (mips, ppc, riscv)
+# собираются `--no-default-features`: quinn на них никто не проверял, а цена поломки —
+# релиз без архива (см. `check-exotic` в ci.yml).
+default = ["quic"]
+quic = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:http", "dep:bytes", "dep:futures-util"]
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",

@@ -1,3 +1,4 @@
+use crate::config::Transport;
 use crate::error::BlockcheckError;
 use crate::firewall::nft::{NftBatch, NftRun, OwnedTable, OwnedTableMarker};
 use crate::network::dns::is_ipv4;
@@ -41,6 +42,22 @@ const CHAIN_PRENAT: &str = "prenat";
 /// помечены `notrack` в predefrag и в счётчик conntrack не попадают.
 const MAX_PKT_OUT: u32 = 10;
 
+/// То же для QUIC — и больше, потому что у UDP первые пакеты другие. ClientHello с
+/// постквантовым обменом (kyber) не влезает в одну датаграмму: Initial приходит двумя-
+/// тремя, и `quic_initial` движок собирает, только увидев ВСЕ (manual.md, «особенности
+/// приёма многопакетных пейлоадов»). Проглоченный Initial клиент повторяет по PTO
+/// (≈1, 2, 4 с) тем же conntrack'ом — за шесть секунд потолка это до восьми датаграмм
+/// Initial, и повтор тоже обязан дойти до страты. Двадцать — запас больше чем вдвое.
+const MAX_PKT_OUT_UDP: u32 = 20;
+
+/// Сколько первых исходящих пакетов соединения отдавать движку на этом транспорте.
+fn first_packets(transport: Transport) -> u32 {
+    match transport {
+        Transport::Tcp => MAX_PKT_OUT,
+        Transport::Udp => MAX_PKT_OUT_UDP,
+    }
+}
+
 pub async fn prepare_table<R: NftRun>(
     runner: &R,
     name: &str,
@@ -79,22 +96,29 @@ pub async fn apply_dispatch<R: NftRun>(
     let ip_set = validate_ip_set(ips)?;
     let t = table.name();
     let (q, port) = (d.queue.get(), d.dport);
-    runner
-        .run(NftBatch::from_lines(vec![
-            format!(
-                "add rule inet {t} {CHAIN_POSTNAT} meta nfproto ipv4 tcp dport {port} \
-                 mark and 0x{:08X} == 0 mark and 0x{:08X} == 0x{:08X} ip daddr {{ {ip_set} }} \
-                 ct original packets 1-{MAX_PKT_OUT} ct mark set mark or 0x{:08X} queue num {q}",
-                d.out.require_clear, d.out.require_set, d.out.require_set, d.out.ct_set_or
-            ),
+    let (l4, limit) = (d.transport.nft_name(), first_packets(d.transport));
+    let outgoing = format!(
+        "add rule inet {t} {CHAIN_POSTNAT} meta nfproto ipv4 {l4} dport {port} \
+         mark and 0x{:08X} == 0 mark and 0x{:08X} == 0x{:08X} ip daddr {{ {ip_set} }} \
+         ct original packets 1-{limit} ct mark set mark or 0x{:08X} queue num {q}",
+        d.out.require_clear, d.out.require_set, d.out.require_set, d.out.ct_set_or
+    );
+    let lines = match d.transport {
+        // SYN+ACK возвращается движку ради страт, которым нужен входящий (autottl).
+        Transport::Tcp => vec![
+            outgoing,
             format!(
                 "add rule inet {t} {CHAIN_PRENAT} meta nfproto ipv4 tcp sport {port} \
                  tcp flags & (syn | ack) == (syn | ack) ct mark and 0x{:08X} == 0x{:08X} \
                  ip saddr {{ {ip_set} }} meta mark set ct mark and 0x{:08X} queue num {q}",
                 d.inc.ct_require_set, d.inc.ct_require_set, d.inc.mark_from_ct_and
             ),
-        ]))
-        .await
+        ],
+        // У UDP нет SYN+ACK, а каталог QUIC входящих не читает: ваниль (`nft_scheme`)
+        // для udp входящего правила тоже не ставит.
+        Transport::Udp => vec![outgoing],
+    };
+    runner.run(NftBatch::from_lines(lines)).await
 }
 
 pub async fn drop_table<R: NftRun>(runner: &R, marker: &OwnedTableMarker) {
@@ -120,10 +144,11 @@ pub async fn remove_dispatch<R: NftRun>(runner: &R, table: &OwnedTable) {
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
+    use crate::config::Protocol;
     use crate::firewall::nft::testing::RecordingNft;
     use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
 
-    async fn rendered(dport: u16) -> Vec<String> {
+    async fn rendered(protocol: Protocol) -> Vec<String> {
         let nft = RecordingNft::default();
         let table = OwnedTable::create(&nft, "bcw_test").await.unwrap();
         // Три профиля, не один: дисциплина «два правила на весь план, а не
@@ -144,7 +169,7 @@ mod dispatch_tests {
             &nft,
             &table,
             &ready,
-            &plan.dispatch(dport),
+            &plan.dispatch(protocol),
             &["1.2.3.4".to_string()],
         )
         .await
@@ -155,7 +180,7 @@ mod dispatch_tests {
     /// Два правила на весь план — вместо K цепочек и 2K элементов карт.
     #[tokio::test]
     async fn dispatch_is_exactly_two_rules() {
-        let cmds = rendered(443).await;
+        let cmds = rendered(Protocol::HttpsTls12).await;
         let rules: Vec<&String> = cmds.iter().filter(|c| c.starts_with("add rule")).collect();
         assert_eq!(rules.len(), 2, "{cmds:?}");
     }
@@ -163,7 +188,7 @@ mod dispatch_tests {
     /// Ловушка §4 на уровне отрендеренного правила: маска обязана быть 0x2000FFFF.
     #[tokio::test]
     async fn the_incoming_rule_restores_the_mark_under_the_safe_mask() {
-        let cmds = rendered(443).await;
+        let cmds = rendered(Protocol::HttpsTls12).await;
         assert!(
             cmds.iter()
                 .any(|c| c.contains("meta mark set ct mark and 0x2000FFFF")),
@@ -174,7 +199,7 @@ mod dispatch_tests {
     /// ct mark выводится из марки пакета — значит правил на профиль не нужно.
     #[tokio::test]
     async fn the_outgoing_rule_derives_ct_mark_from_the_packet_mark() {
-        let cmds = rendered(443).await;
+        let cmds = rendered(Protocol::HttpsTls12).await;
         assert!(
             cmds.iter()
                 .any(|c| c.contains("ct mark set mark or 0x10000000")),
@@ -186,7 +211,7 @@ mod dispatch_tests {
     /// тело ответа. Входящее правило не трогаем — оно и так берёт один SYN+ACK.
     #[tokio::test]
     async fn only_the_first_outgoing_packets_reach_the_queue() {
-        let cmds = rendered(443).await;
+        let cmds = rendered(Protocol::HttpsTls12).await;
         let limit = format!("ct original packets 1-{MAX_PKT_OUT}");
         let rule = |chain: &str| {
             cmds.iter()
@@ -195,6 +220,43 @@ mod dispatch_tests {
         };
         assert!(rule(CHAIN_POSTNAT).contains(&limit), "{cmds:?}");
         assert!(!rule(CHAIN_PRENAT).contains("packets"), "{cmds:?}");
+    }
+
+    /// QUIC: одно исходящее правило на `udp dport 443`, и никакого `tcp`.
+    #[tokio::test]
+    async fn quic_dispatch_is_one_outgoing_udp_rule() {
+        let cmds = rendered(Protocol::Quic).await;
+        let rules: Vec<&String> = cmds.iter().filter(|c| c.starts_with("add rule")).collect();
+        assert_eq!(rules.len(), 1, "{cmds:?}");
+        assert!(
+            rules[0].starts_with(&format!(
+                "add rule inet bcw_test {CHAIN_POSTNAT} meta nfproto ipv4 udp dport 443 "
+            )),
+            "{cmds:?}"
+        );
+        assert!(!rules[0].contains("tcp"), "{cmds:?}");
+        assert!(
+            rules[0].contains("ct mark set mark or 0x10000000"),
+            "{cmds:?}"
+        );
+    }
+
+    /// Все датаграммы Initial (kyber — две и больше, плюс повторы по PTO) обязаны
+    /// дойти до движка: `quic_initial` собирается только целиком.
+    #[tokio::test]
+    async fn quic_hands_the_engine_more_first_packets_than_tcp() {
+        let cmds = rendered(Protocol::Quic).await;
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains(&format!("ct original packets 1-{MAX_PKT_OUT_UDP}"))),
+            "{cmds:?}"
+        );
+        const {
+            assert!(
+                MAX_PKT_OUT_UDP >= 2 * 4,
+                "две датаграммы на четыре попытки Initial"
+            )
+        };
     }
 
     /// Карт и цепочек воркеров больше не существует — вместе с гонкой #66.
@@ -214,7 +276,7 @@ mod dispatch_tests {
             &nft,
             &table,
             &ready,
-            &plan.dispatch(443),
+            &plan.dispatch(Protocol::HttpsTls12),
             &["1.2.3.4".to_string()],
         )
         .await
@@ -244,7 +306,7 @@ mod dispatch_tests {
             &nft,
             &table,
             &ready,
-            &plan.dispatch(443),
+            &plan.dispatch(Protocol::HttpsTls12),
             &["1.2.3.4".to_string()],
         )
         .await
@@ -286,11 +348,15 @@ mod dispatch_tests {
         );
         let ready = Ready::witnessed(QueueNum::new(200));
         let bad = vec!["1.2.3.4; drop table inet fw4".to_string()];
-        assert!(
-            apply_dispatch(&nft, &table, &ready, &plan.dispatch(443), &bad)
-                .await
-                .is_err()
-        );
+        assert!(apply_dispatch(
+            &nft,
+            &table,
+            &ready,
+            &plan.dispatch(Protocol::HttpsTls12),
+            &bad
+        )
+        .await
+        .is_err());
         assert!(
             nft.commands().iter().all(|c| !c.starts_with("add rule")),
             "мусорный IP не должен доехать до nft ни в одном правиле"
@@ -313,7 +379,7 @@ mod dispatch_tests {
             &nft,
             &table,
             &ready_for_another,
-            &plan.dispatch(443),
+            &plan.dispatch(Protocol::HttpsTls12),
             &["1.2.3.4".to_string()],
         )
         .await

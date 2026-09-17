@@ -124,14 +124,8 @@ async fn execute_timed_test(
     };
 
     // Поставить диспетчеризацию — только теперь, когда слушатель точно есть
-    if let Err(e) = nftables::apply_dispatch(
-        &SystemNft,
-        table,
-        &ready,
-        &plan.dispatch(protocol.port()),
-        ips,
-    )
-    .await
+    if let Err(e) =
+        nftables::apply_dispatch(&SystemNft, table, &ready, &plan.dispatch(protocol), ips).await
     {
         // Батч атомарен, но `Err` тут может значить и таймаут
         // `run_process_stdin` (15с): нельзя быть уверенным, что nft не успел

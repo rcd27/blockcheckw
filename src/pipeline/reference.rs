@@ -111,10 +111,13 @@ pub fn agrees(reference: &Reference, probe: &ContentPrint) -> bool {
 /// тем же транспортом, что и проба: HTTP на `:80` и HTTPS на `:443` у одного домена
 /// отдают разные ответы (редирект на HTTPS против самой страницы), и сверка между ними
 /// топила всякую HTTP-стратегию. TLS 1.2 и 1.3 отдают одно содержимое — эталон общий.
+/// QUIC — свой: эталон, снятый по TCP, доказал бы доступность другого транспорта, а
+/// цензор режет их порознь.
 pub fn reference_protocol(protocol: Protocol) -> Protocol {
     match protocol {
         Protocol::Http => Protocol::Http,
         Protocol::HttpsTls12 | Protocol::HttpsTls13 => Protocol::HttpsTls12,
+        Protocol::Quic => Protocol::Quic,
     }
 }
 

@@ -1,7 +1,7 @@
 //! Наблюдения сокета, переведённые в буквы парка. Чистые функции: сеть остаётся у того,
 //! кто ленту собирает, толкование живёт здесь и проверяется без неё.
 
-use crate::network::cause::{Cause, Phase};
+use crate::network::cause::Cause;
 use crate::network::http_client::Ended;
 use crate::pipeline::fate::Delivery;
 use reflex_core::mealy::Mealy;
@@ -27,8 +27,8 @@ pub fn delivery_of(bytes: u64, ended: Ended) -> Delivery {
     }
 }
 
-/// Встал ли TCP. Фаза отказа и есть ответ: `Phase` упорядочена по прохождению, и всё
-/// выше `Connect` достижимо только через установленное соединение.
+/// Встал ли разговор: TCP-коннект или первый ответ QUIC-сервера. Фаза отказа и есть
+/// ответ — см. [`Phase::answered`].
 pub fn connected_of(cause: Option<Cause>) -> bool {
     match cause {
         None => true,
@@ -37,7 +37,7 @@ pub fn connected_of(cause: Option<Cause>) -> bool {
         | Some(Cause::Idle(p))
         | Some(Cause::Ceiling(p))
         | Some(Cause::Io(p))
-        | Some(Cause::Protocol(p)) => p > Phase::Connect,
+        | Some(Cause::Protocol(p)) => p.answered(),
     }
 }
 
@@ -67,6 +67,7 @@ pub fn waited_of(elapsed: std::time::Duration) -> Option<Waited> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::cause::Phase;
 
     #[test]
     fn байты_всегда_есть_доставка() {
@@ -121,6 +122,9 @@ mod tests {
         // Мы перестали ждать SYN/ACK — о цели это не говорит ничего.
         assert!(!connected_of(Some(Cause::Idle(Phase::Connect))));
         assert!(!connected_of(Some(Cause::Ceiling(Phase::Connect))));
+        // QUIC: тишина на Initial — тот же «не встал», что тишина на коннекте.
+        assert!(!connected_of(Some(Cause::Idle(Phase::Initial))));
+        assert!(connected_of(Some(Cause::Idle(Phase::Handshake))));
         // Отказ и отсутствие маршрута — ОТВЕТ, а не его отсутствие.
         assert!(!connected_of(Some(Cause::Refused)));
         assert!(!connected_of(Some(Cause::Unreachable)));

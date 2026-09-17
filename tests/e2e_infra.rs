@@ -230,9 +230,15 @@ async fn nft_dispatch_add_remove_rules_on_real_kernel() {
         .await
         .expect("nfqws2 must bind the queue");
 
-    nftables::apply_dispatch(&SystemNft, &table, &ready, &plan.dispatch(443), &ips)
-        .await
-        .expect("apply_dispatch");
+    nftables::apply_dispatch(
+        &SystemNft,
+        &table,
+        &ready,
+        &plan.dispatch(Protocol::HttpsTls12),
+        &ips,
+    )
+    .await
+    .expect("apply_dispatch");
 
     // Собрать факты ДО разбора хвостов: паника между `apply_dispatch` и
     // `remove_dispatch`/`stop`/`drop_table` иначе оставила бы на стенде
@@ -329,9 +335,15 @@ async fn nfqws2_receives_marked_traffic() {
         .await
         .expect("nfqws2 must bind the queue");
 
-    nftables::apply_dispatch(&SystemNft, &table, &ready, &plan.dispatch(80), &ips)
-        .await
-        .expect("apply_dispatch");
+    nftables::apply_dispatch(
+        &SystemNft,
+        &table,
+        &ready,
+        &plan.dispatch(Protocol::Http),
+        &ips,
+    )
+    .await
+    .expect("apply_dispatch");
 
     let seq_before = queue_sequence(queue);
 
@@ -400,9 +412,15 @@ async fn autottl_prenat_captures_synack() {
         .await
         .expect("nfqws2 must bind the queue");
 
-    nftables::apply_dispatch(&SystemNft, &table, &ready, &plan.dispatch(443), &ips)
-        .await
-        .expect("apply_dispatch");
+    nftables::apply_dispatch(
+        &SystemNft,
+        &table,
+        &ready,
+        &plan.dispatch(Protocol::HttpsTls12),
+        &ips,
+    )
+    .await
+    .expect("apply_dispatch");
 
     // Verify prenat chain has the SYN/ACK dispatch rule.
     //
@@ -607,8 +625,14 @@ async fn the_mask_is_not_forgotten_and_profiles_are_selective() {
         }
     };
 
-    if let Err(e) =
-        nftables::apply_dispatch(&SystemNft, &table, &ready, &plan.dispatch(443), &ips).await
+    if let Err(e) = nftables::apply_dispatch(
+        &SystemNft,
+        &table,
+        &ready,
+        &plan.dispatch(Protocol::HttpsTls12),
+        &ips,
+    )
+    .await
     {
         SystemNfqws2::stop(instance).await;
         let _ = table.drop_table(&SystemNft).await;

@@ -160,17 +160,53 @@ pub enum Protocol {
     Http,
     HttpsTls12,
     HttpsTls13,
+    /// HTTP/3 поверх QUIC. Отдельный протокол, а не «ещё один TLS»: человек, у которого
+    /// режут QUIC, страдает на UDP, и страта, найденная на TCP, ему ничего не говорит.
+    Quic,
 }
+
+/// Транспорт протокола. От него зависит правило nft (`tcp dport` против `udp dport`) —
+/// и только от него: движку профиль всё равно, он принимает оба.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Transport {
+    Tcp,
+    Udp,
+}
+
+impl Transport {
+    /// Имя в синтаксисе nft.
+    pub fn nft_name(self) -> &'static str {
+        match self {
+            Transport::Tcp => "tcp",
+            Transport::Udp => "udp",
+        }
+    }
+}
+
+/// Собрана ли в бинарь QUIC-проба. Экзотические цели собираются без неё.
+pub const QUIC_PROBE_BUILT: bool = cfg!(feature = "quic");
 
 impl Protocol {
     pub fn all() -> Vec<Protocol> {
-        vec![Protocol::Http, Protocol::HttpsTls12, Protocol::HttpsTls13]
+        vec![
+            Protocol::Http,
+            Protocol::HttpsTls12,
+            Protocol::HttpsTls13,
+            Protocol::Quic,
+        ]
     }
 
     pub fn port(self) -> u16 {
         match self {
             Protocol::Http => 80,
-            Protocol::HttpsTls12 | Protocol::HttpsTls13 => 443,
+            Protocol::HttpsTls12 | Protocol::HttpsTls13 | Protocol::Quic => 443,
+        }
+    }
+
+    pub fn transport(self) -> Transport {
+        match self {
+            Protocol::Http | Protocol::HttpsTls12 | Protocol::HttpsTls13 => Transport::Tcp,
+            Protocol::Quic => Transport::Udp,
         }
     }
 
@@ -179,7 +215,43 @@ impl Protocol {
             Protocol::Http => "http_test_http",
             Protocol::HttpsTls12 => "http_test_https_tls12",
             Protocol::HttpsTls13 => "http_test_https_tls13",
+            Protocol::Quic => "http_test_http3",
         }
+    }
+
+    /// Имя в CLI (`-p`).
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Protocol::Http => "http",
+            Protocol::HttpsTls12 => "tls12",
+            Protocol::HttpsTls13 => "tls13",
+            Protocol::Quic => "quic",
+        }
+    }
+
+    /// Имя функции пробы в ванильном отчёте blockcheck2 — там же, где его берёт
+    /// `blockcheck2.sh` (`curl_test_http3` для QUIC).
+    pub fn vanilla_test_name(self) -> &'static str {
+        match self {
+            Protocol::Http => "curl_test_http",
+            Protocol::HttpsTls12 => "curl_test_https_tls12",
+            Protocol::HttpsTls13 => "curl_test_https_tls13",
+            Protocol::Quic => "curl_test_http3",
+        }
+    }
+
+    /// Протокол по имени из JSON-отчёта (`Display`).
+    pub fn from_report_name(name: &str) -> Option<Protocol> {
+        Protocol::all().into_iter().find(|p| p.to_string() == name)
+    }
+
+    /// Протокол строки ванильного отчёта. Имя сверяется вместе с разделителем:
+    /// `curl_test_http` — префикс `curl_test_http3`.
+    pub fn of_vanilla_line(line: &str) -> Option<Protocol> {
+        Protocol::all().into_iter().find(|p| {
+            line.strip_prefix(p.vanilla_test_name())
+                .is_some_and(|rest| rest.starts_with(' '))
+        })
     }
 }
 
@@ -189,6 +261,7 @@ impl fmt::Display for Protocol {
             Protocol::Http => write!(f, "HTTP"),
             Protocol::HttpsTls12 => write!(f, "HTTPS/TLS1.2"),
             Protocol::HttpsTls13 => write!(f, "HTTPS/TLS1.3"),
+            Protocol::Quic => write!(f, "QUIC/HTTP3"),
         }
     }
 }
@@ -222,25 +295,29 @@ pub fn nfqws2_path(zapret_base: &str) -> String {
 }
 
 pub fn parse_protocols(s: &str) -> Result<Vec<Protocol>, String> {
-    let mut protocols = Vec::new();
-    for token in s.split(',') {
-        let token = token.trim();
-        let protocol = match token {
-            "http" => Protocol::Http,
-            "tls12" => Protocol::HttpsTls12,
-            "tls13" => Protocol::HttpsTls13,
-            _ => {
-                return Err(format!(
-                    "unknown protocol: '{token}'. expected: http, tls12, tls13"
-                ))
-            }
-        };
-        protocols.push(protocol);
+    let protocols = s
+        .split(',')
+        .map(str::trim)
+        .map(|token| {
+            Protocol::all()
+                .into_iter()
+                .find(|p| p.cli_name() == token)
+                .ok_or_else(|| {
+                    format!("unknown protocol: '{token}'. expected: http, tls12, tls13, quic")
+                })
+                .and_then(|p| match (p, QUIC_PROBE_BUILT) {
+                    (Protocol::Quic, false) => Err(
+                        "protocol 'quic': this build has no QUIC probe (built without feature `quic`)"
+                            .to_string(),
+                    ),
+                    (known, _built) => Ok(known),
+                })
+        })
+        .collect::<Result<Vec<Protocol>, String>>()?;
+    match protocols.is_empty() {
+        true => Err("no protocols specified".to_string()),
+        false => Ok(protocols),
     }
-    if protocols.is_empty() {
-        return Err("no protocols specified".to_string());
-    }
-    Ok(protocols)
 }
 
 #[cfg(test)]
@@ -282,15 +359,69 @@ mod tests {
 
     #[test]
     fn test_parse_protocols_unknown() {
-        let result = parse_protocols("http,quic");
+        let result = parse_protocols("http,spdy");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("quic"));
+        assert!(result.unwrap_err().contains("spdy"));
     }
 
     #[test]
     fn test_protocol_all() {
         let all = Protocol::all();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn quic_is_parsed_by_its_cli_name() {
+        assert_eq!(parse_protocols("tls12,quic").unwrap()[1], Protocol::Quic);
+    }
+
+    #[cfg(not(feature = "quic"))]
+    #[test]
+    fn quic_is_refused_by_a_build_without_the_probe() {
+        // Сборка без пробы не смеет принять `quic` и молча мерить нулём: отказ обязан
+        // прозвучать на разборе, до подъёма движка.
+        let refused = parse_protocols("quic").unwrap_err();
+        assert!(refused.contains("quic"), "{refused}");
+    }
+
+    #[test]
+    fn quic_goes_over_udp_443_and_the_rest_over_tcp() {
+        // Транспорт решает правило nft: страта QUIC, отданная очереди по `tcp dport`,
+        // не увидит ни одной датаграммы — и проиграет не потому, что не пробивает.
+        assert_eq!(Protocol::Quic.port(), 443);
+        assert_eq!(Protocol::Quic.transport(), Transport::Udp);
+        [Protocol::Http, Protocol::HttpsTls12, Protocol::HttpsTls13]
+            .into_iter()
+            .for_each(|p| assert_eq!(p.transport(), Transport::Tcp, "{p}"));
+    }
+
+    #[test]
+    fn every_protocol_round_trips_through_its_report_names() {
+        // Имя в JSON (`Display`) и имя строки ванильного отчёта — публичный контракт:
+        // отчёт scan читает check. Протокол, не узнающий собственное имя, теряет
+        // страты между командами молча.
+        Protocol::all().into_iter().for_each(|p| {
+            assert_eq!(Protocol::from_report_name(&p.to_string()), Some(p));
+            let line = format!("{} ipv4 example.com : nfqws2 --a", p.vanilla_test_name());
+            assert_eq!(Protocol::of_vanilla_line(&line), Some(p), "{line}");
+        });
+        assert_eq!(Protocol::Quic.to_string(), "QUIC/HTTP3");
+        assert_eq!(Protocol::Quic.vanilla_test_name(), "curl_test_http3");
+    }
+
+    #[test]
+    fn http3_line_is_not_taken_for_plain_http() {
+        // `curl_test_http` — префикс `curl_test_http3`: без разделителя QUIC-страта
+        // уехала бы в каталог HTTP на порт 80.
+        assert_eq!(
+            Protocol::of_vanilla_line("curl_test_http3 ipv4 x.org : nfqws2 --a"),
+            Some(Protocol::Quic)
+        );
+        assert_eq!(
+            Protocol::of_vanilla_line("curl_test_http ipv4 x.org : nfqws2 --a"),
+            Some(Protocol::Http)
+        );
     }
 
     #[test]

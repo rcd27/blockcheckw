@@ -22,7 +22,7 @@ const BASELINE_STALL_SECS: u64 = 2;
 /// (interpret_http_result), matching how verify limits its data check to HTTPS.
 fn interpret_baseline(result: &HttpResult, domain: &str, protocol: Protocol) -> HttpVerdict {
     match protocol {
-        Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
+        Protocol::HttpsTls12 | Protocol::HttpsTls13 | Protocol::Quic => {
             interpret_data_transfer_result(result, domain, DATA_TRANSFER_MIN_BYTES)
         }
         Protocol::Http => interpret_http_result(result, domain),
@@ -70,7 +70,7 @@ pub async fn test_baseline(
     // HTTP: headers-only probe (redirect/status is what matters; a redirect to
     // HTTPS legitimately carries no body, so the data threshold does not apply).
     let result = match protocol {
-        Protocol::HttpsTls12 | Protocol::HttpsTls13 => {
+        Protocol::HttpsTls12 | Protocol::HttpsTls13 | Protocol::Quic => {
             http_test_data_capturing(
                 protocol,
                 domain,

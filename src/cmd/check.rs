@@ -131,12 +131,12 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
     // §6-тер), ПОСЛЕ резолва DNS и ДО подъёма движка — движок не должен работать
     // вхолостую, пока мы ходим за эталонами. Отсутствие одного эталона не отменяет
     // другого: без байтового эталона молчит доля, без эталона подлинности — `Mirage`.
-    // Эталон снимается тем транспортом, каким идут пробы (`reference_protocol`); TLS нужен
-    // всегда — им ходит контроль.
+    // Эталон снимается тем транспортом, каким идут пробы (`reference_protocol`), и тем, каким
+    // ходит контроль (`control_protocol`).
     let mut references = reference::References::default();
     match reference_via {
         Some(clean) => {
-            let mut transports = vec![Protocol::HttpsTls12];
+            let mut transports = vec![blockcheckw::pipeline::check::control_protocol(&strategies)];
             for tagged in &strategies {
                 let transport = reference::reference_protocol(tagged.protocol);
                 if !transports.contains(&transport) {
@@ -166,7 +166,8 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
                 .await;
                 let scheme = match transport {
                     Protocol::Http => "http",
-                    _ => "https",
+                    Protocol::HttpsTls12 | Protocol::HttpsTls13 => "https",
+                    Protocol::Quic => "quic",
                 };
                 screen.add_info_line(&match &byte_reference {
                     Some(_) => format!("  {scheme}: эталон объёма снят через чистый egress"),

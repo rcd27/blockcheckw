@@ -102,14 +102,15 @@ impl SystemNfqws2 {
         // blockcheckw намертво прямо на "Checking prerequisites" без единого
         // символа дальше. Тот же приём kill+wait по дедлайну, что в
         // `smoke_sync` ниже.
-        let mut child = std::process::Command::new(&env.binary)
+        let mut probe = std::process::Command::new(&env.binary);
+        probe
             .arg("--help")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| Error::Spawn {
-                reason: e.to_string(),
-            })?;
+            .stderr(std::process::Stdio::piped());
+        crate::system::process::die_with_parent(&mut probe);
+        let mut child = probe.spawn().map_err(|e| Error::Spawn {
+            reason: e.to_string(),
+        })?;
 
         let deadline = std::time::Instant::now() + Duration::from_millis(PROBE_TIMEOUT_MS);
         loop {
@@ -193,14 +194,15 @@ impl SystemNfqws2 {
         // весь смысл smoke_sync (см. doc-комментарий метода), так что цена
         // мимо реестра здесь осознанная: этот ребёнок недолговечен и снимается
         // самим smoke_sync (kill+wait ниже) до возврата из функции.
-        let mut child = std::process::Command::new(&argv[0])
+        let mut smoke = std::process::Command::new(&argv[0]);
+        smoke
             .args(&argv[1..])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| Error::Spawn {
-                reason: e.to_string(),
-            })?;
+            .stderr(std::process::Stdio::piped());
+        crate::system::process::die_with_parent(&mut smoke);
+        let mut child = smoke.spawn().map_err(|e| Error::Spawn {
+            reason: e.to_string(),
+        })?;
 
         enum Outcome {
             Bound,

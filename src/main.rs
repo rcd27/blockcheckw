@@ -464,6 +464,48 @@ async fn main() {
     // Prevent parallel execution — keep _lock alive until process exits
     let _lock = cmd::acquire_instance_lock();
 
+    // ВСТРОЕННЫЙ РЕЖИМ: своя группа процессов и снятие СВОИХ остатков.
+    //
+    // Оркестратор шлёт `SIGKILL`, по которому не отрабатывает ни один наш хук, — значит
+    // прошлый прогон мог не убрать за собой ничего: на очереди остаётся движок, в ядре
+    // таблица, и подбор слеп, а трафик человека стоит. Вход обязан быть идемпотентным, и
+    // убирать он вправе только СВОЁ: чужое во встроенном режиме принадлежит вызывающему.
+    //
+    // Группа — чтобы `kill(-pgid)` снимал нас вместе с детьми одним вызовом. Отказ не
+    // смертелен: детей всё равно снимет `PDEATHSIG`, и об отказе мы говорим вслух.
+    if cli.no_conflict_cleanup {
+        if let Err(e) = blockcheckw::system::group::detach_into_own_group() {
+            eprintln!(
+                "{}не удалось уйти в свою группу процессов ({e}): оркестратору придётся бить \
+                 по pid, дети снимутся PDEATHSIG",
+                blockcheckw::ui::WARN,
+            );
+        }
+        let defaults = blockcheckw::config::CoreConfig::default();
+        let signature = blockcheckw::system::orphans::Signature {
+            table: defaults.nft_table.clone(),
+            qnum: defaults.base_qnum,
+            desync_mark: blockcheckw::nfqws2::mark::DESYNC_MARK,
+        };
+        let swept = blockcheckw::system::orphans::sweep_own(
+            &blockcheckw::firewall::nft::SystemNft,
+            &signature,
+        )
+        .await;
+        if !swept.is_empty() {
+            eprintln!(
+                "{}сняты остатки прошлого прогона: движков {}, таблица {}",
+                blockcheckw::ui::WARN,
+                swept.killed.len(),
+                if swept.table_dropped {
+                    "снесена"
+                } else {
+                    "чиста"
+                },
+            );
+        }
+    }
+
     // Status doesn't need nfqws2/nft — skip prereqs
     let prereq = if !matches!(cli.command, Some(Command::Status { .. })) {
         let console = blockcheckw::ui::Console::new();

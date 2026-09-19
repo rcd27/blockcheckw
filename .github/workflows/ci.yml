@@ -25,6 +25,10 @@ jobs:
       - run: cargo clippy -- -D warnings
       - run: cargo clippy --features otel -- -D warnings
       - run: cargo test --lib --bins --features otel
+      # Тесты, которым не нужен ни root, ни живой движок, — им место здесь, а не в
+      # привилегированной джобе ниже. `orphan_reaping` сторожит PDEATHSIG: без него
+      # сторож не взводится нигде и отчитывается зелёным по построению.
+      - run: cargo test --test orphan_reaping
 
   # Экзотические цели собираются ТОЛЬКО в релизном воркфлоу, поэтому их поломка
   # всплывала уже после нарезки тега: v0.11.0 потерял mips, mipsel и ppc на

@@ -1,3 +1,4 @@
+use std::os::unix::process::CommandExt;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 use tokio::process::Command;
@@ -134,6 +135,37 @@ pub fn start_kill_all_background_processes() {
     }
 }
 
+/// Попросить ядро убить ребёнка, когда умрёт МЫ — включая смерть по `SIGKILL`.
+///
+/// Ставится на всякий порождаемый нами долгоживущий процесс: `kill_on_drop`, обработчики
+/// `SIGINT`/`SIGTERM` и `panic`-хук суть код, исполняемый умирающим процессом, а `SIGKILL`
+/// не даёт исполнить ничего. Так уходит продукт третьего невода (он шлёт `SIGKILL`, когда
+/// подбор пережил свою надобность), так приходит OOM-killer и `kill -9` от человека — и на
+/// очереди остаётся живой `nfqws2`, а в ядре наша таблица.
+///
+/// `PDEATHSIG` сбрасывается ядром при `exec` только у setuid/setgid-бинарей; движок не такой,
+/// и просьба переживает `exec`.
+pub fn die_with_parent(command: &mut std::process::Command) {
+    let parent_pid = std::process::id() as libc::pid_t;
+    // SAFETY: между `fork` и `exec` дозволено звать только async-signal-safe функции.
+    // `prctl`, `getppid` и `_exit` — все три из этого списка; аллокаций, локов и обращений
+    // к рантайму здесь нет.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Родитель мог умереть в окне между `fork` и `prctl` — тогда сигнал не придёт уже
+            // никогда, и ребёнок остался бы сиротой при взведённом `PDEATHSIG`. Гонка
+            // закрывается сверкой, а не порядком строк.
+            if libc::getppid() != parent_pid {
+                libc::_exit(0);
+            }
+            Ok(())
+        });
+    }
+}
+
 /// A registered background process handle. Wraps a tokio process child.
 #[derive(Debug)]
 pub struct BackgroundProcess {
@@ -159,10 +191,22 @@ impl BackgroundProcess {
             });
         }
 
-        let child = Command::new(program)
+        // СМЕРТЬ ВМЕСТЕ С РОДИТЕЛЕМ, И ЭТО НЕ ДУБЛИРОВАНИЕ `kill_on_drop`.
+        //
+        // `kill_on_drop`, обработчики `SIGINT`/`SIGTERM` и `panic`-хук — всё это код, который
+        // исполняет УМИРАЮЩИЙ процесс. По `SIGKILL` не исполняется ничего, а именно его шлёт
+        // продукт третьего невода, когда подбор пережил свою надобность; так же приходит
+        // OOM-killer и `kill -9` от человека. Без `PDEATHSIG` на очереди остаётся живой
+        // `nfqws2`, в ядре — наша таблица, продукт слепнет, а трафик человека встаёт целиком.
+        //
+        let mut std_cmd = std::process::Command::new(program);
+        std_cmd
             .args(cmd_args)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        die_with_parent(&mut std_cmd);
+
+        let child = Command::from(std_cmd)
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| BlockcheckError::ProcessSpawn {
@@ -180,6 +224,12 @@ impl BackgroundProcess {
     pub async fn kill(&mut self) {
         // best-effort — process may have already exited
         let _ = self.child.lock().await.kill().await;
+    }
+
+    /// Pid живого ребёнка. `None` — уже реапнут: pid реапнутого процесса называть нельзя,
+    /// его успели переиспользовать под чужой процесс, и убивать по нему — убивать чужое.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.try_lock().ok().and_then(|child| child.id())
     }
 
     /// Check if the process is still running.

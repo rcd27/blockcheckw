@@ -9,6 +9,10 @@ cargo fmt --check
 echo "=== cargo test --lib ==="
 cargo test --lib
 
+echo "=== cargo test --test orphan_reaping ==="
+# Сторож PDEATHSIG: root не нужен, живой движок не нужен.
+cargo test --test orphan_reaping
+
 echo "=== cargo clippy ==="
 cargo clippy -- -D warnings
 

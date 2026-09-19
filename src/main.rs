@@ -591,6 +591,23 @@ async fn main() {
         std::process::exit(2);
     }
 
+    // ВО ВСТРОЕННОМ РЕЖИМЕ ПЛАН НЕ ДОЛЖЕН ЗАЕЗЖАТЬ В ПРИБОРНУЮ ПОЛОСУ СОСЕДА.
+    //
+    // Индекс профиля растёт снизу вверх, а краевые приборы reflex пишут свою памятку с бита
+    // 13 — значит с 8192-го профиля мы делим с ними биты, и развязка сводится к порядку
+    // правил в ЧУЖОМ рулсете. Цена потолка нулевая: умолчание 1024 лежит вчетверо ниже, а
+    // весь корпус в 13 943 стратегии режется на два плана даже впритык.
+    if embedded && cli.profiles_per_instance > mark_space::MAX_PROFILES_CLEAR_OF_NEIGHBOURS {
+        eprintln!(
+            "ERROR: --profiles-per-instance {} во встроенном режиме превышает {}: с этого числа \
+             индекс профиля занимает биты 13+, где краевые приборы соседа пишут свою памятку, \
+             и наша марка стала бы зависеть от порядка правил в чужом рулсете",
+            cli.profiles_per_instance,
+            mark_space::MAX_PROFILES_CLEAR_OF_NEIGHBOURS,
+        );
+        std::process::exit(2);
+    }
+
     // Pre-read stdin for check in pipe mode (before acquiring lock,
     // so the upstream pipe command can finish and release its lock first)
     let stdin_data = {

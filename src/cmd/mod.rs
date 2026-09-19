@@ -48,7 +48,6 @@ pub fn set_skip_conflict_cleanup(skip: bool) {
     SKIP_CONFLICT_CLEANUP.store(skip, Ordering::Relaxed);
 }
 
-
 // ── Zapret2 service management ──────────────────────────────────────────────
 
 /// How zapret2 service is managed on this system.

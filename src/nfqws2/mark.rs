@@ -40,6 +40,30 @@ pub fn set_embedded(embedded: bool) {
     EMBEDDED.store(embedded, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// МАРКА ПРОБЫ. Два исхода, и ни одного числа снаружи.
+///
+/// Пока марка ездила как `u32`, литеральный ноль в вызове оставался выразимым — так и
+/// появилась дыра, которую `3f5a001` закрыл в двух местах из трёх: контроль `check`
+/// продолжал ходить с нулём, минуя `own_mark`, и во встроенном режиме уходил в карантин
+/// хозяина ядра вместе с трафиком человека. Тип отнимает у вызывающего саму возможность
+/// назвать марку: `Control` знает её у процесса, `Desync` — у профиля.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeMark {
+    /// БЕЗ десинка: контроль и эталон. Марку берёт у процесса, не у вызывающего.
+    Control,
+    /// С десинком: марка профиля выбирает стратегию внутри движка.
+    Desync(ProfileMark),
+}
+
+impl ProbeMark {
+    pub fn so_mark(self) -> u32 {
+        match self {
+            ProbeMark::Control => own_mark(),
+            ProbeMark::Desync(profile) => profile.so_mark(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProfileMark(NonZeroU16);
 
@@ -141,12 +165,31 @@ mod tests {
 mod own_mark_tests {
     use super::*;
 
+    /// Встроенность — ОДИН статик на процесс, а тесты бегут в потоках параллельно: без
+    /// сериализации сосед, снявший режим, роняет замер того, кто его поставил. Гонка была
+    /// и до этого модуля — здесь она просто закрыта, раз уж число читателей статика выросло.
+    /// Имя НЕ `EMBEDDED`: так зовётся сам статик режима (`super::EMBEDDED`), и одноимённый
+    /// замок затенял бы его под `use super::*` — читателю пришлось бы различать их по типу.
+    static EMBEDDED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Выполнить замер при объявленной встроенности и вернуть режим как был.
+    fn with_embedded<T>(embedded: bool, measure: impl FnOnce() -> T) -> T {
+        // `unwrap_or_else` вместо `unwrap`: упавший сосед оставляет мьютекс отравленным, и
+        // остальные замеры не должны падать следом — статик мы всё равно ставим сами.
+        let _guard = EMBEDDED_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set_embedded(embedded);
+        let measured = measure();
+        set_embedded(false);
+        measured
+    }
+
     /// ВНЕ ВСТРОЕННОГО РЕЖИМА МАРКА НУЛЕВАЯ — как было: одиночный запуск никем не оркестрируется,
     /// и лишняя марка меняла бы поведение там, где её некому читать.
     #[test]
     fn a_standalone_run_marks_nothing() {
-        set_embedded(false);
-        assert_eq!(own_mark(), 0);
+        assert_eq!(with_embedded(false, own_mark), 0);
     }
 
     /// ВО ВСТРОЕННОМ — МАРКА ЕСТЬ, И ПРОФИЛЬ В НЕЙ НУЛЕВОЙ.
@@ -156,12 +199,45 @@ mod own_mark_tests {
     /// а профиль ноль не выбирается ни одним нашим правилом.
     #[test]
     fn an_embedded_run_marks_with_a_zero_profile() {
-        set_embedded(true);
-        let mark = own_mark();
-        set_embedded(false);
+        let mark = with_embedded(true, own_mark);
 
         assert_ne!(mark, 0, "хозяин ядра обязан нас отличить");
         assert_eq!(mark & PROFILE_MASK, 0, "а десинк обязан нас пропустить");
         assert_eq!(mark & WORKER_MARK_BASE, WORKER_MARK_BASE);
+    }
+
+    /// БАГ, ОПЛАЧЕННЫЙ ЗАМЕРОМ 19.09 И НЕ ДОЛЕЧЕННЫЙ `3f5a001`.
+    ///
+    /// Тот коммит поставил `own_mark()` в `baseline.rs` (путь `scan`) и в `reference.rs`
+    /// (эталон), а `check.rs` передавал марку контроля ЛИТЕРАЛОМ `0` — и потому остался
+    /// слепым. Поле `inconclusive` считается именно из этого контроля: во встроенном режиме
+    /// проба уходила в карантин вместе с трафиком человека и ПРОХОДИЛА, отчёт объявлял
+    /// «домен на этой линии не режется», продукт снимал лечение с режущейся цели.
+    ///
+    /// Дыра не ловилась потому, что искать её надо было по ПОТРЕБИТЕЛЯМ `own_mark`, а
+    /// литеральный ноль по имени функции не ищется. Поэтому лечение — тип, а не вызов:
+    /// пока марка `u32`, ноль остаётся выразимым и вернётся у следующего вызывающего.
+    #[test]
+    fn a_control_probe_carries_the_process_own_mark_when_embedded() {
+        assert_eq!(
+            with_embedded(true, || ProbeMark::Control.so_mark()),
+            WORKER_MARK_BASE,
+            "контроль обязан быть отличим хозяином ядра"
+        );
+    }
+
+    #[test]
+    fn a_control_probe_is_unmarked_outside_embedded_mode() {
+        assert_eq!(with_embedded(false, || ProbeMark::Control.so_mark()), 0);
+    }
+
+    /// Проба С десинком берёт марку ПРОФИЛЯ, а не процесса: ею движок выбирает стратегию.
+    #[test]
+    fn a_desync_probe_carries_the_profile_mark_not_the_process_mark() {
+        let profile = ProfileMark::new(7).expect("семёрка — валидный индекс профиля");
+        let mark = with_embedded(true, || ProbeMark::Desync(profile).so_mark());
+
+        assert_eq!(mark, profile.so_mark());
+        assert_eq!(mark & PROFILE_MASK, 7, "профиль обязан доехать до движка");
     }
 }

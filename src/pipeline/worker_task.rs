@@ -6,7 +6,7 @@ use crate::network::http_client::{
     http_test, http_test_data, interpret_data_transfer_result, interpret_http_result,
     pick_random_ip, BodyMode, HttpVerdict, ROOT_PATH,
 };
-use crate::nfqws2::mark::ProfileMark;
+use crate::nfqws2::mark::{ProbeMark, ProfileMark};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum HttpTestMode {
@@ -58,7 +58,7 @@ pub async fn probe_profile(
                 task.protocol,
                 &task.domain,
                 ip,
-                task.mark.so_mark(),
+                ProbeMark::Desync(task.mark).so_mark(),
                 config.request_timeout,
                 None,
             )
@@ -70,7 +70,7 @@ pub async fn probe_profile(
                 task.protocol,
                 &task.domain,
                 ip,
-                task.mark.so_mark(),
+                ProbeMark::Desync(task.mark).so_mark(),
                 config.request_timeout,
                 BodyMode::Unlimited,
                 None,

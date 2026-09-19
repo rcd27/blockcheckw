@@ -9,6 +9,7 @@ use crate::firewall::nft::{OwnedTable, SystemNft};
 use crate::firewall::nftables;
 use crate::network::http_client::{http_probe, pick_random_ip, BodyMode, Ended, HttpResult};
 use crate::network::patience::Patience;
+use crate::nfqws2::mark::ProbeMark;
 use crate::nfqws2::plan::{FilterMark, Plan, QueueNum};
 use crate::nfqws2::run::SystemNfqws2;
 use crate::pipeline::fate::{self, Admits, Fate, Observed, ALL_FATES};
@@ -74,18 +75,26 @@ pub async fn run_check(
         }
     };
 
-    // КОНТРОЛЬ. `fwmark = 0` не совпадает с правилом диспетчеризации, и проба идёт мимо
-    // движка: это и есть «а что будет без десинка вообще». Без него всякое «работает»
-    // ниже может оказаться свойством линии, а не стратегии. Судится ТОЙ ЖЕ мерой, что и
-    // стратегии (спека §6-бис/6-тер) — иначе на линии без эталона контроль никогда не
+    // КОНТРОЛЬ. Профиль в марке НУЛЕВОЙ — ни одно наше правило его не выбирает, и проба
+    // честно идёт мимо движка: это и есть «а что будет без десинка вообще». Без него всякое
+    // «работает» ниже может оказаться свойством линии, а не стратегии. Судится ТОЙ ЖЕ мерой,
+    // что и стратегии (спека §6-бис/6-тер) — иначе на линии без эталона контроль никогда не
     // «проходит», и `inconclusive` не срабатывает, сколько бы домен ни открывался без
     // десинка. Контроль не кандидат: в гистограмму устойчивости (`stability_of`) не идёт.
+    //
+    // Марку называет ТИП (`ProbeMark::Control`), а не число. Здесь стоял литеральный ноль, и
+    // во встроенном режиме он делал контроль слепым: хозяин ядра (невод) уводит заблокированные
+    // цели в карантин ПО АДРЕСУ, немаркированная проба уходила туда вместе с трафиком человека
+    // и ПРОХОДИЛА. Отчёт объявлял `inconclusive: true` — «домен не режется» — при том, что
+    // домен режется (замер 19.09: 39 рабочих страт из 965 на той же линии минутой позже), и по
+    // этому отчёту продукт снимал лечение. `3f5a001` закрыл `baseline` и `reference`, а сюда не
+    // дошёл: literal `0` не ищется по имени `own_mark`.
     let control_ip = pick_random_ip(ips).expect("ips проверены вызывающим");
     let control_reading = measure_channel(
         Protocol::HttpsTls12,
         domain,
         control_ip,
-        0,
+        ProbeMark::Control,
         patience,
         probe_path,
         identity_path,
@@ -434,15 +443,15 @@ fn median_share_of(shares: &[Option<f64>]) -> Option<f64> {
 
 /// Пройти ОБЕ пробы спеки §6-тер по уже установленному пути: ось подлинности один раз
 /// (`identity_path`), байтовую ось `passes` раз (`probe_path`), БЕЗ раннего выхода на
-/// первом провале (решение 3: частота требует всех `M` измерений). `mark = 0` — контроль
-/// без десинка; иначе — метка профиля стратегии. `log_index` — позиция стратегии в
+/// первом провале (решение 3: частота требует всех `M` измерений). `ProbeMark::Control` —
+/// контроль без десинка; `Desync` — метка профиля стратегии. `log_index` — позиция стратегии в
 /// прогоне для журнала (`BCW_CAUSE_HISTOGRAM`); `None` у контроля — он не кандидат.
 #[allow(clippy::too_many_arguments)] // спека §6-тер: две пробы, два эталона, два пути
 async fn measure_channel(
     protocol: Protocol,
     domain: &str,
     ip: &str,
-    mark: u32,
+    mark: ProbeMark,
     patience: Patience,
     probe_path: &str,
     identity_path: &str,
@@ -456,7 +465,7 @@ async fn measure_channel(
         protocol,
         domain,
         ip,
-        mark,
+        mark.so_mark(),
         patience,
         BodyMode::Unlimited,
         None,
@@ -486,7 +495,7 @@ async fn measure_channel(
             protocol,
             domain,
             ip,
-            mark,
+            mark.so_mark(),
             patience,
             BodyMode::Unlimited,
             None,
@@ -653,7 +662,7 @@ async fn check_single_strategy(
         protocol,
         domain,
         ip,
-        mark.so_mark(),
+        ProbeMark::Desync(mark),
         patience,
         probe_path,
         identity_path,

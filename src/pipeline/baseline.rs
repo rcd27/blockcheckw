@@ -75,7 +75,7 @@ pub async fn test_baseline(
                 protocol,
                 domain,
                 ip,
-                0,
+                crate::nfqws2::mark::own_mark(),
                 timeout_secs,
                 BASELINE_STALL_SECS,
                 DATA_TRANSFER_MIN_BYTES,

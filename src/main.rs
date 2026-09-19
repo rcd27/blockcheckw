@@ -386,6 +386,9 @@ async fn main() {
 
     cmd::set_auto_yes(cli.auto);
     cmd::set_skip_conflict_cleanup(cli.no_conflict_cleanup);
+    // ВСТРОЕННЫЙ РЕЖИМ ЗНАЧИТ И ДРУГОЕ: пробы без десинка несут собственную марку процесса, чтобы
+    // хозяин ядра отличил наш трафик от трафика человека и не увёл его вместе с ним.
+    blockcheckw::nfqws2::mark::set_embedded(cli.no_conflict_cleanup);
     let via = cli.via.map(|raw| {
         blockcheckw::network::via::Via::parse(&raw).unwrap_or_else(|e| {
             eprintln!("ERROR: --via: {e}");

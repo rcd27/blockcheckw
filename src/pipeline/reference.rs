@@ -186,7 +186,7 @@ pub async fn take_reference(
             protocol,
             domain,
             ip,
-            0,
+            crate::nfqws2::mark::own_mark(),
             timeout_secs,
             BodyMode::Unlimited,
             Some(clean),

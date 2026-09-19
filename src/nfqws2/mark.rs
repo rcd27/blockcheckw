@@ -12,6 +12,34 @@ const _: () = assert!(DESYNC_MARK & PROFILE_MASK == 0);
 const _: () = assert!(DESYNC_MARK & RESTORE_MASK == 0);
 const _: () = assert!(WORKER_MARK_BASE & PROFILE_MASK == 0);
 
+/// СОБСТВЕННАЯ МАРКА ПРОЦЕССА — та, по которой ХОЗЯИН ЯДРА отличает наш трафик от трафика человека.
+///
+/// Пробы без десинка (контроль и эталон) идут с профилем НОЛЬ: профиль ноль не выбирается ни одним
+/// нашим правилом, и проба честно минует собственную диспетчеризацию. Но марка при этом остаётся
+/// ненулевой — и в этом вся разница для того, кто нас позвал.
+///
+/// Оплачено 19.09.2026 на стенде третьего невода: он уводит заблокированные цели в карантин ПО
+/// АДРЕСУ, а контрольная проба шла с `fwmark = 0` — то есть уходила в карантин вместе с трафиком
+/// человека и ПРОХОДИЛА. Отчёт говорил `inconclusive: true` («домен не режется»), хотя домен
+/// режется: 39 рабочих страт из 965 на той же линии минутой позже. Замер был о другом мире.
+///
+/// Вне встроенного режима — ноль, как было: одиночный запуск никем не оркестрируется, и лишняя
+/// марка меняла бы поведение там, где её некому читать.
+pub fn own_mark() -> u32 {
+    match EMBEDDED.load(std::sync::atomic::Ordering::Relaxed) {
+        true => WORKER_MARK_BASE,
+        false => 0,
+    }
+}
+
+/// Встроенный ли режим. Живёт в библиотеке, а не в бинаре: марку читают пробы, а они библиотечные.
+static EMBEDDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Объявить встроенный режим (ставится разбором командной строки).
+pub fn set_embedded(embedded: bool) {
+    EMBEDDED.store(embedded, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProfileMark(NonZeroU16);
 
@@ -106,5 +134,34 @@ mod tests {
     fn filter_arg_spells_index_and_mask() {
         let mark = ProfileMark::new(7).expect("ненулевой индекс");
         assert_eq!(mark.filter_arg(), "--filter-mark=7/0xFFFF");
+    }
+}
+
+#[cfg(test)]
+mod own_mark_tests {
+    use super::*;
+
+    /// ВНЕ ВСТРОЕННОГО РЕЖИМА МАРКА НУЛЕВАЯ — как было: одиночный запуск никем не оркестрируется,
+    /// и лишняя марка меняла бы поведение там, где её некому читать.
+    #[test]
+    fn a_standalone_run_marks_nothing() {
+        set_embedded(false);
+        assert_eq!(own_mark(), 0);
+    }
+
+    /// ВО ВСТРОЕННОМ — МАРКА ЕСТЬ, И ПРОФИЛЬ В НЕЙ НУЛЕВОЙ.
+    ///
+    /// Ненулевая марка нужна ХОЗЯИНУ ЯДРА: он отличает по ней наш трафик от трафика человека.
+    /// Нулевой профиль нужен НАМ: проба без десинка обязана миновать собственную диспетчеризацию,
+    /// а профиль ноль не выбирается ни одним нашим правилом.
+    #[test]
+    fn an_embedded_run_marks_with_a_zero_profile() {
+        set_embedded(true);
+        let mark = own_mark();
+        set_embedded(false);
+
+        assert_ne!(mark, 0, "хозяин ядра обязан нас отличить");
+        assert_eq!(mark & PROFILE_MASK, 0, "а десинк обязан нас пропустить");
+        assert_eq!(mark & WORKER_MARK_BASE, WORKER_MARK_BASE);
     }
 }

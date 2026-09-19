@@ -199,10 +199,29 @@ pub async fn handle_bypass_conflicts(
     own_table: &str,
     con: &blockcheckw::ui::Console,
 ) -> Result<Option<ServiceManager>, ()> {
+    // НАБЛЮДЕНИЕ ОТДЕЛЕНО ОТ ВМЕШАТЕЛЬСТВА. Во встроенном режиме чужое ядро принадлежит
+    // вызывающему, и трогать его нельзя — но и МОЛЧАТЬ о том, что мы видим, незачем: для
+    // продукта «на 443 сидит мой собственный слот» есть диагноз, объясняющий пустой подбор.
+    // Прежде этот метод выходил первой же строкой, и сказать ему было нечего.
+    let conflicts = detect_bypass_conflicts(own_table).await;
+
     if SKIP_CONFLICT_CLEANUP.load(Ordering::Relaxed) {
+        if !conflicts.is_empty() {
+            let tables: Vec<String> = conflicts
+                .conflicting_tables
+                .iter()
+                .map(|t| format!("{} {}", t.family(), t.name()))
+                .collect();
+            con.warn(&format!(
+                "рядом работает чужой обход (таблиц: {}, процессы nfqws2: {}) — не трогаю,                  но подбор может мерить его, а не линию",
+                tables.len(),
+                if conflicts.has_nfqws2_processes { "есть" } else { "нет" },
+            ));
+            blockcheckw::machine::emit_neighbours(&tables, conflicts.has_nfqws2_processes);
+        }
         return Ok(None); // embedded: оркестратор владеет nft-состоянием, чужие трубы не трогаем
     }
-    let conflicts = detect_bypass_conflicts(own_table).await;
+
     if conflicts.is_empty() {
         return Ok(None);
     }

@@ -63,6 +63,29 @@ struct StreamRow<'a> {
     strategy: &'a VerifiedStrategy,
 }
 
+/// Сказать машинно, КОГО мы увидели рядом в ядре, ничего с ним не делая.
+///
+/// Во встроенном режиме чужое не трогается — это уговор с вызывающим. Но увиденное ему
+/// нужно: сосед на 443 или на нашей очереди объясняет, почему подбор не находит ничего, и
+/// объяснение это — про его собственный слот, а не про линию человека. Прежде наблюдение
+/// было выключено вместе с вмешательством, и диагноза не существовало вовсе.
+pub fn emit_neighbours(tables: &[String], engines_running: bool) {
+    if !PROGRESS.load(Ordering::Relaxed) && !stream_is_on() {
+        return;
+    }
+    let listed = tables
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let line = format!(
+        r#"{{"event":"neighbours","tables":[{listed}],"nfqws2_running":{engines_running}}}"#
+    );
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "{line}");
+    let _ = err.flush();
+}
+
 /// Отметить ход работы: фаза, сколько сделано из скольких, сколько секунд прошло.
 pub fn emit_progress(phase: &str, done: usize, total: usize, elapsed_secs: f64) {
     if !PROGRESS.load(Ordering::Relaxed) {

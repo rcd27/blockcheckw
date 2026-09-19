@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.12.0](https://github.com/rcd27/blockcheckw/compare/v0.11.4...v0.12.0) (2026-09-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **embedded:** пространства имён ядра задаются ключами, встроенный режим — своим флагом
+* **report:** исход прогона — алгебра вместо inconclusive, отчёт версионирован и атомарен
+
+### Features
+
+* **check:** подтверждённые стратегии отдаются потоком, прогресс машиночитаем ([1529c06](https://github.com/rcd27/blockcheckw/commit/1529c06cabba8d3afa8a0398e0398af6057616e2))
+* **embedded:** наблюдение отделено от вмешательства, синтаксис args версионирован ([8e7e9ab](https://github.com/rcd27/blockcheckw/commit/8e7e9abdab6cf6a8ddb1c6ace83ad749174a2cb0))
+* **embedded:** подборщик умирает вместе с заказчиком и снимает свои остатки при входе ([bc7403d](https://github.com/rcd27/blockcheckw/commit/bc7403d3b52b5333ee9ab7a071a2c25fc894e903))
+* **embedded:** пространства имён ядра задаются ключами, встроенный режим — своим флагом ([1e23502](https://github.com/rcd27/blockcheckw/commit/1e235022192b99ef1168a2cb8fd37d0bc2c63677))
+* **report:** исход прогона — алгебра вместо inconclusive, отчёт версионирован и атомарен ([f7c8aad](https://github.com/rcd27/blockcheckw/commit/f7c8aad63894671f3e96643c9b26e0a1b98cc7f3))
+
+
+### Bug Fixes
+
+* **check:** контроль без десинка несёт марку процесса — типом, а не соглашением ([3c8ee82](https://github.com/rcd27/blockcheckw/commit/3c8ee824ca3b7710bc2447cc19c6410468696810))
+* **cli:** отказ по раскладке и потолку профиля — до запроса пароля, а не после ([094102b](https://github.com/rcd27/blockcheckw/commit/094102b041cdcbd04f0896af3c4dd2a93e0a0c01))
+* **dns:** резолв идёт своим помеченным сокетом, а не внешним curl ([09e48bc](https://github.com/rcd27/blockcheckw/commit/09e48bce0e91d5a1db830aa4e5255fcd012d7250))
+* **space:** потолок профиля выводится из полосы соседа, а не совпадает с ней числом ([43c0e42](https://github.com/rcd27/blockcheckw/commit/43c0e42857587a47836fc17a6186254cde8dc647))
+* **space:** раскладка марки — по факту машины, план не заезжает в приборную полосу соседа ([9e2e96d](https://github.com/rcd27/blockcheckw/commit/9e2e96d6c34583a128a57dd038b789b15dbe9fb1))
+* во встроенном режиме контроль и эталон несут собственную марку процесса ([3f5a001](https://github.com/rcd27/blockcheckw/commit/3f5a001ccb6c2f210ee10846476a4c921475ba54))
+
 ## [0.11.4](https://github.com/rcd27/blockcheckw/compare/v0.11.3...v0.11.4) (2026-09-16)
 
 

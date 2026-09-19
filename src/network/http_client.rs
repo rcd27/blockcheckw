@@ -1397,3 +1397,109 @@ mod tests {
         assert_eq!(extract_host_from_url("/relative/path"), None);
     }
 }
+
+// ── Помеченный HTTPS-запрос с ТЕЛОМ ─────────────────────────────────────────
+//
+// Пробы меряют объём и читают заголовки, а тело им не нужно — оттого функции, отдающей
+// содержимое, в этом модуле и не было. Понадобилась она ради DoH: резолв уходил ВНЕШНИМ
+// `curl`, а чужому процессу `SO_MARK` не поставить, и запросы имени шли немаркированными,
+// то есть в карантин хозяина ядра вместе с трафиком человека. Вдобавок на боевой коробке
+// `curl` попросту нет — и DoH там не работал никогда, молча.
+
+/// Ошибка помеченного запроса за содержимым.
+#[derive(Debug)]
+pub enum FetchError {
+    Connect(String),
+    Tls(String),
+    Http(String),
+    Status(u16),
+    Timeout,
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Connect(e) => write!(f, "connect: {e}"),
+            FetchError::Tls(e) => write!(f, "tls: {e}"),
+            FetchError::Http(e) => write!(f, "http: {e}"),
+            FetchError::Status(code) => write!(f, "статус {code}"),
+            FetchError::Timeout => write!(f, "срок вышел"),
+        }
+    }
+}
+
+/// Забрать содержимое по HTTPS с НАШЕЙ маркой на сокете.
+///
+/// `ip` — адрес, `host` — имя для SNI и заголовка `Host` (они различаются: к DoH-резолверу
+/// мы идём по IP-литералу, иначе разрешение имени рекурсивно упёрлось бы в само себя).
+pub async fn fetch_https_body(
+    ip: &str,
+    host: &str,
+    path: &str,
+    accept: &str,
+    fwmark: u32,
+    timeout: Duration,
+    limit: usize,
+) -> Result<String, FetchError> {
+    let work = async {
+        let addr: SocketAddr = format!("{ip}:443")
+            .parse()
+            .map_err(|e| FetchError::Connect(format!("{e}")))?;
+        let tcp = marked_tcp_connect(addr, fwmark)
+            .await
+            .map_err(|e| FetchError::Connect(e.to_string()))?;
+
+        let connector = TlsConnector::from(make_tls_config(Protocol::HttpsTls12));
+        let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|e| FetchError::Tls(e.to_string()))?;
+        let tls = connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(|e| FetchError::Tls(e.to_string()))?;
+
+        let (mut sender, conn) = http1::handshake(TokioIo::new(tls))
+            .await
+            .map_err(|e| FetchError::Http(e.to_string()))?;
+        // Соединение гоняет фоновая задача; она умирает вместе с последним отправителем.
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let request = Request::builder()
+            .uri(path)
+            .header("Host", host)
+            .header("Accept", accept)
+            .header("User-Agent", "blockcheckw")
+            .body(Empty::<Bytes>::new())
+            .map_err(|e| FetchError::Http(e.to_string()))?;
+
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(|e| FetchError::Http(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(FetchError::Status(status));
+        }
+
+        let mut body = response.into_body();
+        let mut collected = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|e| FetchError::Http(e.to_string()))?;
+            if let Some(chunk) = frame.data_ref() {
+                collected.extend_from_slice(chunk);
+                // Потолок: ответ резолвера мал, а доверять чужому размеру нельзя.
+                if collected.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(String::from_utf8_lossy(&collected).into_owned())
+    };
+
+    match tokio::time::timeout(timeout, work).await {
+        Ok(result) => result,
+        Err(_) => Err(FetchError::Timeout),
+    }
+}

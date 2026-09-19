@@ -171,12 +171,12 @@ pub async fn resolve_ipv4(domain: &str) -> Result<Vec<String>, BlockcheckError> 
 }
 
 /// Check for DNS spoofing by comparing system DNS and DoH results for known blocked domains.
-pub async fn check_dns_spoofing(doh_server_url: &str) -> DnsSpoofResult {
+pub async fn check_dns_spoofing(doh_server: &doh::DohServer) -> DnsSpoofResult {
     let mut mismatches = Vec::new();
 
     for &domain in SPOOFING_CHECK_DOMAINS {
         let system_ips = resolve_ipv4(domain).await.ok();
-        let doh_ips = doh::doh_resolve(domain, doh_server_url).await;
+        let doh_ips = doh::doh_resolve(domain, doh_server).await;
 
         match (system_ips, doh_ips) {
             (Some(sys), Some(doh_result)) if !doh_result.is_empty() => {

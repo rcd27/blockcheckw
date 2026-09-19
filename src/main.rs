@@ -309,6 +309,49 @@ enum Command {
     },
 }
 
+/// Разобрать режим DNS с оглядкой на встроенность.
+///
+/// ВО ВСТРОЕННОМ РЕЖИМЕ СИСТЕМНЫЙ РЕЗОЛВЕР ЗАПРЕЩЁН. Он работает внешними программами
+/// (`getent`, `nslookup`), а чужому процессу не поставить `SO_MARK` — запрос имени уйдёт
+/// немаркированным, то есть тем же путём, что трафик человека. Если вызывающий заворачивает
+/// `udp dport 53` в свою очередь (а третий невод заворачивает), подбор окажется внутри мира,
+/// который меряет, уже на уровне имени. Это не чинится ключом — это свойство чужого процесса,
+/// и потому здесь отказ, а не предупреждение.
+///
+/// `auto` во встроенном режиме молча становится `doh`: он начинается с системного резолва, и
+/// та же беда пришла бы через него.
+fn dns_mode_of(raw: &str, embedded: bool) -> blockcheckw::config::DnsMode {
+    let mode = match blockcheckw::config::parse_dns_mode(raw) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(1);
+        }
+    };
+    if !embedded {
+        return mode;
+    }
+    match mode {
+        blockcheckw::config::DnsMode::System => {
+            eprintln!(
+                "ERROR: --dns system несовместим с --embedded: системный резолвер работает \
+                 внешними программами, которым не поставить марку процесса, и запрос имени \
+                 уйдёт тем же путём, что трафик человека. Используйте --dns doh."
+            );
+            std::process::exit(2);
+        }
+        blockcheckw::config::DnsMode::Auto => {
+            eprintln!(
+                "{}--embedded: режим DNS auto начинается с системного резолва внешней \
+                 программой — беру doh, чтобы запрос имени нёс нашу марку",
+                blockcheckw::ui::WARN,
+            );
+            blockcheckw::config::DnsMode::Doh
+        }
+        blockcheckw::config::DnsMode::Doh => mode,
+    }
+}
+
 /// Return true if a named arg was explicitly provided on the command line.
 fn is_explicit(matches: &clap::ArgMatches, id: &str) -> bool {
     matches.value_source(id) == Some(ValueSource::CommandLine)
@@ -690,13 +733,7 @@ async fn main() {
                     std::process::exit(1);
                 };
 
-                let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("ERROR: {e}");
-                        std::process::exit(1);
-                    }
-                };
+                let dns_mode = dns_mode_of(&eff_dns, embedded);
 
                 let reference_via = reference_via.map(|raw| {
                     blockcheckw::network::via::Via::parse(&raw).unwrap_or_else(|e| {
@@ -766,13 +803,7 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
-                let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("ERROR: {e}");
-                        std::process::exit(1);
-                    }
-                };
+                let dns_mode = dns_mode_of(&eff_dns, embedded);
                 // --alive-via: a proxy used ONLY to verify aliveness of IP-blocked
                 // hosts (not to route the scan). Must be a proxy we can tcp-connect
                 // through; reachability is verified later in run_scan.
@@ -842,13 +873,7 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
-                let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("ERROR: {e}");
-                        std::process::exit(1);
-                    }
-                };
+                let dns_mode = dns_mode_of(&eff_dns, embedded);
                 cmd::universal::run_universal(
                     eff_workers as usize,
                     cli.profiles_per_instance,
@@ -881,13 +906,7 @@ async fn main() {
                 }
                 blockcheckw::persist::save(&persisted);
 
-                let dns_mode = match blockcheckw::config::parse_dns_mode(&eff_dns) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("ERROR: {e}");
-                        std::process::exit(1);
-                    }
-                };
+                let dns_mode = dns_mode_of(&eff_dns, embedded);
 
                 cmd::status::run_status_cmd(cmd::status::StatusParams {
                     domain_list: &domain_list,

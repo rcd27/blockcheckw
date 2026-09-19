@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::nfqws2::mark::{ProfileMark, DESYNC_MARK};
+use crate::nfqws2::mark::{desync_mark, ProfileMark};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueNum(u16);
@@ -107,7 +107,7 @@ impl Plan {
             env.binary.to_string_lossy().into_owned(),
             format!("--uid={}:{}", env.uid, env.gid),
             format!("--qnum={}", self.queue.get()),
-            format!("--fwmark=0x{DESYNC_MARK:08X}"),
+            format!("--fwmark=0x{:08X}", desync_mark()),
         ];
         argv.extend(
             env.lua
@@ -203,7 +203,7 @@ mod tests {
             assert_eq!(before, expected, "{prefix} должен стоять до первого --new");
         }
         assert_eq!(argv[0], "/opt/zapret2/binaries/linux-x86_64/nfqws2");
-        assert!(argv.contains(&format!("--fwmark=0x{DESYNC_MARK:08X}")));
+        assert!(argv.contains(&format!("--fwmark=0x{:08X}", desync_mark())));
     }
 
     #[test]

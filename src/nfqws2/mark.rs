@@ -1,16 +1,23 @@
 use std::num::NonZeroU16;
 
-pub const DESYNC_MARK: u32 = 0x1000_0000;
+use crate::nfqws2::space;
+pub use crate::nfqws2::space::PROFILE_MASK;
 
-pub const WORKER_MARK_BASE: u32 = 0x2000_0000;
+/// Марка десинка ТЕКУЩЕЙ раскладки. Функция, а не константа: раскладку задаёт вызывающий
+/// (`--desync-mark`), потому что в ядре мы живём не одни, и биты у соседей уже заняты.
+pub fn desync_mark() -> u32 {
+    space::space().desync()
+}
 
-pub const PROFILE_MASK: u32 = 0x0000_FFFF;
+/// База марки воркера текущей раскладки (`--mark-base`).
+pub fn worker_mark_base() -> u32 {
+    space::space().worker_base()
+}
 
-pub const RESTORE_MASK: u32 = WORKER_MARK_BASE | PROFILE_MASK;
-
-const _: () = assert!(DESYNC_MARK & PROFILE_MASK == 0);
-const _: () = assert!(DESYNC_MARK & RESTORE_MASK == 0);
-const _: () = assert!(WORKER_MARK_BASE & PROFILE_MASK == 0);
+/// Маска восстановления марки из `ct mark` текущей раскладки.
+pub fn restore_mask() -> u32 {
+    space::space().restore_mask()
+}
 
 /// СОБСТВЕННАЯ МАРКА ПРОЦЕССА — та, по которой ХОЗЯИН ЯДРА отличает наш трафик от трафика человека.
 ///
@@ -27,7 +34,7 @@ const _: () = assert!(WORKER_MARK_BASE & PROFILE_MASK == 0);
 /// марка меняла бы поведение там, где её некому читать.
 pub fn own_mark() -> u32 {
     match EMBEDDED.load(std::sync::atomic::Ordering::Relaxed) {
-        true => WORKER_MARK_BASE,
+        true => worker_mark_base(),
         false => 0,
     }
 }
@@ -85,13 +92,13 @@ impl ProfileMark {
 
     /// Что кладётся в `SO_MARK` сокета пробы.
     pub fn so_mark(self) -> u32 {
-        WORKER_MARK_BASE | u32::from(self.0.get())
+        worker_mark_base() | u32::from(self.0.get())
     }
 
     /// Что оказывается в `ct mark`. Правило выводит это значение само
     /// (`ct mark set mark or DESYNC_MARK`), поэтому на профиль правил не нужно.
     pub fn ct_mark(self) -> u32 {
-        self.so_mark() | DESYNC_MARK
+        self.so_mark() | desync_mark()
     }
 
     /// Объявление профиля в argv движка.
@@ -110,7 +117,7 @@ mod tests {
     fn desync_bit_never_travels_with_a_profile_mark() {
         for index in 1..=u16::MAX {
             let mark = ProfileMark::new(index).expect("ненулевой индекс");
-            assert_eq!(mark.so_mark() & DESYNC_MARK, 0, "SO_MARK, индекс {index}");
+            assert_eq!(mark.so_mark() & desync_mark(), 0, "SO_MARK, индекс {index}");
             // `so_mark` обязана инъективно кодировать индекс в младших битах —
             // на этом стоит уникальность fwmark разных профилей. Раньше это
             // проверял отдельный `worker_fwmarks_are_unique` над 512 марками
@@ -126,14 +133,14 @@ mod tests {
             // (`ct mark set mark or DESYNC_MARK`), и на этом стоит вся
             // защита от зацикливания на своих же пакетах.
             assert_ne!(
-                mark.ct_mark() & DESYNC_MARK,
+                mark.ct_mark() & desync_mark(),
                 0,
                 "ct mark обязан нести бит DESYNC, индекс {index}"
             );
             // А восстановление под маской обязано снять его и вернуть ровно
             // ту марку, что стояла в SO_MARK: опознавательный бит плюс индекс.
             assert_eq!(
-                mark.ct_mark() & RESTORE_MASK,
+                mark.ct_mark() & restore_mask(),
                 mark.so_mark(),
                 "восстановление из ct обязано вернуть SO_MARK, индекс {index}"
             );
@@ -147,7 +154,7 @@ mod tests {
         for index in [1u16, 2, 255, 1024, u16::MAX] {
             let mark = ProfileMark::new(index).expect("ненулевой индекс");
             assert_eq!(
-                mark.ct_mark() & RESTORE_MASK & PROFILE_MASK,
+                mark.ct_mark() & restore_mask() & PROFILE_MASK,
                 u32::from(index)
             );
         }
@@ -209,7 +216,7 @@ mod own_mark_tests {
 
         assert_ne!(mark, 0, "хозяин ядра обязан нас отличить");
         assert_eq!(mark & PROFILE_MASK, 0, "а десинк обязан нас пропустить");
-        assert_eq!(mark & WORKER_MARK_BASE, WORKER_MARK_BASE);
+        assert_eq!(mark & worker_mark_base(), worker_mark_base());
     }
 
     /// БАГ, ОПЛАЧЕННЫЙ ЗАМЕРОМ 19.09 И НЕ ДОЛЕЧЕННЫЙ `3f5a001`.
@@ -227,7 +234,7 @@ mod own_mark_tests {
     fn a_control_probe_carries_the_process_own_mark_when_embedded() {
         assert_eq!(
             with_embedded(true, || ProbeMark::Control.so_mark()),
-            WORKER_MARK_BASE,
+            worker_mark_base(),
             "контроль обязан быть отличим хозяином ядра"
         );
     }

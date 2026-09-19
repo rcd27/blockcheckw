@@ -33,6 +33,72 @@ pub fn parse_dns_mode(s: &str) -> Result<DnsMode, String> {
     }
 }
 
+/// КЛЮЧИ ЯДРА — пространства имён, которые задаёт тот, кто нас позвал.
+///
+/// Глобально, как и раскладка марки ([`crate::nfqws2::space`]), и по той же причине: очередь
+/// и таблица — свойства ПРОЦЕССА, одни на весь прогон, а читают их и пайплайн, и преflight,
+/// и уборщик остатков. Ставится один раз разбором командной строки, до всякой работы с ядром.
+///
+/// Зачем вообще: у оркестратора эти пространства уже заняты, и заняты плотно — его очереди,
+/// очереди стенда, пул слотов. Умолчание, которое нельзя сдвинуть, означало бы, что подбор
+/// либо встанет на чужую очередь, либо не запустится вовсе.
+mod kernel_keys {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::RwLock;
+
+    pub(super) static QNUM: AtomicU16 = AtomicU16::new(200);
+    pub(super) static SMOKE_BASE: AtomicU16 = AtomicU16::new(65_526);
+    pub(super) static TABLE: RwLock<String> = RwLock::new(String::new());
+
+    pub(super) fn table() -> String {
+        match TABLE.read() {
+            Ok(name) if !name.is_empty() => name.clone(),
+            // Пусто (не задавали) или отравлен (упал сосед) — умолчание. Имя таблицы не
+            // тот предмет, ради которого стоит ронять прогон.
+            _ => super::DEFAULT_NFT_TABLE.to_string(),
+        }
+    }
+
+    pub(super) fn set_table(name: &str) {
+        if let Ok(mut slot) = TABLE.write() {
+            *slot = name.to_string();
+        }
+    }
+
+    pub(super) fn qnum() -> u16 {
+        QNUM.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn smoke_base() -> u16 {
+        SMOKE_BASE.load(Ordering::Relaxed)
+    }
+}
+
+/// Объявить ключи ядра (ставится разбором командной строки).
+pub fn set_kernel_keys(qnum: u16, nft_table: &str, smoke_qnum_base: u16) {
+    kernel_keys::QNUM.store(qnum, std::sync::atomic::Ordering::Relaxed);
+    kernel_keys::SMOKE_BASE.store(smoke_qnum_base, std::sync::atomic::Ordering::Relaxed);
+    kernel_keys::set_table(nft_table);
+}
+
+/// Боевая очередь этого прогона.
+pub fn qnum() -> u16 {
+    kernel_keys::qnum()
+}
+
+/// Начало диапазона дымовых очередей (длина — [`SMOKE_QUEUE_COUNT`]).
+pub fn smoke_qnum_base() -> u16 {
+    kernel_keys::smoke_base()
+}
+
+/// Сколько очередей в дымовом диапазоне.
+pub const SMOKE_QUEUE_COUNT: u16 = 10;
+
+/// Имя нашей nft-таблицы в этом прогоне.
+pub fn nft_table() -> String {
+    kernel_keys::table()
+}
+
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
     pub worker_count: usize,
@@ -54,8 +120,8 @@ impl Default for CoreConfig {
         Self {
             worker_count: 8,
             profiles_per_instance: 1024,
-            base_qnum: 200,
-            nft_table: DEFAULT_NFT_TABLE.to_string(),
+            base_qnum: qnum(),
+            nft_table: nft_table(),
             nfqws2_path: nfqws2_path("/opt/zapret2"),
             request_timeout: 2,
             // FIXME: zapret_base is hardcoded; add CLI option to override

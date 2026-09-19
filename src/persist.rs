@@ -31,8 +31,24 @@ fn config_path() -> Option<PathBuf> {
     real_home().map(|h| h.join(".config/blockcheckw/config.json"))
 }
 
+/// ПАМЯТЬ ПРОШЛЫХ ЗАПУСКОВ ВО ВСТРОЕННОМ РЕЖИМЕ НЕ СУЩЕСТВУЕТ.
+///
+/// Глушится здесь, а не в точках вызова: их шесть, список полей открыт и растёт, и каждое
+/// новое поле — новая молчаливая наследуемость, о которой вызывающий не узнает.
+///
+/// Оплачено 19.09.2026: подбор, поднятый продуктом, унаследовал `dns: doh` от ручного
+/// прогона часом раньше. На коробке, где DoH-резолвер зовёт отсутствующий `curl`, это
+/// означало падение на разрешении имени; продукт получил нечитаемый отчёт и молча ждал.
+/// Человек в это время сидел под карантином.
+fn memory_is_off() -> bool {
+    crate::nfqws2::mark::is_embedded()
+}
+
 /// Load persisted config. Returns default on any error.
 pub fn load() -> PersistedConfig {
+    if memory_is_off() {
+        return PersistedConfig::default();
+    }
     let path = match config_path() {
         Some(p) => p,
         None => return PersistedConfig::default(),
@@ -46,6 +62,11 @@ pub fn load() -> PersistedConfig {
 
 /// Save persisted config. Non-fatal — logs warning on error.
 pub fn save(config: &PersistedConfig) {
+    if memory_is_off() {
+        // Встроенный прогон не только не читает память, но и не пишет её: иначе ключи,
+        // заданные продуктом, стали бы умолчанием следующего РУЧНОГО запуска человека.
+        return;
+    }
     let path = match config_path() {
         Some(p) => p,
         None => return,
@@ -134,5 +155,58 @@ mod tests {
         assert!(!json.contains("domain"));
         assert!(!json.contains("dns"));
         assert!(json.contains("1024"));
+    }
+}
+
+#[cfg(test)]
+mod embedded_memory_tests {
+    use super::*;
+
+    /// Тот же замок, что у соседей по встроенности: режим — один статик на процесс.
+    static EMBEDDED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// ВО ВСТРОЕННОМ РЕЖИМЕ ПАМЯТИ НЕТ. Проверяется на ЗАВЕДОМО ПОРЧЕНОЙ памяти: `workers: 0`
+    /// повесил бы прогон навсегда (семафор не выдаст ни одного разрешения) уже ПОСЛЕ того,
+    /// как правила легли в ядро, а `dns: doh` на коробке без `curl` роняет разрешение имени.
+    #[test]
+    fn an_embedded_run_inherits_nothing_from_a_previous_one() {
+        let _guard = EMBEDDED_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        crate::nfqws2::mark::set_embedded(true);
+        let loaded = load();
+        crate::nfqws2::mark::set_embedded(false);
+
+        assert!(loaded.dns.is_none(), "режим DNS не наследуется");
+        assert!(loaded.workers.is_none(), "число воркеров не наследуется");
+        assert!(loaded.domain.is_none(), "домен не наследуется");
+        assert!(loaded.domain_list.is_none());
+        assert!(loaded.protocols.is_none());
+    }
+
+    /// И не пишет: ключи, заданные продуктом, не смеют стать умолчанием следующего ручного
+    /// запуска человека.
+    #[test]
+    fn an_embedded_run_leaves_no_memory_behind() {
+        let _guard = EMBEDDED_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let before = config_path().and_then(|p| std::fs::read_to_string(p).ok());
+
+        crate::nfqws2::mark::set_embedded(true);
+        save(&PersistedConfig {
+            dns: Some("doh".to_string()),
+            workers: Some(0),
+            ..Default::default()
+        });
+        crate::nfqws2::mark::set_embedded(false);
+
+        let after = config_path().and_then(|p| std::fs::read_to_string(p).ok());
+        assert_eq!(
+            before, after,
+            "встроенный прогон не смеет трогать память человека"
+        );
     }
 }

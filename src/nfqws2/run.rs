@@ -25,7 +25,13 @@ const PROBE_POLL_MS: u64 = 5;
 /// бы запереть пользователя: свой же осиротевший nfqws2 на 200 после падения
 /// blockcheckw давал бы `QueueBusy` на КАЖДОМ следующем запуске, а разрешатель,
 /// который бы его снял, до этого места никогда бы не добрался.
-const SMOKE_QUEUES: std::ops::RangeInclusive<u16> = 65526..=65535;
+/// Диапазон вычисляется от заданной базы (`--smoke-qnum-base`): у оркестратора и дальний
+/// угол пространства очередей может быть занят, а умолчание остаётся прежним.
+fn smoke_queues() -> std::ops::RangeInclusive<u16> {
+    let base = crate::config::smoke_qnum_base();
+    let last = base.saturating_add(crate::config::SMOKE_QUEUE_COUNT - 1);
+    base..=last
+}
 
 /// Пауза перед единственным повтором старта на `QueueBusy`.
 ///
@@ -157,8 +163,9 @@ impl SystemNfqws2 {
     /// событие достаточно странное само по себе, чтобы не пытаться угадать
     /// дальше.
     pub fn smoke_sync(env: &Env, witness: &FilterMark) -> Result<(), Error> {
-        let mut last_queue = *SMOKE_QUEUES.start();
-        for q in SMOKE_QUEUES {
+        let queues = smoke_queues();
+        let mut last_queue = *queues.start();
+        for q in queues {
             last_queue = q;
             match Self::smoke_on_queue(env, witness, QueueNum::new(q)) {
                 // Эта очередь занята — пробуем следующую. Любой другой отказ

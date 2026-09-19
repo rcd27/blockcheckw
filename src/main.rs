@@ -4,6 +4,8 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 mod cmd;
 mod tracing_otel;
 
+use blockcheckw::nfqws2::space as mark_space;
+
 const fn help_styles() -> clap::builder::styling::Styles {
     use clap::builder::styling::{AnsiColor, Color, Style, Styles};
 
@@ -73,10 +75,40 @@ struct Cli {
     #[arg(long, global = true)]
     via: Option<String>,
 
-    /// Embedded mode: do NOT detect/cleanup foreign DPI-bypass nft tables or nfqws2 processes
-    /// (the caller owns the nft state). Without this, scan deletes any non-own queue-on-443 table.
+    /// Не трогать чужие nft-таблицы и процессы nfqws2 (их владелец — вызывающий).
+    /// УЗКИЙ ключ, только про уборку: всё остальное во встроенном режиме включает --embedded.
     #[arg(long, global = true)]
     no_conflict_cleanup: bool,
+
+    /// ВСТРОЕННЫЙ РЕЖИМ: подбор поднят продуктом, а не человеком.
+    ///
+    /// Включает разом всё, что из этого следует: чужое ядро не трогается (как
+    /// --no-conflict-cleanup), пробы без десинка несут собственную марку процесса, вопросов
+    /// человеку не задаётся, подбор уходит в свою группу процессов и снимает свои остатки при
+    /// входе, а память прошлых запусков (~/.config/blockcheckw/config.json) НЕ ЧИТАЕТСЯ И НЕ
+    /// ПИШЕТСЯ — унаследованное умолчание ломало подбор молча.
+    #[arg(long, global = true)]
+    embedded: bool,
+
+    /// Номер боевой очереди NFQUEUE (умолчание 200).
+    #[arg(long, value_name = "N")]
+    qnum: Option<u16>,
+
+    /// Имя нашей nft-таблицы (умолчание blockcheckw).
+    #[arg(long, value_name = "NAME")]
+    nft_table: Option<String>,
+
+    /// База марки воркера, 0xHEX или десятичное (умолчание 0x20000000).
+    #[arg(long, value_name = "MARK")]
+    mark_base: Option<String>,
+
+    /// Марка десинка, 0xHEX или десятичное (умолчание 0x10000000).
+    #[arg(long, value_name = "MARK")]
+    desync_mark: Option<String>,
+
+    /// Начало диапазона дымовых очередей преflight'а, 10 подряд (умолчание 65526).
+    #[arg(long, value_name = "N")]
+    smoke_qnum_base: Option<u16>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -384,11 +416,57 @@ async fn main() {
         return;
     }
 
-    cmd::set_auto_yes(cli.auto);
-    cmd::set_skip_conflict_cleanup(cli.no_conflict_cleanup);
-    // ВСТРОЕННЫЙ РЕЖИМ ЗНАЧИТ И ДРУГОЕ: пробы без десинка несут собственную марку процесса, чтобы
-    // хозяин ядра отличил наш трафик от трафика человека и не увёл его вместе с ним.
-    blockcheckw::nfqws2::mark::set_embedded(cli.no_conflict_cleanup);
+    // ДВА КЛЮЧА, ДВА СМЫСЛА. Прежде оба висели на `--no-conflict-cleanup`, и разъехались бы
+    // молча у первого, кому понадобился один без другого: «не трогай чужие таблицы» — это про
+    // уборку, «я поднят продуктом» — про марку проб, группу процессов, память и вопросы человеку.
+    let embedded = cli.embedded;
+    cmd::set_auto_yes(cli.auto || embedded);
+    cmd::set_skip_conflict_cleanup(cli.no_conflict_cleanup || embedded);
+    // Пробы без десинка несут собственную марку процесса, чтобы хозяин ядра отличил наш трафик
+    // от трафика человека и не увёл его вместе с ним в карантин.
+    blockcheckw::nfqws2::mark::set_embedded(embedded);
+
+    // Пространства имён ядра — от вызывающего, а не от умолчания: у него эти очереди, таблицы
+    // и биты марки уже заняты, и заняты плотно.
+    let mark_space = {
+        let desync = match cli.desync_mark.as_deref().map(mark_space::parse_mark) {
+            Some(Ok(value)) => value,
+            Some(Err(e)) => {
+                eprintln!("ERROR: --desync-mark: {e}");
+                std::process::exit(2);
+            }
+            None => mark_space::DEFAULT_DESYNC_MARK,
+        };
+        let base = match cli.mark_base.as_deref().map(mark_space::parse_mark) {
+            Some(Ok(value)) => value,
+            Some(Err(e)) => {
+                eprintln!("ERROR: --mark-base: {e}");
+                std::process::exit(2);
+            }
+            None => mark_space::DEFAULT_WORKER_MARK_BASE,
+        };
+        match mark_space::MarkSpace::new(desync, base) {
+            Ok(space) => space,
+            Err(e) => {
+                eprintln!("ERROR: раскладка марки непригодна: {e}");
+                std::process::exit(2);
+            }
+        }
+    };
+    if mark_space.intrudes_on_neighbours() {
+        eprintln!(
+            "{}раскладка марки занимает биты 16-27, объявленные в README за соседями по ядру",
+            blockcheckw::ui::WARN,
+        );
+    }
+    mark_space::set_space(mark_space);
+    blockcheckw::config::set_kernel_keys(
+        cli.qnum.unwrap_or(200),
+        cli.nft_table
+            .as_deref()
+            .unwrap_or(blockcheckw::config::DEFAULT_NFT_TABLE),
+        cli.smoke_qnum_base.unwrap_or(65_526),
+    );
     let via = cli.via.map(|raw| {
         blockcheckw::network::via::Via::parse(&raw).unwrap_or_else(|e| {
             eprintln!("ERROR: --via: {e}");
@@ -473,7 +551,7 @@ async fn main() {
     //
     // Группа — чтобы `kill(-pgid)` снимал нас вместе с детьми одним вызовом. Отказ не
     // смертелен: детей всё равно снимет `PDEATHSIG`, и об отказе мы говорим вслух.
-    if cli.no_conflict_cleanup {
+    if embedded {
         if let Err(e) = blockcheckw::system::group::detach_into_own_group() {
             eprintln!(
                 "{}не удалось уйти в свою группу процессов ({e}): оркестратору придётся бить \
@@ -485,7 +563,7 @@ async fn main() {
         let signature = blockcheckw::system::orphans::Signature {
             table: defaults.nft_table.clone(),
             qnum: defaults.base_qnum,
-            desync_mark: blockcheckw::nfqws2::mark::DESYNC_MARK,
+            desync_mark: blockcheckw::nfqws2::mark::desync_mark(),
         };
         let swept = blockcheckw::system::orphans::sweep_own(
             &blockcheckw::firewall::nft::SystemNft,

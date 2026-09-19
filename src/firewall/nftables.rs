@@ -2,7 +2,7 @@ use crate::error::BlockcheckError;
 use crate::firewall::nft::{NftBatch, NftRun, OwnedTable, OwnedTableMarker};
 use crate::network::dns::is_ipv4;
 use crate::nfqws2::dispatch::Dispatch;
-use crate::nfqws2::mark::DESYNC_MARK;
+use crate::nfqws2::mark::desync_mark;
 use crate::nfqws2::run::Ready;
 use tracing::warn;
 
@@ -50,7 +50,7 @@ pub async fn prepare_table<R: NftRun>(
         format!("delete table inet {name}"),
     ];
 
-    let desync = format!("0x{DESYNC_MARK:08X}");
+    let desync = format!("0x{:08X}", desync_mark());
     let trailing = vec![
         format!("add chain inet {name} {CHAIN_POSTNAT} {{ type filter hook postrouting priority 102; }}"),
         format!("add chain inet {name} {CHAIN_PREDEFRAG} {{ type filter hook output priority -402; }}"),
@@ -103,7 +103,7 @@ pub async fn drop_table<R: NftRun>(runner: &R, marker: &OwnedTableMarker) {
 
 pub async fn remove_dispatch<R: NftRun>(runner: &R, table: &OwnedTable) {
     let t = table.name();
-    let desync = format!("0x{DESYNC_MARK:08X}");
+    let desync = format!("0x{:08X}", desync_mark());
     if let Err(e) = runner
         .run(NftBatch::from_lines(vec![
             format!("flush chain inet {t} {CHAIN_POSTNAT}"),

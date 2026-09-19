@@ -12,6 +12,7 @@
 
 use crate::firewall::nft::{NftRun, OwnedTableMarker};
 use crate::firewall::nftables;
+use crate::nfqws2::plan::{self, QueueNum};
 
 /// Признак нашего остатка.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +48,12 @@ impl SweepReport {
 pub fn is_ours(cmdline: &str, sig: &Signature) -> bool {
     // Сверка ТОКЕНАМИ, а не вхождением подстроки: `--qnum=2000` содержит `--qnum=200`, и
     // наивное `contains` сняло бы чужой движок, стоящий на соседней очереди.
-    let qnum = format!("--qnum={}", sig.qnum);
-    let fwmark = format!("--fwmark=0x{:08X}", sig.desync_mark);
+    //
+    // Сами токены пишет тот, кто их ставит в командную строку (`nfqws2::plan`), а не мы:
+    // собирай мы их здесь своими руками, смена написания у него оставила бы уборщика слепым
+    // — на очереди остался бы живой движок, которого никто больше не считает своим.
+    let qnum = plan::queue_arg(QueueNum::new(sig.qnum));
+    let fwmark = plan::fwmark_arg(sig.desync_mark);
     let mut queue_matches = false;
     let mut mark_matches = false;
     for token in cmdline.split_whitespace() {

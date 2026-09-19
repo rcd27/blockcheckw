@@ -106,8 +106,8 @@ impl Plan {
         let mut argv = vec![
             env.binary.to_string_lossy().into_owned(),
             format!("--uid={}:{}", env.uid, env.gid),
-            format!("--qnum={}", self.queue.get()),
-            format!("--fwmark=0x{:08X}", desync_mark()),
+            queue_arg(self.queue),
+            fwmark_arg(desync_mark()),
         ];
         argv.extend(
             env.lua
@@ -124,6 +124,21 @@ impl Plan {
         }
         argv
     }
+}
+
+/// Как в командной строке движка пишется НОМЕР ОЧЕРЕДИ.
+///
+/// Публично и отдельно от [`Plan::argv`], потому что этот же токен ищет уборщик своих
+/// остатков (`system::orphans`): он узнаёт наш осиротевший движок по его командной строке.
+/// Пока написание жило в двух местах, смена формата здесь молча лишала уборщика зрения —
+/// он переставал узнавать своих, а на очереди оставался живой процесс.
+pub fn queue_arg(queue: QueueNum) -> String {
+    format!("--qnum={}", queue.get())
+}
+
+/// Как в командной строке движка пишется МАРКА РЕИНЖЕКТА. Второй признак «своего» там же.
+pub fn fwmark_arg(mark: u32) -> String {
+    format!("--fwmark=0x{mark:08X}")
 }
 
 #[cfg(test)]
@@ -203,7 +218,7 @@ mod tests {
             assert_eq!(before, expected, "{prefix} должен стоять до первого --new");
         }
         assert_eq!(argv[0], "/opt/zapret2/binaries/linux-x86_64/nfqws2");
-        assert!(argv.contains(&format!("--fwmark=0x{:08X}", desync_mark())));
+        assert!(argv.contains(&fwmark_arg(desync_mark())));
     }
 
     #[test]
@@ -244,5 +259,32 @@ mod tests {
         let last_mark = plan.profiles().last().expect("план непуст").mark.index();
         assert_eq!(last_mark, 65535);
         assert_eq!(u32::from(last_mark), PROFILE_MASK);
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    /// ОДИН ПИСАТЕЛЬ НА ОДНО ЗНАНИЕ. Уборщик остатков узнаёт наш движок по этим самым
+    /// токенам; собирай он их сам — смена написания здесь оставила бы его слепым, а на
+    /// очереди остался бы живой процесс, которого никто больше не считает своим.
+    #[test]
+    fn the_argv_is_spelled_by_the_same_code_that_recognises_it() {
+        let env = Env {
+            binary: "/opt/zapret2/nfq2/nfqws2".into(),
+            lua: vec![],
+            uid: 65534,
+            gid: 65534,
+        };
+        let plan = Plan::from_strategies(
+            &FilterMark::granted(),
+            QueueNum::new(200),
+            &[vec!["--a".to_string()]],
+        );
+        let argv = plan.argv(&env);
+
+        assert!(argv.contains(&queue_arg(QueueNum::new(200))));
+        assert!(argv.contains(&fwmark_arg(desync_mark())));
     }
 }

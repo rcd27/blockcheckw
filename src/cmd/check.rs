@@ -4,6 +4,7 @@ use std::sync::Arc;
 use console::style;
 
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
+use blockcheckw::dto::{BrokenReason, CheckReport, Outcome, RunProvenance};
 use blockcheckw::network::patience::Patience;
 use blockcheckw::network::{dns, isp, via::Via};
 use blockcheckw::pipeline::{check, reference};
@@ -81,7 +82,14 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         Ok(s) => s,
         Err(e) => {
             screen.error(&format!("failed to read {}: {e}", style(from_file).cyan()));
-            std::process::exit(1);
+            fail_with(
+                BrokenReason::InputUnreadable,
+                domain,
+                output,
+                &config,
+                &dns_mode.to_string(),
+                &screen,
+            );
         }
     };
     rank::sort_by_simplicity(&mut strategies);
@@ -122,8 +130,17 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         }
         Err(e) => {
             screen.error(&e.to_string());
-            // TODO(BL-041): process::exit минует force_flush в main → span'ы сбоя теряются.
-            std::process::exit(1);
+            // ОТЧЁТ ПИШЕТСЯ И ПРИ ОТКАЗЕ. Прежде здесь был голый выход: продукт видел
+            // отсутствие файла, читал его как `Unreadable` и ждал молча, не зная, что
+            // сломалось имя, а не цель.
+            fail_with(
+                BrokenReason::DnsFailed,
+                domain,
+                output,
+                &config,
+                &dns_mode.to_string(),
+                &screen,
+            );
         }
     };
 
@@ -301,9 +318,10 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         format!("{prefix}_check.json")
     });
 
-    match std::fs::write(&path, &json) {
+    // Атомарно: отчёт читает ЧУЖОЙ процесс, и половина файла даёт ему `Unreadable` —
+    // суждения о цели из этого не выходит, человек просто ждёт.
+    match blockcheckw::system::atomic::write_atomic(std::path::Path::new(&path), &json) {
         Ok(()) => {
-            blockcheckw::system::elevate::chown_to_caller(&path);
             screen.println(&format!(
                 "  {} JSON report → {}",
                 style("OK").green().bold(),
@@ -333,4 +351,46 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
     if let Some(ref mgr) = stopped_service {
         restore_service(mgr, &screen).await;
     }
+}
+
+/// Записать отчёт о ПОЛОМКЕ ИНСТРУМЕНТА и выйти кодом этой поломки.
+///
+/// Зачем отдельной функцией: отказных путей несколько, а вести себя они обязаны одинаково.
+/// Молчаливый выход — худшее, что мы можем сделать для того, кто нас позвал: у него на руках
+/// остаётся отсутствие файла, неотличимое от «подбор ещё идёт», и он ждёт.
+fn fail_with(
+    reason: BrokenReason,
+    domain: &str,
+    output: Option<&str>,
+    config: &CoreConfig,
+    dns: &str,
+    screen: &ui::Console,
+) -> ! {
+    let outcome = Outcome::Broken { reason };
+    let code = outcome.exit_code();
+    let report = CheckReport {
+        schema: blockcheckw::dto::SCHEMA,
+        outcome,
+        run: RunProvenance::of(config, dns, blockcheckw::nfqws2::mark::is_embedded()),
+        domain: domain.to_string(),
+        timestamp: blockcheckw::pipeline::check::timestamp_iso(),
+        total: 0,
+        working: 0,
+        elapsed_secs: 0.0,
+        strategies: vec![],
+        control: None,
+        inconclusive: false,
+    };
+    let json = serde_json::to_string_pretty(&report).expect("report serialization");
+    let path = output.map(String::from).unwrap_or_else(|| {
+        let prefix = super::chrono_local_prefix();
+        format!("{prefix}_check.json")
+    });
+    if let Err(e) = blockcheckw::system::atomic::write_atomic(std::path::Path::new(&path), &json) {
+        screen.error(&format!(
+            "не удалось записать отчёт об отказе в {path}: {e}"
+        ));
+    }
+    // TODO(BL-041): process::exit минует force_flush в main → span'ы сбоя теряются.
+    std::process::exit(code);
 }

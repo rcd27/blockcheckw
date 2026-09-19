@@ -35,6 +35,12 @@ pub fn own_mark() -> u32 {
 /// Встроенный ли режим. Живёт в библиотеке, а не в бинаре: марку читают пробы, а они библиотечные.
 static EMBEDDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Встроены ли мы. Спрашивает отчёт: условия прогона — часть замера, а встроенность меняет
+/// и марку проб, и то, чьим ядром мы распоряжаемся.
+pub fn is_embedded() -> bool {
+    EMBEDDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Объявить встроенный режим (ставится разбором командной строки).
 pub fn set_embedded(embedded: bool) {
     EMBEDDED.store(embedded, std::sync::atomic::Ordering::Relaxed);

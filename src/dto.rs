@@ -7,6 +7,220 @@ use serde::{Deserialize, Serialize};
 
 use crate::pipeline::fate::Admits;
 
+// ── Контракт отчёта ──────────────────────────────────────────────────────────
+
+/// Версия формата отчёта. Инкрементируется при ЛОМАЮЩЕМ изменении: переименовании поля,
+/// смене его смысла, смене синтаксиса `args` (его разбирает потребитель).
+///
+/// Зачем: отчёт читает чужая программа, у которой нет компилятора, общего с нами. Пока
+/// версии не было, единственным способом узнать о сломанном контракте была поломка у
+/// читателя — то есть у человека.
+pub const SCHEMA: u32 = 1;
+
+/// Код выхода «боевая очередь занята». Отдельный от общего отказа преflight'а (6): для
+/// оркестратора это не «инструмент сломан», а «место занято» — лечится другой очередью
+/// (`--qnum`), а не починкой установки.
+pub const EXIT_QUEUE_BUSY: i32 = 7;
+
+/// ЧТО СЛУЧИЛОСЬ С ПРОГОНОМ. Четыре различимых исхода вместо булева `inconclusive`.
+///
+/// Продукт читает исход и решает, снимать ли лечение с цели. «Цель чиста» и «прибор не
+/// смог» — это разница между «человеку хорошо» и «человек остался без лечения из-за нашей
+/// поломки», и одним булевым полем она не выражается. 19.09.2026 не выразилась: отчёт
+/// сказал `inconclusive: true` при режущемся домене, и карантин был снят.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Outcome {
+    /// Контроль без десинка прошёл: домен на этой линии не режется. О стратегиях прогон
+    /// не говорит ничего — и хвалить десинк за доступность, которая была и без него, нельзя.
+    NotBlocked,
+    /// НАЙДЕНО. Есть рабочие стратегии — читать их в `strategies`.
+    ///
+    /// `stopped_at` назван, если поиск остановил предел (`--take`): это не цензура замера, а
+    /// его законный конец — мы нашли столько, сколько просили, и перестали искать. Но
+    /// читателю важно знать, что за остановкой могло быть ещё.
+    Found {
+        working: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stopped_at: Option<Limit>,
+    },
+    /// Корпус перебран ЦЕЛИКОМ, рабочих нет. Честный отрицательный ответ, а не молчание:
+    /// названо, сколько кандидатов проверено.
+    NothingWorks { candidates: usize },
+    /// Замер ОБРЕЗАН, и рабочих НЕ НАЙДЕНО — то есть мы не знаем, были ли они дальше.
+    ///
+    /// Отличается от `NothingWorks` ровно этим незнанием: там перебрали всё, здесь нет.
+    /// Говорит о приборе, а не о мире, и потому обязан назвать ИМЕННО тот предел, который
+    /// сработал: `--connect-timeout 4` уже давал «контроль 4036 мс» там, где бюджет в 20 с
+    /// давал 20014 мс.
+    Censored { limit: Limit },
+    /// Беда ИНСТРУМЕНТА. Ничего не говорит о цели — и не смеет быть прочитана как «чисто».
+    Broken { reason: BrokenReason },
+}
+
+/// Какой предел обрезал замер.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Limit {
+    /// Общий срок прогона (`--timeout` у `scan`, `--deadline` у `check`).
+    Deadline,
+    /// Поиск остановлен после N прошедших (`--take`).
+    Take,
+    /// Потолок одной пробы (`--timeout` у `check`).
+    ProbeTimeout,
+}
+
+/// Чем именно сломался инструмент. Каждое значение — своя починка у того, кто нас позвал.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokenReason {
+    /// nftables не принял наши правила.
+    Nft,
+    /// Нет `CAP_NET_ADMIN` — ни марок, ни очереди.
+    NoCapNetAdmin,
+    /// Боевая очередь занята чужим слушателем. Лечится другой очередью, не переустановкой.
+    QueueBusy { queue: u16 },
+    /// Имя не разрешилось.
+    DnsFailed,
+    /// Движок не поднялся или не забиндил очередь.
+    EngineStart,
+    /// Входной файл со стратегиями не прочитан.
+    InputUnreadable,
+}
+
+impl Outcome {
+    /// Говорит ли исход, что ЦЕЛЬ не нуждается в лечении.
+    ///
+    /// Истинно РОВНО для `NotBlocked`. Всё прочее — либо отсутствие рабочей стратегии, либо
+    /// обрезанный замер, либо наша поломка; ни одно из трёх не есть суждение о чистоте цели.
+    pub fn target_is_clean(&self) -> bool {
+        matches!(self, Outcome::NotBlocked)
+    }
+
+    /// Имя сработавшего предела — только у обрезанного замера.
+    pub fn limit_name(&self) -> Option<&'static str> {
+        match self {
+            Outcome::Censored { limit } => Some(match limit {
+                Limit::Deadline => "deadline",
+                Limit::Take => "take",
+                Limit::ProbeTimeout => "probe_timeout",
+            }),
+            _ => None,
+        }
+    }
+
+    /// Код выхода процесса. Ноль — прогон состоялся и отчёт осмыслен, даже если рабочих
+    /// стратегий не нашлось: отсутствие лекарства не есть поломка аптеки.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Outcome::NotBlocked
+            | Outcome::Found { .. }
+            | Outcome::NothingWorks { .. }
+            | Outcome::Censored { .. } => 0,
+            Outcome::Broken { reason } => match reason {
+                BrokenReason::Nft | BrokenReason::NoCapNetAdmin => 3,
+                BrokenReason::DnsFailed => 4,
+                BrokenReason::EngineStart => 5,
+                BrokenReason::InputUnreadable => 6,
+                BrokenReason::QueueBusy { .. } => EXIT_QUEUE_BUSY,
+            },
+        }
+    }
+}
+
+/// СОСТОЯНИЕ ПРОВЕРКИ ПОДМЕНЫ DNS. Трёхзначно, и это не придирка.
+///
+/// Замер заказчика на живой коробке 20.09.2026: `curl` там нет вовсе, а `doh_resolve`
+/// зовёт именно его. Значит DoH-сервер не находится НИКОГДА, сверка системного резолва с
+/// ним не происходит НИКОГДА — и прежнее булево поле сообщало `false`, то есть «подмены
+/// нет», там, где верно было «не проверяли». Прибор с нулевым множителем, выглядящий
+/// исправным; та же болезнь, что у `inconclusive`, и лечится так же.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsSpoofed {
+    /// Сверено с DoH: системный резолвер отдаёт то же самое.
+    Clean,
+    /// Сверено с DoH: системный резолвер отравлен.
+    Spoofed,
+    /// НЕ СВЕРЕНО. Не «чисто».
+    Unchecked,
+}
+
+/// ФАКТИЧЕСКИЕ параметры прогона — те, с которыми он шёл, а не те, что были заданы.
+///
+/// Зачем в отчёте: замер без своих условий — половина замера. Продукт, поднимающий подбор,
+/// задаёт ключи явно и мог бы записать их сам, но тогда он записал бы ЗАДУМАННОЕ, а отчёт
+/// должен нести СЛУЧИВШЕЕСЯ: умолчание, подхваченное из памяти прошлых запусков, откат на
+/// DoH при отравленном резолвере, урезанный потолок. Разница между этими двумя ровно там,
+/// где живут наши беды.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunProvenance {
+    /// Версия подборщика, породившего отчёт.
+    pub bcw_version: String,
+    /// Сколько проб в полёте.
+    pub workers: usize,
+    /// Сколько стратегий держалось в одном процессе движка.
+    pub profiles_per_instance: usize,
+    /// Режим разрешения имени, как он РАБОТАЛ (не как был задан).
+    pub dns: String,
+    /// Номер боевой очереди NFQUEUE.
+    pub qnum: u16,
+    /// Имя нашей nft-таблицы.
+    pub nft_table: String,
+    /// База марки воркера.
+    pub mark_base: String,
+    /// Марка десинка.
+    pub desync_mark: String,
+    /// Группа процессов — по ней оркестратор снимает подбор целиком.
+    pub process_group: i32,
+    /// Потолок одной пробы, секунды.
+    pub timeout_secs: u64,
+    /// Встроенный ли режим.
+    pub embedded: bool,
+    /// Сколько кандидатов перебрано.
+    pub tried: usize,
+    /// Сколько кандидатов было всего.
+    pub total: usize,
+    /// `--take`, если задан.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub take: Option<usize>,
+    /// `--top`, если задан (влияет ТОЛЬКО на печать, не на состав отчёта).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top: Option<usize>,
+    /// `--passes` (`M`), если применимо.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passes: Option<usize>,
+    /// Порог тишины пробы, миллисекунды, если применимо.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_ms: Option<u64>,
+}
+
+impl RunProvenance {
+    /// Провенанс из живой конфигурации. Марки печатаются шестнадцатерично: именно в таком
+    /// виде их читает и сверяет сосед по ядру.
+    pub fn of(config: &crate::config::CoreConfig, dns: &str, embedded: bool) -> Self {
+        RunProvenance {
+            bcw_version: env!("CARGO_PKG_VERSION").to_string(),
+            workers: config.worker_count,
+            profiles_per_instance: config.profiles_per_instance,
+            dns: dns.to_string(),
+            qnum: config.base_qnum,
+            nft_table: config.nft_table.clone(),
+            mark_base: format!("0x{:08X}", crate::nfqws2::mark::WORKER_MARK_BASE),
+            desync_mark: format!("0x{:08X}", crate::nfqws2::mark::DESYNC_MARK),
+            process_group: crate::system::group::own_group(),
+            timeout_secs: config.request_timeout,
+            embedded,
+            tried: 0,
+            total: 0,
+            take: None,
+            top: None,
+            passes: None,
+            idle_ms: None,
+        }
+    }
+}
+
 // ── Shared (used across commands) ────────────────────────────────────────────
 
 /// Single strategy entry for interchange between commands (scan → check pipe).
@@ -29,16 +243,27 @@ pub struct ScanProtocolResult {
 
 #[derive(Debug, Serialize)]
 pub struct ScanReport {
+    /// Версия формата. Первое поле намеренно: читатель, не знающий версии, не знает ничего.
+    pub schema: u32,
+    /// ЧТО СЛУЧИЛОСЬ С ПРОГОНОМ. Читать НАДО это, прежде чем читать `strategies`: пустой
+    /// список при `broken` и при `nothing_works` — разные вещи.
+    #[serde(flatten)]
+    pub outcome: Outcome,
+    /// Фактические условия прогона.
+    pub run: RunProvenance,
     pub domain: String,
     pub timestamp: String,
     /// Network-layer verdict (IP-blackhole vs SNI-block vs available/dns-failed).
     /// Lets a consumer route on the block kind without re-probing: `IpBlocked`
     /// means desync can't help (no handshake), `SniBlocked` means it can.
     pub block_type: BlockType,
-    /// System resolver confirmed poisoned (system DNS diverged from DoH). Orthogonal
-    /// to `block_type`, which is measured on the clean (DoH) IPs: a domain can be
-    /// `dns_spoofed` yet `not_blocked`. Signals "don't trust system DNS, use DoH".
-    pub dns_spoofed: bool,
+    /// Состояние проверки подмены DNS. Ортогонально `block_type`, который меряется по
+    /// чистым (DoH) адресам: домен может быть `spoofed` и при этом `not_blocked`.
+    ///
+    /// ТРИ значения, а не два: `unchecked` — сверка не состоялась (DoH-сервер не найден), и
+    /// читать это как «подмены нет» нельзя. На коробке без `curl` прежнее булево поле
+    /// сообщало `false` ВСЕГДА, ни разу ничего не сверив.
+    pub dns_spoofed: DnsSpoofed,
     pub total: usize,
     pub working: usize,
     /// Protocols that failed the no-bypass baseline (i.e. are DPI-blocked).
@@ -159,6 +384,13 @@ pub struct ControlVerdict {
 
 #[derive(Debug, Serialize)]
 pub struct CheckReport {
+    /// Версия формата отчёта.
+    pub schema: u32,
+    /// ЧТО СЛУЧИЛОСЬ С ПРОГОНОМ — читать прежде `strategies` и прежде `working`.
+    #[serde(flatten)]
+    pub outcome: Outcome,
+    /// Фактические условия прогона.
+    pub run: RunProvenance,
     pub domain: String,
     pub timestamp: String,
     pub total: usize,
@@ -176,6 +408,12 @@ pub struct CheckReport {
     pub control: Option<ControlVerdict>,
     /// Контроль без десинка сам ПРОШЁЛ — судимый той же мерой, что и стратегии
     /// (`fate::passed`): о стратегиях прогон не говорит ничего.
+    ///
+    /// УСТАРЕЛО, снимается в `schema: 2`. Ровно то же говорит `outcome: not_blocked`, и
+    /// говорит точнее: `inconclusive: false` не различает «перебрали и не нашли», «замер
+    /// обрезан» и «прибор сломан», а продукт по нему решает, снимать ли лечение. Поле
+    /// оставлено на одну версию, потому что у читателя есть работающий код, и ломать обе
+    /// половины контракта разом нельзя.
     pub inconclusive: bool,
 }
 
@@ -382,5 +620,174 @@ mod tests {
             BlockType::classify(true, false, false, None),
             BlockType::IpBlocked
         );
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    /// САМЫЙ ДОРОГОЙ ОТКАЗ КОНТРАКТА. Продукт читает исход и решает, снимать ли лечение;
+    /// поломка прибора, прочитанная как «цель чиста», оставляет человека без лечения — и
+    /// именно из-за НАШЕЙ поломки, а не из-за состояния сети.
+    #[test]
+    fn a_broken_instrument_is_never_a_clean_target() {
+        for reason in [
+            BrokenReason::Nft,
+            BrokenReason::NoCapNetAdmin,
+            BrokenReason::QueueBusy { queue: 200 },
+            BrokenReason::DnsFailed,
+            BrokenReason::EngineStart,
+            BrokenReason::InputUnreadable,
+        ] {
+            let broken = Outcome::Broken { reason };
+            assert!(
+                !broken.target_is_clean(),
+                "поломка прибора не есть суждение о цели: {broken:?}"
+            );
+            assert_ne!(broken.exit_code(), 0, "поломка обязана быть видна кодом");
+        }
+    }
+
+    /// «Ничего не подошло» — это ответ о МИРЕ, а не поломка: код выхода нулевой, и продукт
+    /// вправе ему верить. Но чистой цель от этого не становится.
+    #[test]
+    fn an_empty_search_is_an_answer_not_a_failure() {
+        let nothing = Outcome::NothingWorks { candidates: 121 };
+        assert_eq!(nothing.exit_code(), 0);
+        assert!(!nothing.target_is_clean());
+    }
+
+    /// Чистая цель — РОВНО один исход из четырёх.
+    #[test]
+    fn exactly_one_outcome_declares_the_target_clean() {
+        let all = [
+            Outcome::NotBlocked,
+            Outcome::Found {
+                working: 2,
+                stopped_at: None,
+            },
+            Outcome::NothingWorks { candidates: 0 },
+            Outcome::Censored {
+                limit: Limit::Deadline,
+            },
+            Outcome::Broken {
+                reason: BrokenReason::Nft,
+            },
+        ];
+        assert_eq!(all.iter().filter(|o| o.target_is_clean()).count(), 1);
+    }
+
+    /// Цензурированный замер говорит о ПРИБОРЕ и обязан назвать сработавший предел: иначе
+    /// «мы не досмотрели» неотличимо от «там ничего нет».
+    #[test]
+    fn a_censored_run_names_the_limit_that_cut_it() {
+        assert_eq!(
+            Outcome::Censored {
+                limit: Limit::Deadline
+            }
+            .limit_name(),
+            Some("deadline")
+        );
+        assert_eq!(
+            Outcome::Censored { limit: Limit::Take }.limit_name(),
+            Some("take")
+        );
+        assert_eq!(Outcome::NotBlocked.limit_name(), None);
+        assert_eq!(
+            Outcome::NothingWorks { candidates: 3 }.limit_name(),
+            None,
+            "полный перебор ничем не обрезан — предела назвать нельзя"
+        );
+    }
+
+    /// Занятая очередь лечится другой очередью, а не переустановкой, — и потому носит
+    /// собственный код, отличный от общего отказа преflight'а.
+    #[test]
+    fn a_busy_queue_has_its_own_exit_code() {
+        let busy = Outcome::Broken {
+            reason: BrokenReason::QueueBusy { queue: 200 },
+        };
+        assert_eq!(busy.exit_code(), EXIT_QUEUE_BUSY);
+        assert_ne!(busy.exit_code(), 6, "это не общий отказ преflight'а");
+    }
+
+    /// Исход едет в JSON плоско: `outcome` — строка, подробности рядом. Читателю не нужно
+    /// разбирать вложенный объект, чтобы узнать главное.
+    #[test]
+    fn the_outcome_serialises_flat_for_a_reader_without_a_compiler() {
+        let json = serde_json::to_string(&Outcome::Broken {
+            reason: BrokenReason::QueueBusy { queue: 200 },
+        })
+        .expect("исход сериализуем");
+        assert!(json.contains(r#""outcome":"broken""#), "{json}");
+        assert!(json.contains(r#""queue":200"#), "{json}");
+
+        let clean = serde_json::to_string(&Outcome::NotBlocked).expect("исход сериализуем");
+        assert_eq!(clean, r#"{"outcome":"not_blocked"}"#);
+    }
+
+    /// «Не проверяли» не есть «чисто». Прежнее булево поле их не различало, и на коробке
+    /// без `curl` сверка не происходила НИ РАЗУ, сообщая при этом «подмены нет».
+    #[test]
+    fn an_unchecked_dns_is_not_reported_as_clean() {
+        assert_ne!(DnsSpoofed::Unchecked, DnsSpoofed::Clean);
+        assert_eq!(
+            serde_json::to_string(&DnsSpoofed::Unchecked).expect("сериализуемо"),
+            r#""unchecked""#
+        );
+    }
+}
+
+#[cfg(test)]
+mod found_tests {
+    use super::*;
+
+    /// УСПЕХ И ЦЕНЗУРА — РАЗНЫЕ ВЕЩИ, и `--take` их не смешивает. Остановка после трёх
+    /// найденных есть законный конец поиска, а не «мы не досмотрели»: читатель, увидевший
+    /// `censored`, решал бы, что замер испорчен, тогда как лечение уже найдено.
+    #[test]
+    fn stopping_on_take_with_results_is_success_not_censorship() {
+        let found = Outcome::Found {
+            working: 3,
+            stopped_at: Some(Limit::Take),
+        };
+        assert_eq!(found.exit_code(), 0);
+        assert!(
+            !found.target_is_clean(),
+            "нашли лекарство — значит цель больна"
+        );
+
+        let json = serde_json::to_string(&found).expect("сериализуемо");
+        assert!(json.contains(r#""outcome":"found""#), "{json}");
+        assert!(json.contains(r#""stopped_at":"take""#), "{json}");
+    }
+
+    /// А вот обрезанный замер БЕЗ находок — это незнание, и оно обязано отличаться от
+    /// полного перебора с тем же пустым списком.
+    #[test]
+    fn a_cut_search_without_results_is_not_the_same_as_a_complete_one() {
+        let censored = Outcome::Censored {
+            limit: Limit::Deadline,
+        };
+        let complete = Outcome::NothingWorks { candidates: 121 };
+        assert_ne!(censored, complete);
+        assert_eq!(censored.limit_name(), Some("deadline"));
+        assert_eq!(
+            complete.limit_name(),
+            None,
+            "полный перебор ничем не обрезан"
+        );
+    }
+
+    /// Полный перебор с находками предела не называет — называть нечего.
+    #[test]
+    fn a_complete_search_with_results_names_no_limit() {
+        let json = serde_json::to_string(&Outcome::Found {
+            working: 2,
+            stopped_at: None,
+        })
+        .expect("сериализуемо");
+        assert_eq!(json, r#"{"outcome":"found","working":2}"#);
     }
 }

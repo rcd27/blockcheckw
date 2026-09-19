@@ -4,7 +4,10 @@ use console::style;
 use tracing::{info_span, Instrument};
 
 use crate::config::{CoreConfig, Protocol};
-use crate::dto::{CheckReport, CheckedStrategy, ControlVerdict, VerifiedStrategy};
+use crate::dto::{
+    BrokenReason, CheckReport, CheckedStrategy, ControlVerdict, Limit, Outcome, RunProvenance,
+    VerifiedStrategy,
+};
 use crate::firewall::nft::{OwnedTable, SystemNft};
 use crate::firewall::nftables;
 use crate::network::http_client::{http_probe, pick_random_ip, BodyMode, Ended, HttpResult};
@@ -15,7 +18,9 @@ use crate::nfqws2::run::SystemNfqws2;
 use crate::pipeline::fate::{self, Admits, Fate, Observed, ALL_FATES};
 use crate::pipeline::observe;
 use crate::pipeline::reference::{agrees, ContentPrint, Reference, References};
-use crate::pipeline::verify::{self, Outcome};
+// `verify::Outcome` — исход ОДНОГО прохода пробы, `dto::Outcome` — исход ВСЕГО прогона.
+// Имена совпали, предметы разные; разводим их у места ввоза, а не по месту чтения.
+use crate::pipeline::verify::{self, Outcome as PassOutcome};
 use crate::strategy::generator::TaggedStrategy;
 use crate::strategy::rank;
 use crate::ui;
@@ -54,6 +59,9 @@ pub async fn run_check(
     screen: &mut ui::Console,
 ) -> CheckReport {
     let start = Instant::now();
+    // Провенанс снимается ДО первой возможной поломки: отчёт об отказе обязан нести условия
+    // прогона так же, как отчёт об успехе, — иначе о самой частой беде мы знаем меньше всего.
+    let provenance = RunProvenance::of(config, "—", crate::nfqws2::mark::is_embedded());
 
     let table = match nftables::prepare_table(&SystemNft, &config.nft_table).await {
         Ok(t) => t,
@@ -62,7 +70,15 @@ pub async fn run_check(
                 "  {} failed to prepare nftables: {e}",
                 style("ERROR:").red().bold(),
             ));
+            // ПОЛОМКА ПРИБОРА, а не суждение о цели. Прежде здесь уходил отчёт с пустым
+            // списком и `inconclusive: false` — неотличимый от «перебрали и не нашли», по
+            // которому продукт снимал лечение из-за НАШЕЙ беды.
             return CheckReport {
+                schema: crate::dto::SCHEMA,
+                outcome: Outcome::Broken {
+                    reason: BrokenReason::Nft,
+                },
+                run: provenance.clone(),
                 domain: domain.to_string(),
                 timestamp: timestamp_iso(),
                 total: strategies.len(),
@@ -155,7 +171,7 @@ pub async fn run_check(
     // Раскладка корпуса по устойчивости (решение 7 спеки §6-тер): строка на стратегию,
     // исход на каждый из `M` проходов байтовой оси. `stability_of`/`report_stability`
     // были сохранены ровно для этого, когда их вызов сняли при `passes == 1`.
-    let mut rows: Vec<Vec<Outcome>> = Vec::new();
+    let mut rows: Vec<Vec<PassOutcome>> = Vec::new();
 
     for (idx, tagged) in strategies.iter().enumerate() {
         // Skip this protocol if we already have enough perfect strategies
@@ -318,7 +334,22 @@ pub async fn run_check(
     // Cleanup
     let _ = table.drop_table(&SystemNft).await;
 
+    let mut run = provenance;
+    run.tried = checked_count;
+    run.total = strategies.len();
+    run.take = (take > 0).then_some(take);
+    run.passes = Some(passes);
+
     CheckReport {
+        schema: crate::dto::SCHEMA,
+        outcome: outcome_of(OutcomeInput {
+            inconclusive,
+            working: working_count,
+            checked: checked_count,
+            total: strategies.len(),
+            take,
+        }),
+        run,
         domain: domain.to_string(),
         timestamp: timestamp_iso(),
         total: checked_count,
@@ -327,6 +358,47 @@ pub async fn run_check(
         strategies: verified,
         control,
         inconclusive,
+    }
+}
+
+/// Из чего выводится исход прогона `check`.
+struct OutcomeInput {
+    /// Контроль без десинка сам прошёл.
+    inconclusive: bool,
+    /// Сколько стратегий ПРОШЛО.
+    working: usize,
+    /// Сколько кандидатов реально проверено.
+    checked: usize,
+    /// Сколько их было всего.
+    total: usize,
+    /// `--take`, 0 — не задан.
+    take: usize,
+}
+
+/// ИСХОД ПРОГОНА — то, по чему продукт решает, снимать ли лечение.
+///
+/// Порядок ветвей несёт смысл и потому зафиксирован тестами:
+/// 1. контроль прошёл — о стратегиях прогон молчит, что бы мы ни намерили;
+/// 2. есть рабочие — успех, и `--take` при этом законный конец поиска, а не цензура;
+/// 3. рабочих нет, но перебрали ВСЁ — честное «ничего не подошло»;
+/// 4. рабочих нет и перебрали не всё — незнание, и оно обязано называться иначе.
+fn outcome_of(input: OutcomeInput) -> Outcome {
+    if input.inconclusive {
+        return Outcome::NotBlocked;
+    }
+    if input.working > 0 {
+        return Outcome::Found {
+            working: input.working,
+            stopped_at: (input.take > 0 && input.working >= input.take).then_some(Limit::Take),
+        };
+    }
+    match input.checked >= input.total {
+        true => Outcome::NothingWorks {
+            candidates: input.checked,
+        },
+        false => Outcome::Censored {
+            limit: Limit::Deadline,
+        },
     }
 }
 
@@ -544,8 +616,8 @@ async fn measure_channel(
 
         if let Some(index) = log_index {
             let outcome = match &reason {
-                None => Outcome::Passed,
-                Some(name) => Outcome::Failed(name.clone()),
+                None => PassOutcome::Passed,
+                Some(name) => PassOutcome::Failed(name.clone()),
             };
             verify::log_pass(started_at, index, pass_idx + 1, &outcome);
         }
@@ -585,7 +657,7 @@ async fn check_single_strategy(
     probe_path: &str,
     identity_path: &str,
     log_index: usize,
-) -> (CheckedStrategy, Vec<Outcome>) {
+) -> (CheckedStrategy, Vec<PassOutcome>) {
     let protocol = tagged.protocol;
     let args_str = tagged.args.join(" ");
 
@@ -678,12 +750,12 @@ async fn check_single_strategy(
     SystemNfqws2::stop(instance).await;
 
     // 6. Свести обе пробы в строку отчёта.
-    let outcomes: Vec<Outcome> = reading
+    let outcomes: Vec<PassOutcome> = reading
         .byte_passes
         .iter()
         .map(|p| match &p.reason {
-            None => Outcome::Passed,
-            Some(name) => Outcome::Failed(name.clone()),
+            None => PassOutcome::Passed,
+            Some(name) => PassOutcome::Failed(name.clone()),
         })
         .collect();
 
@@ -831,7 +903,9 @@ fn extract_redirect_location(headers: &str) -> String {
         .unwrap_or_default()
 }
 
-fn timestamp_iso() -> String {
+/// Отметка времени отчёта. Публична, потому что отказной путь `cmd::check` собирает отчёт
+/// сам — до того, как пайплайн вообще начался.
+pub fn timestamp_iso() -> String {
     crate::pipeline::test_report::chrono_like_timestamp()
 }
 
@@ -1070,6 +1144,9 @@ mod tests {
     #[test]
     fn test_check_report_serialization() {
         let report = CheckReport {
+            schema: crate::dto::SCHEMA,
+            outcome: Outcome::NothingWorks { candidates: 0 },
+            run: RunProvenance::of(&CoreConfig::default(), "auto", false),
             domain: "rutracker.org".to_string(),
             timestamp: "2026-03-21T12:00:00+03:00".to_string(),
             total: 2,
@@ -1102,6 +1179,9 @@ mod tests {
             working: true,
         };
         let report = CheckReport {
+            schema: crate::dto::SCHEMA,
+            outcome: Outcome::NothingWorks { candidates: 0 },
+            run: RunProvenance::of(&CoreConfig::default(), "auto", false),
             domain: "rutracker.org".to_string(),
             timestamp: "2026-03-21T12:00:00+03:00".to_string(),
             total: 5,
@@ -1260,6 +1340,9 @@ mod tests {
         // На роутере нет jq: итог пайпа человек читает глазами, и в нём не место
         // наблюдённым, но не прошедшим строкам. Порядок внутри протокола — ранг отчёта.
         let report = CheckReport {
+            schema: crate::dto::SCHEMA,
+            outcome: Outcome::NothingWorks { candidates: 0 },
+            run: RunProvenance::of(&CoreConfig::default(), "auto", false),
             domain: "rutracker.org".to_string(),
             timestamp: String::new(),
             total: 4,

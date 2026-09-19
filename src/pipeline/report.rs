@@ -8,8 +8,8 @@ use std::fmt::Write as _;
 
 use crate::config::Protocol;
 use crate::dto::{
-    BlockType, ScanProtocolResult, ScanReport, StrategyEntry, UniversalProtocolResult,
-    UniversalReport, UniversalStrategy,
+    BlockType, DnsSpoofed, Outcome, RunProvenance, ScanProtocolResult, ScanReport, StrategyEntry,
+    UniversalProtocolResult, UniversalReport, UniversalStrategy,
 };
 use crate::pipeline::test_report;
 
@@ -22,14 +22,33 @@ pub struct ProtocolSummary {
     pub strategies: Vec<Vec<String>>,
 }
 
+/// Из чего собирается отчёт скана.
+///
+/// Структурой, а не списком аргументов: их стало семь, и позиционный вызов с двумя
+/// соседними булевыми — приглашение перепутать их местами молча.
+pub struct ScanReportInput<'a> {
+    pub domain: &'a str,
+    pub block_type: BlockType,
+    pub dns_spoofed: DnsSpoofed,
+    pub blocked: &'a [Protocol],
+    pub summary: &'a [ProtocolSummary],
+    /// ЧТО СЛУЧИЛОСЬ С ПРОГОНОМ. Читается потребителем прежде `strategies`.
+    pub outcome: Outcome,
+    /// Фактические условия прогона.
+    pub run: RunProvenance,
+}
+
 /// Build scan JSON report from intermediate results. Returns (json, strategy_count).
-pub fn build_scan_report(
-    domain: &str,
-    block_type: BlockType,
-    dns_spoofed: bool,
-    blocked: &[Protocol],
-    summary: &[ProtocolSummary],
-) -> (String, usize) {
+pub fn build_scan_report(input: ScanReportInput<'_>) -> (String, usize) {
+    let ScanReportInput {
+        domain,
+        block_type,
+        dns_spoofed,
+        blocked,
+        summary,
+        outcome,
+        mut run,
+    } = input;
     let timestamp = test_report::chrono_like_timestamp();
     let mut total = 0;
 
@@ -63,7 +82,12 @@ pub fn build_scan_report(
         })
         .collect();
 
+    run.total = total;
+    run.tried = total;
     let report = ScanReport {
+        schema: crate::dto::SCHEMA,
+        outcome,
+        run,
         domain: domain.to_string(),
         timestamp,
         block_type,
@@ -219,15 +243,40 @@ pub fn build_cleaned_domain_list(
 mod tests {
     use super::*;
 
+    /// Отчёт скана с умолчаниями теста: предмет проверок ниже — состав отчёта, а не исход
+    /// и не условия прогона, поэтому они задаются одним местом.
+    fn input<'a>(
+        domain: &'a str,
+        block_type: BlockType,
+        dns_spoofed: DnsSpoofed,
+        blocked: &'a [Protocol],
+        summary: &'a [ProtocolSummary],
+    ) -> ScanReportInput<'a> {
+        ScanReportInput {
+            domain,
+            block_type,
+            dns_spoofed,
+            blocked,
+            summary,
+            outcome: Outcome::NothingWorks { candidates: 0 },
+            run: RunProvenance::of(&crate::config::CoreConfig::default(), "auto", false),
+        }
+    }
+
     #[test]
     fn scan_report_not_blocked_has_empty_blocked_list() {
-        let (json, count) =
-            build_scan_report("example.com", BlockType::NotBlocked, false, &[], &[]);
+        let (json, count) = build_scan_report(input(
+            "example.com",
+            BlockType::NotBlocked,
+            DnsSpoofed::Unchecked,
+            &[],
+            &[],
+        ));
         assert_eq!(count, 0);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["blocked"].as_array().unwrap().len(), 0);
         assert_eq!(v["strategies"].as_array().unwrap().len(), 0);
-        assert_eq!(v["dns_spoofed"], false);
+        assert_eq!(v["dns_spoofed"], "unchecked");
     }
 
     #[test]
@@ -238,13 +287,13 @@ mod tests {
             protocol: Protocol::HttpsTls12,
             strategies: vec![],
         }];
-        let (json, count) = build_scan_report(
+        let (json, count) = build_scan_report(input(
             "example.com",
             BlockType::SniBlocked,
-            false,
+            DnsSpoofed::Clean,
             &[Protocol::HttpsTls12],
             &summary,
-        );
+        ));
         assert_eq!(count, 0);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["blocked"], serde_json::json!(["HTTPS/TLS1.2"]));
@@ -255,25 +304,69 @@ mod tests {
     fn scan_report_includes_block_type() {
         // block_type is the network-layer verdict (IP-blackhole vs SNI-block) a
         // consumer reads straight from the scan output. Serialized snake_case.
-        let (json, _) = build_scan_report(
+        let (json, _) = build_scan_report(input(
             "example.com",
             crate::dto::BlockType::IpBlocked,
-            false,
+            DnsSpoofed::Clean,
             &[Protocol::HttpsTls12],
             &[],
-        );
+        ));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["block_type"], "ip_blocked");
     }
 
     #[test]
-    fn scan_report_carries_dns_spoofed_flag() {
-        // dns_spoofed is orthogonal to block_type: poisoned system DNS, yet the
-        // verdict is measured on clean DoH IPs. Here: spoofed but not_blocked.
-        let (json, _) = build_scan_report("example.com", BlockType::NotBlocked, true, &[], &[]);
+    fn scan_report_carries_dns_spoofed_state() {
+        // dns_spoofed ортогонально block_type: резолвер отравлен, а вердикт снят по чистым
+        // DoH-адресам. Здесь: подмена есть, блокировки нет.
+        let (json, _) = build_scan_report(input(
+            "example.com",
+            BlockType::NotBlocked,
+            DnsSpoofed::Spoofed,
+            &[],
+            &[],
+        ));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["dns_spoofed"], true);
+        assert_eq!(v["dns_spoofed"], "spoofed");
         assert_eq!(v["block_type"], "not_blocked");
+    }
+
+    /// Контракт с продуктом: версия формата, исход и условия прогона обязаны быть в КАЖДОМ
+    /// отчёте. Читатель, который их не нашёл, не знает ни что читает, ни что случилось.
+    #[test]
+    fn every_report_carries_schema_outcome_and_provenance() {
+        let (json, _) = build_scan_report(input(
+            "example.com",
+            BlockType::SniBlocked,
+            DnsSpoofed::Clean,
+            &[Protocol::HttpsTls12],
+            &[],
+        ));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(v["schema"], crate::dto::SCHEMA);
+        assert_eq!(v["outcome"], "nothing_works");
+        for field in [
+            "bcw_version",
+            "workers",
+            "profiles_per_instance",
+            "dns",
+            "qnum",
+            "nft_table",
+            "mark_base",
+            "desync_mark",
+            "process_group",
+            "embedded",
+            "tried",
+            "total",
+        ] {
+            assert!(
+                !v["run"][field].is_null(),
+                "провенанс обязан нести {field}: замер без своих условий — половина замера"
+            );
+        }
+        assert_eq!(v["run"]["qnum"], 200);
+        assert_eq!(v["run"]["mark_base"], "0x20000000");
     }
 
     #[test]
@@ -282,13 +375,13 @@ mod tests {
             protocol: Protocol::HttpsTls12,
             strategies: vec![vec!["--payload=tls_client_hello".to_string()]],
         }];
-        let (json, count) = build_scan_report(
+        let (json, count) = build_scan_report(input(
             "example.com",
             BlockType::SniBlocked,
-            false,
+            DnsSpoofed::Clean,
             &[Protocol::HttpsTls12],
             &summary,
-        );
+        ));
         assert_eq!(count, 1);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["blocked"], serde_json::json!(["HTTPS/TLS1.2"]));

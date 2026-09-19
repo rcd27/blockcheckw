@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
 use crate::config::DnsMode;
+use crate::dto::DnsSpoofed;
 use crate::error::BlockcheckError;
 use crate::network::doh;
 use crate::system::process::run_process;
@@ -29,11 +30,23 @@ pub enum DnsSpoofResult {
     CheckFailed { reason: String },
 }
 
-/// True only when the system resolver is confirmed poisoned (system DNS diverges
-/// from DoH on a known-blocked domain). `CheckFailed` (couldn't compare) and
-/// `Clean` are NOT spoofing — an unverifiable check must never raise a false alarm.
-pub fn is_dns_spoofed(spoof: Option<&DnsSpoofResult>) -> bool {
-    matches!(spoof, Some(DnsSpoofResult::Spoofed { .. }))
+/// СОСТОЯНИЕ проверки подмены — три значения, а не булево.
+///
+/// Прежнее `is_dns_spoofed` отвечало `false` и на «сверили, чисто», и на «сверить не
+/// смогли», и на «сверку не начинали». Для тревоги этого хватало (неподтверждённая подмена
+/// не смеет поднимать ложную тревогу — это верно и остаётся), но в ОТЧЁТ уходило
+/// «подмены нет», и читатель не мог отличить показание от его отсутствия.
+///
+/// Цена была измерена у заказчика 20.09.2026: на коробке нет `curl`, а `doh_resolve` зовёт
+/// именно его — значит DoH-сервер не находится никогда, сверка не происходит никогда, и
+/// поле сообщало «чисто» при НУЛЕ проведённых проверок.
+pub fn spoof_state(spoof: Option<&DnsSpoofResult>) -> DnsSpoofed {
+    match spoof {
+        Some(DnsSpoofResult::Spoofed { .. }) => DnsSpoofed::Spoofed,
+        Some(DnsSpoofResult::Clean) => DnsSpoofed::Clean,
+        // Сверка начиналась, но не состоялась — это «не проверено», а не «чисто».
+        Some(DnsSpoofResult::CheckFailed { .. }) | None => DnsSpoofed::Unchecked,
+    }
 }
 
 #[derive(Debug)]
@@ -325,27 +338,39 @@ mod tests {
     }
 
     #[test]
-    fn spoofed_is_dns_spoofed() {
-        assert!(is_dns_spoofed(Some(&DnsSpoofResult::Spoofed {
-            details: "system≠doh".to_string()
-        })));
+    fn a_confirmed_divergence_is_spoofing() {
+        assert_eq!(
+            spoof_state(Some(&DnsSpoofResult::Spoofed {
+                details: "system≠doh".to_string()
+            })),
+            DnsSpoofed::Spoofed
+        );
     }
 
     #[test]
-    fn clean_is_not_dns_spoofed() {
-        assert!(!is_dns_spoofed(Some(&DnsSpoofResult::Clean)));
+    fn a_completed_comparison_is_clean() {
+        assert_eq!(spoof_state(Some(&DnsSpoofResult::Clean)), DnsSpoofed::Clean);
     }
 
+    /// НЕ СМОГЛИ СВЕРИТЬ — не «чисто». Тревогу это по-прежнему не поднимает (подмена не
+    /// подтверждена), но и показанием не притворяется.
     #[test]
-    fn check_failed_is_not_dns_spoofed() {
-        // Couldn't verify ≠ poisoned — must not raise a false spoofing alarm.
-        assert!(!is_dns_spoofed(Some(&DnsSpoofResult::CheckFailed {
-            reason: "no DoH server".to_string()
-        })));
+    fn a_failed_comparison_is_unchecked_not_clean() {
+        let state = spoof_state(Some(&DnsSpoofResult::CheckFailed {
+            reason: "no DoH server".to_string(),
+        }));
+        assert_eq!(state, DnsSpoofed::Unchecked);
+        assert_ne!(
+            state,
+            DnsSpoofed::Clean,
+            "отсутствие сверки — не результат сверки"
+        );
     }
 
+    /// И сверки, которой не было вовсе, тоже: на коробке без `curl` это единственный
+    /// возможный исход, и он наступал каждый раз.
     #[test]
-    fn absent_check_is_not_dns_spoofed() {
-        assert!(!is_dns_spoofed(None));
+    fn a_comparison_that_never_happened_is_unchecked() {
+        assert_eq!(spoof_state(None), DnsSpoofed::Unchecked);
     }
 }

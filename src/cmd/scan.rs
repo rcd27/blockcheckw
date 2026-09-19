@@ -3,7 +3,7 @@ use std::sync::Arc;
 use console::style;
 
 use blockcheckw::config::{CoreConfig, DnsMode, Protocol};
-use blockcheckw::dto::BlockType;
+use blockcheckw::dto::{BlockType, BrokenReason, DnsSpoofed, Limit, Outcome, RunProvenance};
 use blockcheckw::error::TaskResult;
 use blockcheckw::firewall::nft::{OwnedTableMarker, SystemNft};
 use blockcheckw::firewall::nftables;
@@ -13,6 +13,7 @@ use blockcheckw::network::http_client::{
     DATA_TRANSFER_MIN_BYTES,
 };
 use blockcheckw::network::{dns, isp, via::Via};
+use blockcheckw::nfqws2::mark;
 use blockcheckw::pipeline::baseline;
 use blockcheckw::pipeline::report::{self, ProtocolSummary};
 use blockcheckw::pipeline::runner::{run_parallel, RunParams};
@@ -157,13 +158,28 @@ pub async fn run_scan(params: ScanParams<'_>) {
 
             // Orthogonal to block_type: system DNS poisoned but the scan continues
             // on the clean (DoH) IPs resolve_domain fell back to. Reported as a flag.
-            let spoofed = dns::is_dns_spoofed(resolution.spoof_result.as_ref());
+            let spoofed = dns::spoof_state(resolution.spoof_result.as_ref());
             (resolution.ips, spoofed)
         }
         Err(e) => {
             screen.error(&e.to_string());
+            // ОТЧЁТ И ПРИ ОТКАЗЕ: молчаливый выход неотличим для продукта от «подбор идёт».
+            let outcome = Outcome::Broken {
+                reason: BrokenReason::DnsFailed,
+            };
+            let code = outcome.exit_code();
+            let (json, _) = report::build_scan_report(report::ScanReportInput {
+                domain,
+                block_type: BlockType::DnsFailed,
+                dns_spoofed: DnsSpoofed::Unchecked,
+                blocked: &[],
+                summary: &[],
+                outcome,
+                run: RunProvenance::of(&config, &dns_mode.to_string(), mark::is_embedded()),
+            });
+            let _ = write_report(&format!("{}_scan.json", chrono_local_prefix()), &json);
             // TODO(BL-041): process::exit минует force_flush в main → span'ы сбоя теряются.
-            std::process::exit(1);
+            std::process::exit(code);
         }
     };
 
@@ -255,8 +271,16 @@ pub async fn run_scan(params: ScanParams<'_>) {
         // отличает «не заблокирован» от «заблокирован, но обход не найден»
         // (оба дают пустой strategies). Без этого демон видит пустой stdout
         // и ошибочно гонит check на пустом файле.
-        let (scan_json, _) =
-            report::build_scan_report(domain, block_type, dns_spoofed, &blocked_protocols, &[]);
+        let (scan_json, _) = report::build_scan_report(report::ScanReportInput {
+            domain,
+            block_type,
+            dns_spoofed,
+            blocked: &blocked_protocols,
+            summary: &[],
+            // Базовая проба прошла по всем протоколам: домен на этой линии не режется.
+            outcome: Outcome::NotBlocked,
+            run: RunProvenance::of(&config, &dns_mode.to_string(), mark::is_embedded()),
+        });
         super::print_stdout_graceful(&scan_json, &screen);
         // Restore routes + zapret2 before early return
         if let Some(v) = via {
@@ -333,6 +357,9 @@ pub async fn run_scan(params: ScanParams<'_>) {
     // 3. Scan each blocked protocol
     let mut summary: Vec<ProtocolSummary> = Vec::new();
     let mut timed_out = false;
+    // Сколько кандидатов реально проверено — идёт и в провенанс, и в исход: «перебрали всё и
+    // не нашли» отличается от «не досмотрели» именно этим числом.
+    let tried_total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let scan_future = async {
         for &protocol in &blocked_protocols {
@@ -405,6 +432,7 @@ pub async fn run_scan(params: ScanParams<'_>) {
             .instrument(proto_span.clone())
             .await;
             proto_span.record("total", stats.completed);
+            tried_total.fetch_add(stats.completed, std::sync::atomic::Ordering::Relaxed);
             proto_span.record("success", stats.successes);
             proto_span.record("failed", stats.failures);
 
@@ -537,13 +565,17 @@ pub async fn run_scan(params: ScanParams<'_>) {
         )),
     }
 
-    let (content, count) = report::build_scan_report(
+    let tried = tried_total.load(std::sync::atomic::Ordering::Relaxed);
+    let outcome = scan_outcome(timed_out, &summary, tried);
+    let (content, count) = report::build_scan_report(report::ScanReportInput {
         domain,
         block_type,
         dns_spoofed,
-        &blocked_protocols,
-        &summary,
-    );
+        blocked: &blocked_protocols,
+        summary: &summary,
+        outcome: outcome.clone(),
+        run: RunProvenance::of(&config, &dns_mode.to_string(), mark::is_embedded()),
+    });
     let scan_path = format!("{now}_scan.json");
     match write_report(&scan_path, &content) {
         Ok(()) => screen.println(&format!(
@@ -559,13 +591,15 @@ pub async fn run_scan(params: ScanParams<'_>) {
     }
 
     // 7. JSON to stdout (for pipe support) — after artifacts are saved
-    let (scan_json, _) = report::build_scan_report(
+    let (scan_json, _) = report::build_scan_report(report::ScanReportInput {
         domain,
         block_type,
         dns_spoofed,
-        &blocked_protocols,
-        &summary,
-    );
+        blocked: &blocked_protocols,
+        summary: &summary,
+        outcome,
+        run: RunProvenance::of(&config, &dns_mode.to_string(), mark::is_embedded()),
+    });
     super::print_stdout_graceful(&scan_json, &screen);
     screen.newline();
 
@@ -596,12 +630,36 @@ pub async fn run_scan(params: ScanParams<'_>) {
     }
 }
 
+/// Сколько рабочих стратегий найдено суммарно по протоколам.
+fn found_in(summary: &[ProtocolSummary]) -> usize {
+    summary.iter().map(|entry| entry.strategies.len()).sum()
+}
+
+/// ИСХОД СКАНА.
+///
+/// Сюда не попадает `NotBlocked`: он решается раньше, базовой пробой, и до перебора дело
+/// не доходит вовсе. Здесь различаются три оставшихся случая, и различает их полнота
+/// перебора: оборванный по сроку прогон, ничего не нашедший, НЕ вправе утверждать, что
+/// стратегий нет, — он не досмотрел.
+fn scan_outcome(timed_out: bool, summary: &[ProtocolSummary], tried: usize) -> Outcome {
+    match (found_in(summary), timed_out) {
+        (0, true) => Outcome::Censored {
+            limit: Limit::Deadline,
+        },
+        (0, false) => Outcome::NothingWorks { candidates: tried },
+        (working, timed_out) => Outcome::Found {
+            working,
+            stopped_at: timed_out.then_some(Limit::Deadline),
+        },
+    }
+}
+
 // ── Report I/O ──────────────────────────────────────────────────────────────
 
 fn write_report(path: &str, content: &str) -> std::io::Result<()> {
-    std::fs::write(path, content)?;
-    blockcheckw::system::elevate::chown_to_caller(path);
-    Ok(())
+    // Атомарно (tmp + rename): отчёт читает продукт, поднявший подбор, и половина файла
+    // даёт ему `Unreadable` — то есть человека, который ждёт, не зная чего.
+    blockcheckw::system::atomic::write_atomic(std::path::Path::new(path), content)
 }
 
 /// Paths and count produced by [`write_scan_reports`].
@@ -617,7 +675,7 @@ pub(crate) fn write_scan_reports(
     domain: &str,
     output: Option<&str>,
     block_type: BlockType,
-    dns_spoofed: bool,
+    dns_spoofed: DnsSpoofed,
     blocked: &[blockcheckw::config::Protocol],
     summary: &[ProtocolSummary],
 ) -> std::io::Result<WrittenReports> {
@@ -631,8 +689,29 @@ pub(crate) fn write_scan_reports(
     let (content, _) = report::build_vanilla_report(domain, summary);
     write_report(&format!("{now}_report_vanilla.txt"), &content)?;
 
-    let (content, count) =
-        report::build_scan_report(domain, block_type, dns_spoofed, blocked, summary);
+    // Прогон оборван сигналом — это ЦЕНЗУРА замера, а не суждение о мире: найденное
+    // сохраняем, но утверждать «ничего нет» не вправе.
+    let (content, count) = report::build_scan_report(report::ScanReportInput {
+        domain,
+        block_type,
+        dns_spoofed,
+        blocked,
+        summary,
+        outcome: match found_in(summary) {
+            0 => Outcome::Censored {
+                limit: Limit::Deadline,
+            },
+            working => Outcome::Found {
+                working,
+                stopped_at: Some(Limit::Deadline),
+            },
+        },
+        run: RunProvenance::of(
+            &blockcheckw::config::CoreConfig::default(),
+            "—",
+            mark::is_embedded(),
+        ),
+    });
     let scan_path = format!("{now}_scan.json");
     write_report(&scan_path, &content)?;
 

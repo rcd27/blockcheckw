@@ -374,7 +374,7 @@ pub struct ScanProgress {
     pub domain: String,
     pub output: Option<String>,
     pub block_type: blockcheckw::dto::BlockType,
-    pub dns_spoofed: bool,
+    pub dns_spoofed: blockcheckw::dto::DnsSpoofed,
     blocked: Vec<blockcheckw::config::Protocol>,
     completed: Vec<blockcheckw::pipeline::report::ProtocolSummary>,
     current: Option<CurrentProto>,
@@ -386,7 +386,7 @@ impl ScanProgress {
             domain,
             output,
             block_type: blockcheckw::dto::BlockType::NotBlocked,
-            dns_spoofed: false,
+            dns_spoofed: blockcheckw::dto::DnsSpoofed::Unchecked,
             blocked: Vec::new(),
             completed: Vec::new(),
             current: None,
@@ -406,7 +406,7 @@ impl ScanProgress {
     }
 
     /// Record the DNS-spoofing flag so an interrupted scan persists it too.
-    pub fn set_dns_spoofed(&mut self, dns_spoofed: bool) {
+    pub fn set_dns_spoofed(&mut self, dns_spoofed: blockcheckw::dto::DnsSpoofed) {
         self.dns_spoofed = dns_spoofed;
     }
 
@@ -856,18 +856,13 @@ pub fn check_prerequisites(con: &blockcheckw::ui::Console) -> Prerequisites {
             "{{\"outcome\":\"broken\",\"reason\":\"queue_busy\",\"queue\":{}}}",
             config.base_qnum
         );
-        std::process::exit(EXIT_QUEUE_BUSY);
+        std::process::exit(blockcheckw::dto::EXIT_QUEUE_BUSY);
     }
 
     Prerequisites {
         filter_mark: witness.expect("ok означает, что свидетельство есть"),
     }
 }
-
-/// Код выхода «боевая очередь занята». Отдельный от общего отказа преflight'а (6): для
-/// оркестратора это не «инструмент сломан», а «место занято» — лечится другой очередью
-/// (`--qnum`), а не починкой установки.
-pub const EXIT_QUEUE_BUSY: i32 = 7;
 
 /// Занята ли очередь прямо сейчас. Читаем procfs тем же способом, что и исполнитель
 /// (`nfqws2::run`): недоступный procfs означает «не знаем», и тогда не мешаем — остановит

@@ -110,6 +110,16 @@ struct Cli {
     #[arg(long, value_name = "N")]
     smoke_qnum_base: Option<u16>,
 
+    /// Отдавать подтверждённые стратегии ПОТОКОМ (ndjson в stdout), не дожидаясь конца
+    /// прогона: пока идёт подбор, цель в карантине, и первая же годная стратегия лечит.
+    #[arg(long, global = true)]
+    stream: bool,
+
+    /// Печатать ход работы машиночитаемо (ndjson в stderr): фаза, сделано, всего, секунды.
+    /// Чтобы «встал» судилось сроком, а не гаданием по выводу для человека.
+    #[arg(long, global = true)]
+    progress: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -181,6 +191,14 @@ enum Command {
         /// том же числе рабочих. Порог видно в отчёте рядом с `longest_silence_ms`.
         #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(100..=60_000))]
         idle_ms: u64,
+
+        /// Общий срок прогона в секундах (0 — без срока).
+        ///
+        /// По истечении перебор прекращается, а отдаётся ТО, ЧТО УСПЕЛО подтвердиться:
+        /// пустой отчёт по сроку наказывал бы человека за нашу медлительность. Исход при
+        /// этом честно называется `censored`/`stopped_at: deadline` — замер не полон.
+        #[arg(long, default_value_t = 0)]
+        deadline: u64,
 
         /// Stop the SEARCH after N PASSING strategies, per protocol (0 = check all).
         /// Выдачу не урезает: в отчёт идёт всякая наблюдённая стратегия, ранжированная
@@ -468,6 +486,8 @@ async fn main() {
     // Пробы без десинка несут собственную марку процесса, чтобы хозяин ядра отличил наш трафик
     // от трафика человека и не увёл его вместе с ним в карантин.
     blockcheckw::nfqws2::mark::set_embedded(embedded);
+    blockcheckw::machine::set_stream(cli.stream);
+    blockcheckw::machine::set_progress(cli.progress);
 
     // Пространства имён ядра — от вызывающего, а не от умолчания: у него эти очереди, таблицы
     // и биты марки уже заняты, и заняты плотно.
@@ -693,6 +713,7 @@ async fn main() {
                 from_file,
                 domain,
                 dns,
+                deadline,
                 timeout,
                 idle_ms,
                 take,
@@ -749,6 +770,7 @@ async fn main() {
                     timeout,
                     idle_ms,
                     take,
+                    deadline_secs: deadline,
                     passes,
                     output: output.as_deref(),
                     via: via.as_ref(),

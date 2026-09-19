@@ -21,6 +21,8 @@ pub struct CheckParams<'a> {
     /// Порог тишины пробы (`Expiry::Idle`), миллисекунды.
     pub idle_ms: u64,
     pub take: usize,
+    /// Общий срок прогона в секундах, 0 — без срока.
+    pub deadline_secs: u64,
     /// `M` — сколько раз мерить байтовую ось (спека §6-тер).
     pub passes: usize,
     pub output: Option<&'a str>,
@@ -52,6 +54,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         timeout,
         idle_ms,
         take,
+        deadline_secs,
         passes,
         output,
         via,
@@ -256,6 +259,7 @@ pub async fn run_check_cmd(params: CheckParams<'_>) {
         &ips,
         take,
         passes,
+        (deadline_secs > 0).then(|| std::time::Duration::from_secs(deadline_secs)),
         patience,
         &references,
         &probe_path,

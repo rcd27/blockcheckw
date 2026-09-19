@@ -44,6 +44,9 @@ impl RunStats {
     }
 }
 
+/// Через сколько проверенных стратегий отмечать ход работы машиночитаемо.
+const PROGRESS_EVERY: usize = 250;
+
 /// Прекратить выдачу новых планов.
 ///
 /// Дедлайн — штатный конец прогона. Shutdown — Ctrl+C: cleanup сносит нашу
@@ -326,6 +329,17 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
                         pb.suspend(|| println!("{line}"));
                     }
                     pb.inc(1);
+                    // МАШИННЫЙ ПРОГРЕСС — не каждый результат, а раз в двести пятьдесят:
+                    // при корпусе в 14 тысяч построчная выдача сама стала бы работой, а
+                    // читателю нужен ответ на «жив или встал», а не полная летопись.
+                    if all_results.len().is_multiple_of(PROGRESS_EVERY) {
+                        crate::machine::emit_progress(
+                            "scan",
+                            all_results.len(),
+                            strategies.len(),
+                            start.elapsed().as_secs_f64(),
+                        );
+                    }
 
                     all_results.push(StrategyResult {
                         strategy_args,
@@ -367,6 +381,14 @@ pub async fn run_parallel(params: RunParams<'_>) -> (Vec<StrategyResult>, RunSta
     let _ = table.drop_table(&SystemNft).await;
 
     let elapsed = start.elapsed();
+    // Итоговая отметка: без неё последняя машинная строка застревала бы на кратном 250, и
+    // читатель не отличил бы «кончили» от «встали на 13 750-й».
+    crate::machine::emit_progress(
+        "scan",
+        all_results.len(),
+        strategies.len(),
+        elapsed.as_secs_f64(),
+    );
     let stats = RunStats {
         total: strategies.len(),
         completed: all_results.len(),

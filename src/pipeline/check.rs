@@ -52,6 +52,9 @@ pub async fn run_check(
     ips: &[String],
     take: usize,
     passes: usize,
+    // Общий срок прогона. По его истечении перебор прекращается, а отдаётся ТО, ЧТО УСПЕЛО
+    // подтвердиться: пустой отчёт по сроку был бы наказанием человеку за нашу медлительность.
+    deadline: Option<std::time::Duration>,
     patience: Patience,
     references: &References,
     probe_path: &str,
@@ -173,7 +176,30 @@ pub async fn run_check(
     // были сохранены ровно для этого, когда их вызов сняли при `passes == 1`.
     let mut rows: Vec<Vec<PassOutcome>> = Vec::new();
 
+    // Истёк ли срок — считается ПЕРЕД каждой стратегией, а не раз в прогон: проба идёт
+    // секундами, и проверка на входе в цикл отдаёт результат ближе к сроку, а не после него.
+    let mut ran_out_of_time = false;
+
     for (idx, tagged) in strategies.iter().enumerate() {
+        if let Some(limit) = deadline {
+            if start.elapsed() >= limit {
+                ran_out_of_time = true;
+                screen.println(&format!(
+                    "  {} срок прогона истёк ({} с) — отдаю то, что успело подтвердиться",
+                    style("ВНИМАНИЕ:").yellow().bold(),
+                    limit.as_secs(),
+                ));
+                break;
+            }
+        }
+
+        crate::machine::emit_progress(
+            "check",
+            checked_count,
+            strategies.len(),
+            start.elapsed().as_secs_f64(),
+        );
+
         // Skip this protocol if we already have enough perfect strategies
         if take > 0 {
             let perfect = perfect_per_proto
@@ -269,7 +295,7 @@ pub async fn run_check(
         // стратегия не имеет права отсутствовать в выдаче, человек видит её вместо
         // пустого списка.
         if belongs_in_report(checked.circle, checked.working) {
-            verified.push(VerifiedStrategy {
+            let row = VerifiedStrategy {
                 protocol: tagged.protocol.to_string(),
                 args: args_str.clone(),
                 coverage: tagged.coverage,
@@ -286,7 +312,14 @@ pub async fn run_check(
                 observed: checked.observed.clone(),
                 admits: checked.admits.clone(),
                 working: checked.working,
-            });
+            };
+            // ПОТОК: подтверждённая стратегия отдаётся немедленно, не дожидаясь конца
+            // перебора. Цель сейчас в карантине, и человек ждёт под укрытием — первая же
+            // годная стратегия его лечит, а порядок по рангу нужен лишь в итоговом отчёте.
+            if row.working {
+                crate::machine::emit_working(&row);
+            }
+            verified.push(row);
             judged.push(rank::Ranked {
                 full_delivery: (checked.passes_ok, checked.passes_total),
                 median_share: checked.median_share,
@@ -348,6 +381,7 @@ pub async fn run_check(
             checked: checked_count,
             total: strategies.len(),
             take,
+            ran_out_of_time,
         }),
         run,
         domain: domain.to_string(),
@@ -373,6 +407,8 @@ struct OutcomeInput {
     total: usize,
     /// `--take`, 0 — не задан.
     take: usize,
+    /// Перебор прекращён истёкшим сроком.
+    ran_out_of_time: bool,
 }
 
 /// ИСХОД ПРОГОНА — то, по чему продукт решает, снимать ли лечение.
@@ -387,12 +423,22 @@ fn outcome_of(input: OutcomeInput) -> Outcome {
         return Outcome::NotBlocked;
     }
     if input.working > 0 {
+        // Срок важнее `--take`: если оборвал нас он, читателю надо знать, что за обрывом
+        // могло остаться ещё, — тогда как `--take` означает «мы нашли, сколько просили».
+        let stopped_at = match (
+            input.ran_out_of_time,
+            input.take > 0 && input.working >= input.take,
+        ) {
+            (true, _) => Some(Limit::Deadline),
+            (false, true) => Some(Limit::Take),
+            (false, false) => None,
+        };
         return Outcome::Found {
             working: input.working,
-            stopped_at: (input.take > 0 && input.working >= input.take).then_some(Limit::Take),
+            stopped_at,
         };
     }
-    match input.checked >= input.total {
+    match input.checked >= input.total && !input.ran_out_of_time {
         true => Outcome::NothingWorks {
             candidates: input.checked,
         },

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.1](https://github.com/rcd27/blockcheckw/compare/v0.12.0...v0.12.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **clippy:** цикл из одного элемента - линт stable 1.99 (CI) ([0db1f45](https://github.com/rcd27/blockcheckw/commit/0db1f4514339807c309ab2cee46d76d24cd059f9))
+* **nfqws2:** stderr движка на боевом пути перехватывается хвостом ([#95](https://github.com/rcd27/blockcheckw/issues/95)) ([4135ef9](https://github.com/rcd27/blockcheckw/commit/4135ef9bcd195c04596c316372a801704d627300))
+
 ## [0.12.0](https://github.com/rcd27/blockcheckw/compare/v0.11.4...v0.12.0) (2026-09-19)
 
 
